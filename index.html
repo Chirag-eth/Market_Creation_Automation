@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fixture JSON Verifier</title>
+  <link rel="icon" type="image/jpeg" href="favicon.jpg" />
+  <link rel="shortcut icon" type="image/jpeg" href="favicon.jpg" />
+  <link rel="apple-touch-icon" href="favicon.jpg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script type="module" src="src/main.js"></script>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="hero">
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <p class="hero-kicker">Prediction Markets Factory</p>
+          <h1>Fixture & Parent Market Verifier</h1>
+          <p class="hero-lede">
+            Verify existing payloads, generate new fixture and parent market JSON from event input, and
+            format vault payloads from token IDs in one workspace.
+          </p>
+        </div>
+        <div class="hero-panel" aria-label="Workflow overview">
+          <p class="hero-panel-label">Workflow</p>
+          <ol class="hero-steps">
+            <li>Refresh the CSV catalog whenever source files change.</li>
+            <li>Verify pasted payloads or generate a fresh fixture bundle.</li>
+            <li>Use Vault Formatter when token IDs and market IDs are ready.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="hero-pills" aria-label="Capabilities">
+        <span class="hero-pill">CSV-backed catalog</span>
+        <span class="hero-pill">Background verify</span>
+        <span class="hero-pill">Single-event generation</span>
+        <span class="hero-pill">Vault formatter</span>
+      </div>
+    </header>
+
+    <nav class="quick-nav" aria-label="Jump to section">
+      <a class="quick-nav-link" href="#catalogSection">Catalog</a>
+      <a class="quick-nav-link" href="#verifySection">Verify</a>
+      <a class="quick-nav-link" href="#generateSection">Generate</a>
+      <a class="quick-nav-link" href="#vaultSection">Vault</a>
+    </nav>
+
+    <section class="overview-strip" aria-label="Workspace overview">
+      <article id="catalogOverviewCard" class="overview-card" data-tone="idle">
+        <span class="overview-label">Catalog</span>
+        <strong id="catalogOverviewValue" class="overview-value">Loading</strong>
+        <p id="catalogOverviewNote" class="overview-note">Reading CSV source of truth</p>
+      </article>
+
+      <article id="verifyOverviewCard" class="overview-card" data-tone="idle">
+        <span class="overview-label">Verify</span>
+        <strong id="verifyOverviewValue" class="overview-value">Idle</strong>
+        <p id="verifyOverviewNote" class="overview-note">Background checks wait for input</p>
+      </article>
+
+      <article id="generateOverviewCard" class="overview-card" data-tone="idle">
+        <span class="overview-label">Generate</span>
+        <strong id="generateOverviewValue" class="overview-value">Ready</strong>
+        <p id="generateOverviewNote" class="overview-note">Event name to fixture + parent JSON</p>
+      </article>
+
+      <article id="vaultOverviewCard" class="overview-card" data-tone="idle">
+        <span class="overview-label">Vault</span>
+        <strong id="vaultOverviewValue" class="overview-value">Ready</strong>
+        <p id="vaultOverviewNote" class="overview-note">Single and bulk vault formatter</p>
+      </article>
+    </section>
+
+    <section id="catalogSection" class="card catalog-card">
+      <div class="card-head">
+        <h2>1. Catalog Source</h2>
+        <button id="reloadCatalogBtn" class="btn btn-secondary" type="button">Reload CSV Catalog</button>
+      </div>
+      <div id="catalogStatus" class="status status-idle">Loading CSV catalog...</div>
+    </section>
+
+    <section id="verifySection" class="card">
+      <div class="card-head verify-card-head">
+        <button
+          id="verifyToggleBtn"
+          class="section-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="verifyEditor"
+        >
+          <span class="section-toggle-title">2. Verify Existing JSON</span>
+          <span id="verifyToggleCaption" class="section-toggle-caption">Editor collapsed. Click to paste or inspect raw payloads.</span>
+        </button>
+        <div class="actions-inline">
+          <button id="verifyBothBtn" class="btn" type="button">Verify Both</button>
+          <button id="verifyFixtureBtn" class="btn btn-secondary" type="button">Fixture Only</button>
+          <button id="verifyParentBtn" class="btn btn-secondary" type="button">Parent Only</button>
+          <button id="copyVerifyReportBtn" class="btn btn-secondary" type="button">Copy Report</button>
+        </div>
+      </div>
+      <div class="section-inline-note">
+        <span class="mini-badge mini-badge-live">Background verify on</span>
+        <p>The verification report below updates while you type, even when the editor stays collapsed.</p>
+      </div>
+      <div id="verifyEditor" class="verify-editor" hidden>
+        <div class="grid two-col">
+          <label class="field">
+            <span class="field-head">
+              <span>Fixture JSON</span>
+              <span class="input-tools">
+                <button id="fixtureSampleBtn" class="btn btn-secondary btn-mini" type="button">Sample</button>
+                <button id="fixtureFormatBtn" class="btn btn-secondary btn-mini" type="button">Format</button>
+                <button id="fixtureClearBtn" class="btn btn-secondary btn-mini" type="button">Clear</button>
+              </span>
+            </span>
+            <textarea id="fixtureInputJson" class="json-input" spellcheck="false" placeholder='{"name":"Wolves vs Aston Villa", ...}'></textarea>
+            <span id="fixtureJsonMeta" class="json-meta">Empty</span>
+          </label>
+
+          <label class="field">
+            <span class="field-head">
+              <span>Parent Market JSON</span>
+              <span class="input-tools">
+                <button id="parentSampleBtn" class="btn btn-secondary btn-mini" type="button">Sample</button>
+                <button id="parentFormatBtn" class="btn btn-secondary btn-mini" type="button">Format</button>
+                <button id="parentClearBtn" class="btn btn-secondary btn-mini" type="button">Clear</button>
+              </span>
+            </span>
+            <textarea id="parentInputJson" class="json-input" spellcheck="false" placeholder='{"parent_market": {...}, "markets": [...]}'></textarea>
+            <span id="parentJsonMeta" class="json-meta">Empty</span>
+          </label>
+        </div>
+      </div>
+
+      <div id="verifyOutput" class="result-panel" aria-live="polite">No verification run yet.</div>
+    </section>
+
+    <section id="generateSection" class="card">
+      <div class="card-head">
+        <h2>3. Generate JSON From Event Name</h2>
+        <div class="actions-inline">
+          <button id="generateBtn" class="btn" type="button">Generate Fixture + Parent JSON</button>
+          <button id="copyGenerationStatusBtn" class="btn btn-secondary" type="button">Copy Status</button>
+        </div>
+      </div>
+      <p class="section-blurb">Use event details to generate fixture + parent market payloads, then copy either output block.</p>
+
+      <div class="stacked-panels">
+        <section class="subsurface">
+          <div class="subsurface-head">
+            <div>
+              <h3>Event Setup</h3>
+              <p>Start with the match name, then override league or type reference only if needed.</p>
+            </div>
+          </div>
+          <div class="grid two-col">
+            <label class="field span-2">
+              Event Name
+              <input id="generateEventNameInput" type="text" placeholder="Man Utd vs Aston Villa" />
+            </label>
+
+            <label class="field">
+              League (optional)
+              <select id="generateLeagueSelect">
+                <option value="">Auto-detect from teams</option>
+              </select>
+            </label>
+
+            <label class="field">
+              Type Reference ID (optional)
+              <input id="generateTypeRefInput" type="text" placeholder="UUID" />
+            </label>
+          </div>
+        </section>
+
+        <section class="subsurface">
+          <div class="subsurface-head">
+            <div>
+              <h3>Schedule & Metadata</h3>
+              <p>All date and time inputs here are UTC. Match and location details stay optional.</p>
+            </div>
+          </div>
+          <div class="grid two-col">
+            <label class="field">
+              Fixture Date (UTC)
+              <input id="generateFixtureDateInput" type="date" />
+            </label>
+
+            <label class="field">
+              Kickoff Time (UTC)
+              <input id="generateKickoffTimeInput" type="time" step="60" />
+            </label>
+
+            <label class="field">
+              Match Day
+              <input id="generateMatchDayInput" type="number" min="1" step="1" placeholder="28" />
+            </label>
+
+            <label class="field">
+              Match Week (optional)
+              <input id="generateMatchWeekInput" type="number" min="1" step="1" placeholder="Optional" />
+            </label>
+
+            <label class="field">
+              Location (optional)
+              <input id="generateLocationInput" type="text" placeholder="Optional" />
+            </label>
+
+            <label class="field">
+              Venue (optional)
+              <input id="generateVenueInput" type="text" placeholder="Optional" />
+            </label>
+          </div>
+        </section>
+      </div>
+
+      <div class="section-inline-note section-inline-note-soft">
+        <span class="mini-badge">Auto-fill</span>
+        <p>Successful generation writes both JSON payloads back into the Verify section and re-checks them in the background.</p>
+      </div>
+      <div id="generationStatus" class="result-panel" aria-live="polite">Waiting for input.</div>
+
+      <div class="grid two-col output-grid">
+        <div class="output-block">
+          <div class="output-head">
+            <h3>Generated Fixture JSON</h3>
+            <button id="copyGeneratedFixtureBtn" class="btn btn-secondary" type="button">Copy</button>
+          </div>
+          <pre id="generatedFixtureOutput" class="json-output">{}</pre>
+        </div>
+
+        <div class="output-block">
+          <div class="output-head">
+            <h3>Generated Parent Market JSON</h3>
+            <button id="copyGeneratedParentBtn" class="btn btn-secondary" type="button">Copy</button>
+          </div>
+          <pre id="generatedParentOutput" class="json-output">{}</pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="vaultSection" class="card">
+      <details id="vaultCollapsible" class="collapsible-block">
+        <summary class="vault-summary">
+          <span class="vault-summary-title">4. Vault Formatter</span>
+          <span class="vault-summary-subtitle">Vault Inputs & Output</span>
+        </summary>
+        <div class="collapsible-content">
+          <section class="subsurface">
+            <div class="vault-actions-row">
+              <p class="section-blurb">Build a vault payload from fixture text and token IDs with deterministic naming and optional market ID override.</p>
+              <div class="actions-inline">
+                <button id="vaultGenerateBtn" class="btn" type="button">Generate Vault JSON</button>
+                <button id="copyVaultStatusBtn" class="btn btn-secondary" type="button">Copy Status</button>
+                <button id="copyVaultOutputBtn" class="btn btn-secondary" type="button">Copy Vault JSON</button>
+              </div>
+            </div>
+
+            <div class="grid two-col">
+              <label class="field span-2">
+                Fixture Name
+                <input id="vaultFixtureNameInput" type="text" placeholder="Galatasaray vs Liverpool" />
+              </label>
+
+              <label class="field">
+                YES Token ID
+                <input id="vaultYesTokenInput" type="text" placeholder="Numeric token id" />
+              </label>
+
+              <label class="field">
+                NO Token ID
+                <input id="vaultNoTokenInput" type="text" placeholder="Numeric token id" />
+              </label>
+
+              <label class="field">
+                League Code
+                <select id="vaultLeagueCodeSelect">
+                  <option value="UCL">UCL</option>
+                  <option value="EPL">EPL</option>
+                  <option value="LALIGA">LALIGA</option>
+                </select>
+              </label>
+
+              <label class="field">
+                Market ID (optional)
+                <input id="vaultMarketIdInput" type="text" placeholder="0x... (optional override)" />
+              </label>
+
+              <label class="field span-2">
+                Name Prefix (optional; must be HOME/AWAY code or DRAW)
+                <input id="vaultMarketPrefixInput" type="text" placeholder="Optional. Allowed: home code, away code, or DRAW." />
+              </label>
+            </div>
+
+            <p class="hint">Naming format: <code>PREFIX_HOME_vs_AWAY_LEAGUE_YEAR</code> (example: <code>DRAW_GAL_vs_LIV_UCL_2026</code>). Vault formatter does not validate teams/leagues from CSV.</p>
+            <div id="vaultStatus" class="result-panel" aria-live="polite">Waiting for vault formatter input.</div>
+            <pre id="vaultOutput" class="json-output">{}</pre>
+          </section>
+
+          <hr class="section-divider" />
+          <section class="subsurface">
+            <div class="card-head">
+              <h3>Bulk Vault Formatter</h3>
+              <div class="actions-inline">
+                <button id="vaultBulkGenerateBtn" class="btn" type="button">Generate Bulk Vault JSON</button>
+                <button id="copyVaultBulkStatusBtn" class="btn btn-secondary" type="button">Copy Status</button>
+                <button id="copyVaultBulkOutputBtn" class="btn btn-secondary" type="button">Copy JSON</button>
+              </div>
+            </div>
+            <p class="section-blurb">Upload or paste vault rows in CSV, TSV, JSON, or SQL-style table form. For raw vault API responses, add a second mapping file keyed by <code>market_id</code>.</p>
+            <input id="vaultBulkFileInput" type="file" accept=".csv,.tsv,.txt,.sql,.log,.json,text/plain,application/json" hidden />
+            <input id="vaultBulkMappingFileInput" type="file" accept=".csv,.tsv,.txt,.sql,.log,.json,text/plain,application/json" hidden />
+
+            <label class="field">
+              <span class="field-head">
+                <span>Bulk Vault Rows</span>
+                <span class="input-tools">
+                  <button id="vaultBulkUploadBtn" class="btn btn-secondary btn-mini" type="button">Upload File</button>
+                  <button id="vaultBulkClearBtn" class="btn btn-secondary btn-mini" type="button">Clear</button>
+                </span>
+              </span>
+              <textarea id="vaultBulkRowsInput" class="json-input" spellcheck="false" placeholder='fixture_name,yes_token_id,no_token_id,league_code,market_id,market_prefix
+NEW vs FCB,72390989656394092723709285047039935596255450081364429237891273051103304153527,8975346952598897262687996252702979373792093357160517170366933722560510069626,UCL,,DRAW'></textarea>
+              <span id="vaultBulkFileMeta" class="json-meta">No vault bulk file loaded</span>
+            </label>
+
+            <label class="field">
+              <span class="field-head">
+                <span>Vault Mapping Rows (optional, required for raw JSON response input)</span>
+                <span class="input-tools">
+                  <button id="vaultBulkMappingUploadBtn" class="btn btn-secondary btn-mini" type="button">Upload Mapping</button>
+                  <button id="vaultBulkMappingClearBtn" class="btn btn-secondary btn-mini" type="button">Clear</button>
+                </span>
+              </span>
+              <textarea id="vaultBulkMappingInput" class="json-input" spellcheck="false" placeholder='market_id,fixture_name,league_code,market_prefix
+0x43af4ae35c3c74ca96c72d314f55b2cd5879942795bae37e1d43a06dd3c00500,NEW vs FCB,UCL,NEW'></textarea>
+              <span id="vaultBulkMappingFileMeta" class="json-meta">No vault mapping file loaded</span>
+            </label>
+
+            <p class="hint">Supported bulk-row headers: <code>fixture_name</code>, <code>yes_token_id</code>, <code>no_token_id</code>, <code>league_code</code>, <code>market_id</code>, <code>market_prefix</code>. The uploaded vault JSON response format with <code>data.markets</code> is recognized directly. When using that JSON shape, add a mapping file with <code>market_id</code>, <code>fixture_name</code>, <code>league_code</code>, and <code>market_prefix</code>.</p>
+            <div id="vaultBulkStatus" class="result-panel" aria-live="polite">Waiting for vault bulk input.</div>
+            <pre id="vaultBulkOutput" class="json-output">[]</pre>
+          </section>
+        </div>
+      </details>
+    </section>
+  </main>
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>
