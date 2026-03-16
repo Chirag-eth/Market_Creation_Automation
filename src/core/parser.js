@@ -1,4 +1,4 @@
-import { DEFAULT_MARKETS_OPEN_LEAD_HOURS, FIXTURE_LOGO_URL } from "./constants.js";
+import { DEFAULT_MARKETS_OPEN_LEAD_HOURS, FIXTURE_LOGO_URL } from "../shared/constants.js";
 import {
   formatYyyyMmDd,
   generateCodeFromName,
@@ -8,7 +8,7 @@ import {
   slugify,
   toTitleLike,
   tokenOverlapScore,
-} from "./util.js";
+} from "../shared/util.js";
 
 export function inferFixturesFromOcrArtifacts(ocrArtifacts, { leagues, teams, teamAliasIndex } = {}) {
   const text = String(ocrArtifacts?.text || "");

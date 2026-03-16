@@ -1,4 +1,4 @@
-import { FALLBACK_LEAGUES, FALLBACK_TEAMS } from "./fallbackCatalog.js";
+import { FALLBACK_LEAGUES, FALLBACK_TEAMS } from "../data/fallbackCatalog.js";
 
 export function createInitialState() {
   return {

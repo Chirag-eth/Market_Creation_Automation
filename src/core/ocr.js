@@ -1,4 +1,4 @@
-import { createLogger } from "./logger.js";
+import { createLogger } from "../shared/logger.js";
 
 const OCR_PRIMARY_LANG = "eng";
 const OCR_TOTAL_TIMEOUT_MS = 60_000;

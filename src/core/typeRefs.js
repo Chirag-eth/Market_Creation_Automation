@@ -1,4 +1,4 @@
-import { isValidUuid, normalizeForSearch } from "./util.js";
+import { isValidUuid, normalizeForSearch } from "../shared/util.js";
 
 export function parseTypeRefLines(rawInput) {
   const entries = [];

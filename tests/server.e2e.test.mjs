@@ -9,6 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const WORKSPACE = path.resolve(path.dirname(__filename), "..");
 const LEAGUES_CSV = `${WORKSPACE}/Info-source/leagues.csv`;
 const TEAMS_CSV = `${WORKSPACE}/Info-source/teams.csv`;
+const EPL_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/epl_schedule.sample.json`;
 
 function nextPort() {
   return 24000 + Math.floor(Math.random() * 2000);
@@ -31,6 +32,8 @@ test("server e2e: static auth, api auth, and rate limiting", async (t) => {
       API_BEARER_TOKEN: bearer,
       API_RATE_MAX_REQUESTS: "6",
       API_RATE_WINDOW_MS: "60000",
+      SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH: EPL_SCHEDULE_FIXTURE,
+      SCHEDULE_NOW_ISO: "2026-03-16T14:00:00Z",
     },
   });
 
@@ -76,6 +79,19 @@ test("server e2e: static auth, api auth, and rate limiting", async (t) => {
   const meta = await apiAllowed.json();
   assert.equal(typeof meta?.counts?.leagues, "number");
   assert.equal(typeof meta?.counts?.teams, "number");
+
+  const schedules = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=epl`, {
+    headers: { Authorization: `Bearer ${bearer}` },
+  });
+  assert.equal(schedules.status, 200);
+  const scheduleBody = await schedules.json();
+  assert.equal(scheduleBody?.league, "epl");
+  assert.equal(scheduleBody?.reference_now, "2026-03-16T14:00:00.000Z");
+  assert.equal(scheduleBody?.selected_week, 30);
+  assert.equal(scheduleBody?.selected_label, "Matchday 30");
+  assert.equal(Array.isArray(scheduleBody?.fixtures), true);
+  assert.equal(scheduleBody.fixtures.length, 1);
+  assert.equal(scheduleBody.fixtures[0]?.eventName, "Brentford FC vs Wolverhampton Wanderers FC");
 
   const rateStatuses = [];
   for (let i = 0; i < 8; i += 1) {

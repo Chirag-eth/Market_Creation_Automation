@@ -1,0 +1,38 @@
+[
+  {
+    "GameId": 900001,
+    "Week": 30,
+    "DateTime": "2026-03-14T12:30:00",
+    "Status": "Final",
+    "IsClosed": true,
+    "HomeTeamName": "Tottenham Hotspur FC",
+    "AwayTeamName": "Chelsea FC"
+  },
+  {
+    "GameId": 900002,
+    "Week": 30,
+    "DateTime": "2026-03-16T20:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Brentford FC",
+    "AwayTeamName": "Wolverhampton Wanderers FC"
+  },
+  {
+    "GameId": 900003,
+    "Week": 31,
+    "DateTime": "2026-03-20T20:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "AFC Bournemouth",
+    "AwayTeamName": "Manchester United FC"
+  },
+  {
+    "GameId": 900004,
+    "Week": 31,
+    "DateTime": "2026-03-21T12:30:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Brighton & Hove Albion FC",
+    "AwayTeamName": "Liverpool FC"
+  }
+]

@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { selectUpcomingSportsDataWeek } from "./src/data/schedules.js";
+
 loadDotEnv(path.resolve(process.cwd(), ".env"));
 
 const PORT = parsePositiveIntegerEnv(process.env.PORT, 2020, { min: 1 });
@@ -20,6 +22,15 @@ const APP_BASIC_AUTH_USER = String(process.env.APP_BASIC_AUTH_USER || "").trim()
 const APP_BASIC_AUTH_PASS = String(process.env.APP_BASIC_AUTH_PASS || "").trim();
 const API_RATE_WINDOW_MS = parsePositiveIntegerEnv(process.env.API_RATE_WINDOW_MS, 60_000, { min: 1_000 });
 const API_RATE_MAX_REQUESTS = parsePositiveIntegerEnv(process.env.API_RATE_MAX_REQUESTS, 180, { min: 1 });
+const SCHEDULE_CACHE_TTL_MS = parsePositiveIntegerEnv(process.env.SCHEDULE_CACHE_TTL_MS, 300_000, { min: 1_000 });
+const SCHEDULE_FETCH_TIMEOUT_MS = parsePositiveIntegerEnv(process.env.SCHEDULE_FETCH_TIMEOUT_MS, 8_000, { min: 1_000 });
+const SPORTSDATA_API_KEY = String(process.env.SPORTSDATA_API_KEY || "").trim();
+const SPORTSDATA_SCHEDULE_BASE_URL = String(process.env.SPORTSDATA_SCHEDULE_BASE_URL || "https://api.sportsdata.io/v4/soccer/scores/json/Schedule").trim();
+const SPORTSDATA_SCHEDULE_SEASON = parsePositiveIntegerEnv(process.env.SPORTSDATA_SCHEDULE_SEASON, 2026, { min: 2000 });
+const SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH = String(process.env.SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH || "").trim();
+const SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH = String(process.env.SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH || "").trim();
+const SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH = String(process.env.SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH || "").trim();
+const SCHEDULE_NOW_ISO = String(process.env.SCHEDULE_NOW_ISO || "").trim();
 
 validateRuntimeConfig();
 
@@ -57,6 +68,7 @@ const SECURITY_HEADERS = {
 
 let catalogCache = null;
 const apiRateCounters = new Map();
+const scheduleCache = new Map();
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -117,6 +129,11 @@ const server = http.createServer(async (req, res) => {
 
     if (requestUrl.pathname === "/api/catalog/meta") {
       await handleCatalogMetaRequest(res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/schedules/upcoming") {
+      await handleUpcomingScheduleRequest(requestUrl, res);
       return;
     }
 
@@ -268,6 +285,188 @@ async function handleCatalogMetaRequest(res) {
       source: sourceMeta,
     });
   }
+}
+
+async function handleUpcomingScheduleRequest(requestUrl, res) {
+  const requestedLeague = String(requestUrl.searchParams.get("league") || "").trim().toLowerCase();
+  const leagueCode = normalizeScheduleLeagueCode(requestedLeague);
+  const requestedNow = String(requestUrl.searchParams.get("now") || "").trim();
+  if (!leagueCode) {
+    sendJson(res, 400, {
+      error: "Unsupported league",
+      detail: "Pass ?league=epl, ?league=ucl, or ?league=laliga for the wired schedule provider.",
+    });
+    return;
+  }
+
+  let referenceNow = null;
+  if (requestedNow) {
+    const parsed = new Date(requestedNow);
+    if (Number.isNaN(parsed.getTime())) {
+      sendJson(res, 400, {
+        error: "Invalid now parameter",
+        detail: "Pass ?now as a valid ISO-8601 UTC timestamp.",
+      });
+      return;
+    }
+    referenceNow = parsed;
+  }
+
+  try {
+    const payload = await getUpcomingSchedulePayload(leagueCode, {
+      refresh: requestUrl.searchParams.get("refresh") === "1",
+      now: referenceNow,
+    });
+    sendJson(res, 200, payload, {
+      "Cache-Control": "no-store",
+    });
+  } catch (error) {
+    sendJson(res, 502, {
+      error: "Failed to load schedule data",
+      detail: String(error?.message || error),
+      league: leagueCode,
+    });
+  }
+}
+
+async function getUpcomingSchedulePayload(leagueCode, { refresh = false, now = null } = {}) {
+  const resolvedNow = now instanceof Date && !Number.isNaN(now.getTime()) ? new Date(now.getTime()) : resolveScheduleNow();
+  const referenceNowIso = resolvedNow.toISOString();
+  const cacheKey = `${String(leagueCode || "").trim().toLowerCase()}::${referenceNowIso}`;
+  const cacheRecord = scheduleCache.get(cacheKey);
+  if (!refresh && cacheRecord && cacheRecord.expiresAt > Date.now()) {
+    return cacheRecord.payload;
+  }
+
+  const rawRows = await fetchRawScheduleRows(leagueCode);
+  const selection = selectUpcomingSportsDataWeek(rawRows, { now: resolvedNow });
+  const payload = {
+    league: String(leagueCode || "").trim().toLowerCase(),
+    source: "sportsdata",
+    fetched_at: new Date().toISOString(),
+    reference_now: referenceNowIso,
+    selected_week: selection.selectedWeek,
+    selected_label: selection.selectedLabel,
+    selection_mode: selection.selectionMode,
+    fixtures: selection.fixtures,
+  };
+
+  scheduleCache.set(cacheKey, {
+    expiresAt: Date.now() + SCHEDULE_CACHE_TTL_MS,
+    payload,
+  });
+
+  return payload;
+}
+
+async function fetchRawScheduleRows(leagueCode) {
+  const scheduleConfig = getSportsDataScheduleConfig(leagueCode);
+  if (!scheduleConfig) {
+    throw new Error(`Schedule provider is not configured for league "${leagueCode}".`);
+  }
+
+  if (scheduleConfig.fixturePath) {
+    const raw = await fs.readFile(path.resolve(ROOT_DIR, scheduleConfig.fixturePath), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      throw new Error(`${scheduleConfig.fixtureEnvName} must point to a JSON array.`);
+    }
+    return parsed;
+  }
+
+  if (!SPORTSDATA_API_KEY) {
+    throw new Error("SPORTSDATA_API_KEY is not configured on the server.");
+  }
+
+  const requestUrl = buildSportsDataScheduleUrl(scheduleConfig.competitionId);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SCHEDULE_FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(requestUrl, {
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`SportsData returned ${response.status}.`);
+    }
+
+    const parsed = await response.json();
+    if (!Array.isArray(parsed)) {
+      throw new Error("SportsData schedule response must be a JSON array.");
+    }
+    return parsed;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`SportsData request timed out after ${SCHEDULE_FETCH_TIMEOUT_MS}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function normalizeScheduleLeagueCode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized === "epl" || normalized === "english-premier-league" || normalized === "english premier league") {
+    return "epl";
+  }
+  if (normalized === "ucl" || normalized === "uefa-champions-league" || normalized === "uefa champions league" || normalized === "champions league") {
+    return "ucl";
+  }
+  if (normalized === "laliga" || normalized === "la-liga" || normalized === "la liga") {
+    return "laliga";
+  }
+  return "";
+}
+
+function getSportsDataScheduleConfig(leagueCode) {
+  if (leagueCode === "epl") {
+    return {
+      competitionId: 1,
+      fixturePath: SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH,
+      fixtureEnvName: "SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH",
+    };
+  }
+  if (leagueCode === "ucl") {
+    return {
+      competitionId: 3,
+      fixturePath: SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH,
+      fixtureEnvName: "SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH",
+    };
+  }
+  if (leagueCode === "laliga") {
+    return {
+      competitionId: 4,
+      fixturePath: SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH,
+      fixtureEnvName: "SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH",
+    };
+  }
+  return null;
+}
+
+function buildSportsDataScheduleUrl(competitionId) {
+  const base = SPORTSDATA_SCHEDULE_BASE_URL.replace(/\/+$/, "");
+  const url = new URL(`${base}/${competitionId}/${SPORTSDATA_SCHEDULE_SEASON}`);
+  url.searchParams.set("key", SPORTSDATA_API_KEY);
+  return url.toString();
+}
+
+function resolveScheduleNow() {
+  if (SCHEDULE_NOW_ISO) {
+    const parsed = new Date(SCHEDULE_NOW_ISO);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+  return new Date();
 }
 
 async function serveStaticFile(urlPathname, res) {

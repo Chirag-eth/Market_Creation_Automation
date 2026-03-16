@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { assignTypeRefsToFixtures, parseTypeRefLines } from "../src/typeRefs.js";
+import { assignTypeRefsToFixtures, parseTypeRefLines } from "../src/core/typeRefs.js";
 
 function makeFixture(name) {
   return {

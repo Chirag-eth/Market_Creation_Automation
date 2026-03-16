@@ -3,11 +3,11 @@ import {
   DEFAULT_FIXTURE_THEME,
   DEFAULT_DRAW_THEME,
   DRAW_LOGO_URL,
-} from "./constants.js";
+} from "../shared/constants.js";
 import { buildParentMarketPayload } from "./markets.js";
 import { collectFixtureBundleFromInference, findExactTeamForLeague } from "./parser.js";
 import { validateFixtureJson, validateParentMarketPayload } from "./validation.js";
-import { generateCodeFromName, isValidUuid, normalizeForSearch } from "./util.js";
+import { generateCodeFromName, isValidUuid, normalizeForSearch } from "../shared/util.js";
 
 export function parseJsonInput(rawValue, label) {
   const raw = String(rawValue || "").trim();
@@ -339,7 +339,7 @@ export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtur
   };
 }
 
-export function verifyBundleConsistency(fixture, parentPayload, catalog) {
+export function verifyBundleConsistency(fixture, parentPayload, catalog, { now } = {}) {
   const errors = [];
   const warnings = [];
   const info = [];
@@ -357,6 +357,7 @@ export function verifyBundleConsistency(fixture, parentPayload, catalog) {
   const parentCheck = verifyParentMarketJsonStrict(parentPayload, catalog, {
     fixture,
     fixtureResolved: fixtureCheck,
+    now,
   });
 
   if (!fixtureCheck.ok) {
@@ -394,6 +395,7 @@ export function generateFromEventInput(input, catalog) {
   const location = String(input?.location || "");
   const venue = String(input?.venue || "");
   const typeReferenceId = String(input?.typeReferenceId || "").trim();
+  const current = input?.now instanceof Date ? input.now : null;
 
   const parsedEvent = parseEventName(eventName);
   if (!parsedEvent) {
@@ -556,7 +558,6 @@ export function generateFromEventInput(input, catalog) {
     };
   }
 
-  const current = input?.now instanceof Date ? input.now : null;
   const fixtureCheck = verifyFixtureJsonStrict(bundle.fixtureJson, catalog);
   const parentCheck = verifyParentMarketJsonStrict(parentPayload, catalog, {
     fixture: bundle.fixtureJson,
@@ -570,6 +571,9 @@ export function generateFromEventInput(input, catalog) {
 
   if (errors.length === 0) {
     info.unshift("Generated fixture and parent market JSON passed strict CSV verification.");
+  }
+  if (current) {
+    info.push(`Deterministic reference UTC time: ${current.toISOString()}.`);
   }
 
   return {

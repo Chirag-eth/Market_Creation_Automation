@@ -1,4 +1,4 @@
-import { isValidUuid } from "./util.js";
+import { isValidUuid } from "../shared/util.js";
 
 const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

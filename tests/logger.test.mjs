@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { clearDebugLogs, createLogger, formatDebugLogs, getDebugLogs } from "../src/logger.js";
+import { clearDebugLogs, createLogger, formatDebugLogs, getDebugLogs } from "../src/shared/logger.js";
 
 test("logger captures entries and formats output", () => {
   clearDebugLogs();

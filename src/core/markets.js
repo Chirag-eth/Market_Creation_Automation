@@ -1,5 +1,5 @@
-import { DEFAULT_DRAW_THEME, DRAW_LOGO_URL, FIXTURE_LOGO_URL } from "./constants.js";
-import { isValidUuid } from "./util.js";
+import { DEFAULT_DRAW_THEME, DRAW_LOGO_URL, FIXTURE_LOGO_URL } from "../shared/constants.js";
+import { isValidUuid } from "../shared/util.js";
 
 export function buildParentMarketPayload(meta, typeReferenceId) {
   const { fixtureJson, league, homeTeam, awayTeam, fixtureDateIso, openIso, closeIso, payoutIso } = meta;

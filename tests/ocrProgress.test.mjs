@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { deriveOcrProgress, deriveProgressFromStatusHint } from "../src/ocr.js";
+import { deriveOcrProgress, deriveProgressFromStatusHint } from "../src/core/ocr.js";
 
 test("deriveProgressFromStatusHint maps known OCR stages", () => {
   assert.equal(deriveProgressFromStatusHint("initializing tesseract"), 0.04);

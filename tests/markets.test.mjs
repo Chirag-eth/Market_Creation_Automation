@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildParentMarketPayload } from "../src/markets.js";
-import { validateParentMarketPayload } from "../src/validation.js";
+import { buildParentMarketPayload } from "../src/core/markets.js";
+import { validateParentMarketPayload } from "../src/core/validation.js";
 
 const baseMeta = {
   fixtureJson: {

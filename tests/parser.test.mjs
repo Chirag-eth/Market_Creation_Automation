@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildTeamAliasIndex } from "../src/catalog.js";
+import { buildTeamAliasIndex } from "../src/data/catalog.js";
 import {
   collectFixtureBundleFromInference,
   findExactTeamForLeague,
@@ -9,7 +9,7 @@ import {
   inferFixturesFromOcrArtifacts,
   inferFixturesFromText,
   parseFixtureDate,
-} from "../src/parser.js";
+} from "../src/core/parser.js";
 
 const leagues = [
   {

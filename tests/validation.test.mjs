@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { validateFixtureJson, validateParentMarketPayload } from "../src/validation.js";
+import { validateFixtureJson, validateParentMarketPayload } from "../src/core/validation.js";
 
 test("validateFixtureJson requires CSV IDs", () => {
   const errors = validateFixtureJson({

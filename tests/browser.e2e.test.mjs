@@ -9,6 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const WORKSPACE = path.resolve(path.dirname(__filename), "..");
 const LEAGUES_CSV = `${WORKSPACE}/Info-source/leagues.csv`;
 const TEAMS_CSV = `${WORKSPACE}/Info-source/teams.csv`;
+const EPL_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/epl_schedule.sample.json`;
 
 function nextPort() {
   return 27000 + Math.floor(Math.random() * 1000);
@@ -29,6 +30,8 @@ test("browser e2e: dashboard shell loads", async (t) => {
     env: {
       LEAGUES_CSV_PATH: LEAGUES_CSV,
       TEAMS_CSV_PATH: TEAMS_CSV,
+      SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH: EPL_SCHEDULE_FIXTURE,
+      SCHEDULE_NOW_ISO: "2026-03-16T14:00:00Z",
     },
   });
 
@@ -55,6 +58,39 @@ test("browser e2e: dashboard shell loads", async (t) => {
   });
 
   const page = await browser.newPage();
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      "fixture-ocr-market-builder-state-v1",
+      JSON.stringify({
+        runtime: {
+          scheduleSnapshotVersion: 2,
+          referenceNowIso: "2026-03-16T14:00:00.000Z",
+          scheduleSnapshots: {
+            epl: {
+              fetchedAt: "2026-03-16T14:00:00.000Z",
+              referenceNowIso: "2026-03-16T14:00:00.000Z",
+              selectedWeek: 32,
+              selectedLabel: "Matchday 32",
+              selectionMode: "immediate-week",
+              fixtures: [
+                {
+                  gameId: "stale-fixture",
+                  matchDay: 32,
+                  eventName: "Stale Snapshot FC vs Placeholder United",
+                  fixtureDate: "2026-03-27",
+                  kickoffTimeUtc: "20:00",
+                  kickoffIso: "2026-03-27T20:00:00.000Z",
+                  status: "Scheduled",
+                  isClosed: false,
+                  optionLabel: "Stale Snapshot FC vs Placeholder United · Fri, Mar 27 · 20:00 UTC · Matchday 32",
+                },
+              ],
+            },
+          },
+        },
+      })
+    );
+  });
   await page.goto(`${started.baseUrl}/`, { waitUntil: "domcontentloaded" });
 
   await page.waitForSelector("h1");
@@ -66,4 +102,44 @@ test("browser e2e: dashboard shell loads", async (t) => {
 
   const hasEventInput = await page.$("#generateEventNameInput");
   assert.ok(hasEventInput, "Expected event-name generator input to be present.");
+
+  await page.selectOption("#generateLeagueSelect", "de1bd252-baf5-4417-89ba-77d635f5f8f0");
+  await page.waitForFunction(() => {
+    const status = document.querySelector("#generateScheduleStatus");
+    return status && /Matchday 30/i.test(status.textContent || "");
+  });
+
+  const summary = await page.textContent("#generateFixtureSummary");
+  assert.match(String(summary || ""), /EPL/i);
+  assert.match(String(summary || ""), /Matchday 30/i);
+
+  const activeSummaryBefore = await page.textContent("#generateFixtureActiveTitle");
+  assert.match(String(activeSummaryBefore || ""), /No fixture selected yet/i);
+
+  const cardCount = await page.locator(".schedule-fixture-btn").count();
+  assert.equal(cardCount, 1);
+
+  await page.fill("#generateFixtureSearchInput", "Brentford");
+  const filteredCardCount = await page.locator(".schedule-fixture-btn").count();
+  assert.equal(filteredCardCount, 1);
+
+  const optionCount = await page.locator("#generateEventFixtureSelect option").count();
+  assert.equal(optionCount, 2, `Expected one upcoming fixture option plus the placeholder. Got ${optionCount}.`);
+
+  await page.focus("#generateFixtureSearchInput");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => {
+    const input = document.querySelector("#generateEventNameInput");
+    return input && input.value === "Brentford FC vs Wolverhampton Wanderers FC";
+  });
+
+  assert.equal(await page.inputValue("#generateFixtureDateInput"), "2026-03-16");
+  assert.equal(await page.inputValue("#generateKickoffTimeInput"), "20:00");
+  assert.equal(await page.inputValue("#generateMatchDayInput"), "30");
+
+  const activeSummaryAfter = await page.textContent("#generateFixtureActiveTitle");
+  const activeSummaryState = await page.textContent("#generateFixtureActiveState");
+  assert.match(String(activeSummaryAfter || ""), /Brentford FC vs Wolverhampton Wanderers FC/i);
+  assert.match(String(activeSummaryState || ""), /Applied to Event Setup/i);
 });

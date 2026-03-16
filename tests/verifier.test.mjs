@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildParentMarketPayload } from "../src/markets.js";
-import { collectFixtureBundleFromInference } from "../src/parser.js";
+import { buildParentMarketPayload } from "../src/core/markets.js";
+import { collectFixtureBundleFromInference } from "../src/core/parser.js";
 import {
   generateBulkVaultPayloadsFromInput,
   generateFromEventInput,
@@ -10,7 +10,7 @@ import {
   verifyBundleConsistency,
   verifyFixtureJsonStrict,
   verifyParentMarketJsonStrict,
-} from "../src/verifier.js";
+} from "../src/core/verifier.js";
 
 const catalog = {
   leagues: [
@@ -178,7 +178,9 @@ test("verifyParentMarketJsonStrict rejects non-future parent times and status fl
 
 test("verifyBundleConsistency passes for generated fixture + parent payload", () => {
   const { fixture, parent } = buildFixtureAndParent();
-  const result = verifyBundleConsistency(fixture, parent, catalog);
+  const result = verifyBundleConsistency(fixture, parent, catalog, {
+    now: new Date("2099-03-01T00:00:00Z"),
+  });
 
   assert.equal(result.ok, true);
   assert.equal(result.errors.length, 0);
@@ -196,6 +198,7 @@ test("generateFromEventInput builds strict-valid payloads", () => {
       location: "",
       venue: "",
       typeReferenceId: "4b57bb5d-c292-4d3d-ab05-9f19e2b77aaf",
+      now: new Date("2099-03-01T00:00:00Z"),
     },
     catalog
   );
@@ -205,6 +208,7 @@ test("generateFromEventInput builds strict-valid payloads", () => {
   assert.ok(result.parentPayload);
   assert.equal(result.fixtureJson.home_team_id, catalog.teams[0].id);
   assert.equal(result.fixtureJson.away_team_id, catalog.teams[1].id);
+  assert.ok(result.info.some((line) => line.includes("Deterministic reference UTC time")));
 });
 
 test("generateFromEventInput fails when event team is not in CSV", () => {

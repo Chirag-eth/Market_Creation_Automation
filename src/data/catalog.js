@@ -1,6 +1,6 @@
-import { CATALOG_API_ENDPOINT, FIXTURE_LOGO_URL } from "./constants.js";
+import { CATALOG_API_ENDPOINT, FIXTURE_LOGO_URL } from "../shared/constants.js";
 import { FALLBACK_TEAMS } from "./fallbackCatalog.js";
-import { normalizeForSearch, normalizeHexColor, slugify, generateCodeFromName } from "./util.js";
+import { normalizeForSearch, normalizeHexColor, slugify, generateCodeFromName } from "../shared/util.js";
 
 const FALLBACK_CODE_BY_ALIAS = buildFallbackCodeByAlias();
 
