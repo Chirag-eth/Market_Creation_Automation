@@ -88,10 +88,12 @@ test("server e2e: static auth, api auth, and rate limiting", async (t) => {
   assert.equal(scheduleBody?.league, "epl");
   assert.equal(scheduleBody?.reference_now, "2026-03-16T14:00:00.000Z");
   assert.equal(scheduleBody?.selected_week, 30);
-  assert.equal(scheduleBody?.selected_label, "Matchday 30");
+  assert.deepEqual(scheduleBody?.selected_weeks, [30, 31]);
+  assert.equal(scheduleBody?.selected_label, "Matchdays 30-31");
   assert.equal(Array.isArray(scheduleBody?.fixtures), true);
-  assert.equal(scheduleBody.fixtures.length, 1);
+  assert.equal(scheduleBody.fixtures.length, 3);
   assert.equal(scheduleBody.fixtures[0]?.eventName, "Brentford FC vs Wolverhampton Wanderers FC");
+  assert.equal(scheduleBody.fixtures[1]?.eventName, "AFC Bournemouth vs Manchester United FC");
 
   const rateStatuses = [];
   for (let i = 0; i < 8; i += 1) {

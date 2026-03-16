@@ -13,7 +13,7 @@ import { escapeHtml, normalizeForSearch } from "../shared/util.js";
 
 const uiLog = createLogger("ui");
 let resultPanelRenderId = 0;
-const SCHEDULE_SNAPSHOT_SCHEMA_VERSION = 2;
+const SCHEDULE_SNAPSHOT_SCHEMA_VERSION = 3;
 
 const state = {
   leagues: [],
@@ -663,11 +663,12 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
   }
 
   const savedSnapshot = state.scheduleSnapshots[scheduleLeagueCode] || null;
+  const snapshotMode = String(savedSnapshot?.selectionMode || "").trim();
   const canUseSavedSnapshot =
     !force &&
     savedSnapshot &&
     Array.isArray(savedSnapshot.fixtures) &&
-    String(savedSnapshot.selectionMode || "").trim() === "immediate-week";
+    (snapshotMode === "immediate-week" || snapshotMode === "immediate-two-weeks");
 
   if (canUseSavedSnapshot) {
     applyScheduleSnapshot(scheduleLeagueCode, savedSnapshot, { reason: "snapshot" });
@@ -723,6 +724,9 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
       fetchedAt: String(payload?.fetched_at || "").trim(),
       referenceNowIso: normalizeReferenceNowIso(payload?.reference_now || state.referenceNowIso),
       selectedWeek: Number.isInteger(payload?.selected_week) ? payload.selected_week : null,
+      selectedWeeks: Array.isArray(payload?.selected_weeks)
+        ? payload.selected_weeks.filter((value) => Number.isInteger(value))
+        : [],
       selectedLabel: String(payload?.selected_label || "").trim(),
       selectionMode: String(payload?.selection_mode || "").trim(),
       fixtures: Array.isArray(payload?.fixtures) ? payload.fixtures : [],
@@ -990,10 +994,11 @@ function syncScheduleCursor(fixtures, selectedFixture = null) {
 
 function renderScheduleActiveSummary(fixture, { leagueCode = "", selectedLabel = "" } = {}) {
   if (!fixture) {
-    els.generateFixtureActiveTitle.textContent = "No fixture selected yet";
-    els.generateFixtureActiveMeta.textContent = "Choose a fixture below or keep typing an event name manually.";
-    els.generateFixtureActiveState.textContent = leagueCode ? "Manual mode" : "Awaiting league";
+    els.generateFixtureActiveTitle.textContent = "";
+    els.generateFixtureActiveMeta.textContent = "";
+    els.generateFixtureActiveState.textContent = "";
     els.generateFixtureActiveState.className = "schedule-active-state";
+    els.generateFixtureActiveSummary.classList.add("is-empty");
     renderGenerateReadiness();
     return;
   }
@@ -1013,6 +1018,7 @@ function renderScheduleActiveSummary(fixture, { leagueCode = "", selectedLabel =
   els.generateFixtureActiveMeta.textContent = metaParts.join(" · ");
   els.generateFixtureActiveState.textContent = "Applied to Event Setup";
   els.generateFixtureActiveState.className = "schedule-active-state is-applied";
+  els.generateFixtureActiveSummary.classList.remove("is-empty");
   renderGenerateReadiness();
 }
 
@@ -1832,6 +1838,9 @@ function sanitizeScheduleSnapshots(input) {
       fetchedAt: asRestoredString(snapshot.fetchedAt),
       referenceNowIso: normalizeReferenceNowIso(snapshot.referenceNowIso),
       selectedWeek: Number.isInteger(snapshot.selectedWeek) ? snapshot.selectedWeek : null,
+      selectedWeeks: Array.isArray(snapshot.selectedWeeks)
+        ? snapshot.selectedWeeks.filter((value) => Number.isInteger(value))
+        : [],
       selectedLabel: asRestoredString(snapshot.selectedLabel),
       selectionMode: asRestoredString(snapshot.selectionMode),
       fixtures,

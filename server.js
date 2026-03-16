@@ -346,6 +346,7 @@ async function getUpcomingSchedulePayload(leagueCode, { refresh = false, now = n
     fetched_at: new Date().toISOString(),
     reference_now: referenceNowIso,
     selected_week: selection.selectedWeek,
+    selected_weeks: Array.isArray(selection.selectedWeeks) ? selection.selectedWeeks : [],
     selected_label: selection.selectedLabel,
     selection_mode: selection.selectionMode,
     fixtures: selection.fixtures,

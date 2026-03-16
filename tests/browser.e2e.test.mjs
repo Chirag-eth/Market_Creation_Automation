@@ -63,7 +63,7 @@ test("browser e2e: dashboard shell loads", async (t) => {
       "fixture-ocr-market-builder-state-v1",
       JSON.stringify({
         runtime: {
-          scheduleSnapshotVersion: 2,
+          scheduleSnapshotVersion: 3,
           referenceNowIso: "2026-03-16T14:00:00.000Z",
           scheduleSnapshots: {
             epl: {
@@ -106,25 +106,25 @@ test("browser e2e: dashboard shell loads", async (t) => {
   await page.selectOption("#generateLeagueSelect", "de1bd252-baf5-4417-89ba-77d635f5f8f0");
   await page.waitForFunction(() => {
     const status = document.querySelector("#generateScheduleStatus");
-    return status && /Matchday 30/i.test(status.textContent || "");
+    return status && /Matchdays 30-31/i.test(status.textContent || "");
   });
 
   const summary = await page.textContent("#generateFixtureSummary");
   assert.match(String(summary || ""), /EPL/i);
-  assert.match(String(summary || ""), /Matchday 30/i);
+  assert.match(String(summary || ""), /Matchdays 30-31/i);
 
   const activeSummaryBefore = await page.textContent("#generateFixtureActiveTitle");
-  assert.match(String(activeSummaryBefore || ""), /No fixture selected yet/i);
+  assert.equal(String(activeSummaryBefore || ""), "");
 
   const cardCount = await page.locator(".schedule-fixture-btn").count();
-  assert.equal(cardCount, 1);
+  assert.equal(cardCount, 3);
 
   await page.fill("#generateFixtureSearchInput", "Brentford");
   const filteredCardCount = await page.locator(".schedule-fixture-btn").count();
   assert.equal(filteredCardCount, 1);
 
   const optionCount = await page.locator("#generateEventFixtureSelect option").count();
-  assert.equal(optionCount, 2, `Expected one upcoming fixture option plus the placeholder. Got ${optionCount}.`);
+  assert.equal(optionCount, 4, `Expected three upcoming fixture options plus the placeholder. Got ${optionCount}.`);
 
   await page.focus("#generateFixtureSearchInput");
   await page.keyboard.press("ArrowDown");

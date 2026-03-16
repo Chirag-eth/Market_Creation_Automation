@@ -80,22 +80,31 @@ export function selectUpcomingSportsDataWeek(rows, { now = new Date() } = {}) {
     }))
     .sort((a, b) => a.fixtures[0].kickoffMs - b.fixtures[0].kickoffMs || String(a.bucketKey).localeCompare(String(b.bucketKey)));
 
-  const immediateWeek = orderedWeeks.find((entry) =>
-    entry.fixtures.some((fixture) => fixture.kickoffMs >= nowMs && !isTerminalScheduleStatus(fixture.status, fixture.isClosed))
-  );
-  if (immediateWeek) {
+  const upcomingWeeks = orderedWeeks
+    .map((entry) => ({
+      ...entry,
+      fixtures: entry.fixtures.filter(
+        (fixture) => fixture.kickoffMs >= nowMs && !isTerminalScheduleStatus(fixture.status, fixture.isClosed)
+      ),
+    }))
+    .filter((entry) => entry.fixtures.length > 0);
+
+  const selectedWeeks = upcomingWeeks.slice(0, 2);
+  if (selectedWeeks.length > 0) {
     return {
-      selectedWeek: immediateWeek.selectedWeek,
-      selectedLabel: immediateWeek.selectedLabel,
-      selectionMode: "immediate-week",
-      fixtures: immediateWeek.fixtures
-        .filter((fixture) => fixture.kickoffMs >= nowMs && !isTerminalScheduleStatus(fixture.status, fixture.isClosed))
+      selectedWeek: selectedWeeks[0].selectedWeek,
+      selectedWeeks: selectedWeeks.map((entry) => entry.selectedWeek).filter((value) => Number.isInteger(value)),
+      selectedLabel: buildSelectionWindowLabel(selectedWeeks),
+      selectionMode: "immediate-two-weeks",
+      fixtures: selectedWeeks
+        .flatMap((entry) => entry.fixtures)
         .map(stripInternalFixtureFields),
     };
   }
 
   return {
     selectedWeek: null,
+    selectedWeeks: [],
     selectedLabel: null,
     selectionMode: "none",
     fixtures: [],
@@ -269,6 +278,34 @@ function buildBucketLabel(fixture) {
     return `Matchday ${fixture.matchDay}`;
   }
   return String(fixture?.roundLabel || fixture?.fixtureDate || "Upcoming fixtures");
+}
+
+function buildSelectionWindowLabel(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  if (list.length === 0) {
+    return null;
+  }
+  if (list.length === 1) {
+    return list[0]?.selectedLabel || null;
+  }
+
+  const weekNumbers = list
+    .map((entry) => entry?.selectedWeek)
+    .filter((value) => Number.isInteger(value));
+
+  if (weekNumbers.length === list.length) {
+    return `Matchdays ${weekNumbers[0]}-${weekNumbers[weekNumbers.length - 1]}`;
+  }
+
+  const labels = list
+    .map((entry) => String(entry?.selectedLabel || "").trim())
+    .filter(Boolean);
+
+  if (labels.length > 0) {
+    return labels.join(" + ");
+  }
+
+  return "Upcoming fixtures";
 }
 
 function isTerminalScheduleStatus(status, isClosed = false) {

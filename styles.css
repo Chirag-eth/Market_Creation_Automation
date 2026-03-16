@@ -612,12 +612,8 @@ textarea {
   gap: 10px;
 }
 
-.schedule-active-eyebrow {
-  font-size: 0.78rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--brand);
+.schedule-active-card.is-empty {
+  display: none;
 }
 
 .schedule-active-main {

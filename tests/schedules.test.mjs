@@ -59,17 +59,20 @@ test("normalizeSportsDataRow builds fixture event name and UTC date/time fields"
   assert.equal(fixture?.matchDay, 31);
 });
 
-test("selectUpcomingSportsDataWeek returns the next immediate matchday with remaining fixtures", async () => {
+test("selectUpcomingSportsDataWeek returns the next two upcoming matchdays", async () => {
   const raw = JSON.parse(await fs.readFile(FIXTURE_PATH, "utf8"));
   const selection = selectUpcomingSportsDataWeek(raw, {
     now: new Date("2026-03-16T14:00:00Z"),
   });
 
   assert.equal(selection.selectedWeek, 30);
-  assert.equal(selection.selectedLabel, "Matchday 30");
-  assert.equal(selection.selectionMode, "immediate-week");
-  assert.equal(selection.fixtures.length, 1);
+  assert.deepEqual(selection.selectedWeeks, [30, 31]);
+  assert.equal(selection.selectedLabel, "Matchdays 30-31");
+  assert.equal(selection.selectionMode, "immediate-two-weeks");
+  assert.equal(selection.fixtures.length, 3);
   assert.equal(selection.fixtures[0]?.eventName, "Brentford FC vs Wolverhampton Wanderers FC");
+  assert.equal(selection.fixtures[1]?.eventName, "AFC Bournemouth vs Manchester United FC");
+  assert.equal(selection.fixtures[2]?.eventName, "Brighton & Hove Albion FC vs Liverpool FC");
 });
 
 test("normalizeSportsDataRows supports zip-project round payloads", () => {
