@@ -504,11 +504,58 @@ textarea {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.grid-span-2 {
+  grid-column: 1 / -1;
+}
+
 .field {
   display: grid;
   gap: 8px;
   color: var(--ink-soft);
   font-weight: 600;
+}
+
+.optional-fields-panel {
+  padding: 12px 14px;
+  border: 1px solid rgba(124, 161, 195, 0.22);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(251, 253, 255, 0.96), rgba(245, 250, 255, 0.94));
+}
+
+.optional-fields-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  color: var(--ink);
+  font-weight: 700;
+  list-style: none;
+}
+
+.optional-fields-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.optional-fields-toggle::after {
+  content: "▾";
+  font-size: 0.9rem;
+  color: var(--brand-deep);
+  transition: transform 140ms ease;
+}
+
+.optional-fields-panel:not([open]) .optional-fields-toggle::after {
+  transform: rotate(-90deg);
+}
+
+.optional-fields-toggle:focus-visible {
+  outline: 3px solid var(--ring);
+  outline-offset: 4px;
+  border-radius: 10px;
+}
+
+.optional-fields-body {
+  margin-top: 12px;
 }
 
 .field-hero input {
