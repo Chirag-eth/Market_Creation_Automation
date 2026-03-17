@@ -694,6 +694,7 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
   }
 
   state.isScheduleLoading = true;
+  setButtonBusy(els.refreshScheduleBtn, true, force ? "Refetching..." : "Loading...");
   syncActionState();
   setScheduleStatus(`Loading upcoming ${String(scheduleLeagueCode || "").toUpperCase()} fixtures...`, "working");
   if (!hasWarmCache) {
@@ -764,6 +765,7 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
   } finally {
     if (requestId === state.scheduleRequestId) {
       state.isScheduleLoading = false;
+      setButtonBusy(els.refreshScheduleBtn, false, "Refetch Fixtures");
       syncActionState();
     }
   }
@@ -947,6 +949,7 @@ function renderScheduleFixtureBrowser(fixtures, { selectedWeek = null, selectedL
   els.generateFixtureResults.innerHTML = filteredFixtures
     .map((fixture) => {
       const eventName = String(fixture?.eventName || "").trim();
+      const gameId = String(fixture?.gameId || fixture?.game_id || "").trim();
       const isSelected = normalizeForSearch(eventName) === selectedEventName;
       const isCursor = normalizeForSearch(eventName) === normalizeForSearch(state.scheduleCursorEventName);
       const metaLine = buildScheduleFixtureMetaLine(fixture);
@@ -957,6 +960,7 @@ function renderScheduleFixtureBrowser(fixtures, { selectedWeek = null, selectedL
         `<span class="schedule-fixture-copy">` +
         `<span class="schedule-fixture-name">${escapeHtml(eventName)}</span>` +
         `<span class="schedule-fixture-meta">${escapeHtml(metaLine)}</span>` +
+        (gameId ? `<span class="schedule-fixture-id">Game ID ${escapeHtml(gameId)}</span>` : ``) +
         `</span>` +
         `<span class="schedule-fixture-cta">${isSelected ? "Applied" : "Apply"}</span>` +
         `</button>`
@@ -1013,6 +1017,10 @@ function renderScheduleActiveSummary(fixture, { leagueCode = "", selectedLabel =
     metaParts.push(`Matchday ${fixture.matchDay}`);
   }
   metaParts.push(`${fixture.fixtureDate} · ${fixture.kickoffTimeUtc} UTC`);
+  const gameId = String(fixture?.gameId || fixture?.game_id || "").trim();
+  if (gameId) {
+    metaParts.push(`Game ID ${gameId}`);
+  }
 
   els.generateFixtureActiveTitle.textContent = String(fixture.eventName || "");
   els.generateFixtureActiveMeta.textContent = metaParts.join(" · ");
@@ -1113,14 +1121,17 @@ function scrollScheduleCursorIntoView() {
 
 function buildScheduleFixtureMetaLine(fixture) {
   const kickoff = String(fixture?.kickoffIso || "").trim();
+  const gameId = String(fixture?.gameId || fixture?.game_id || "").trim();
   if (!kickoff) {
-    return String(fixture?.roundLabel || (fixture?.matchDay ? `Matchday ${fixture.matchDay}` : "")).trim();
+    const base = String(fixture?.roundLabel || (fixture?.matchDay ? `Matchday ${fixture.matchDay}` : "")).trim();
+    return gameId ? `${base} · Game ID ${gameId}`.trim() : base;
   }
 
   const parsed = new Date(kickoff);
   if (Number.isNaN(parsed.getTime())) {
     const roundSuffix = fixture?.matchDay ? `Matchday ${fixture.matchDay}` : String(fixture?.roundLabel || "");
-    return `${String(fixture?.fixtureDate || "")} · ${String(fixture?.kickoffTimeUtc || "")} UTC · ${roundSuffix}`.trim();
+    const base = `${String(fixture?.fixtureDate || "")} · ${String(fixture?.kickoffTimeUtc || "")} UTC · ${roundSuffix}`.trim();
+    return gameId ? `${base} · Game ID ${gameId}` : base;
   }
 
   const weekday = parsed.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
@@ -1129,7 +1140,8 @@ function buildScheduleFixtureMetaLine(fixture) {
   const hh = String(parsed.getUTCHours()).padStart(2, "0");
   const mm = String(parsed.getUTCMinutes()).padStart(2, "0");
   const roundSuffix = fixture?.matchDay ? `Matchday ${fixture.matchDay}` : String(fixture?.roundLabel || "");
-  return `${weekday}, ${month} ${day} · ${hh}:${mm} UTC · ${roundSuffix}`.trim();
+  const base = `${weekday}, ${month} ${day} · ${hh}:${mm} UTC · ${roundSuffix}`.trim();
+  return gameId ? `${base} · Game ID ${gameId}` : base;
 }
 
 async function handleVerify(mode, { background = false } = {}) {
@@ -2101,6 +2113,9 @@ function syncActionState() {
   const canCopyReport = !busy && Boolean(String(state.lastVerifyReportText || "").trim());
   const hasGeneratedFixture = els.generatedFixtureOutput?.dataset.empty !== "true";
   const hasGeneratedParent = els.generatedParentOutput?.dataset.empty !== "true";
+  const selectedLeagueId = String(els.generateLeagueSelect?.value || "").trim();
+  const selectedLeague = state.leagues.find((league) => String(league.id || "") === selectedLeagueId) || null;
+  const hasScheduleSource = Boolean(selectedLeague && resolveScheduleLeagueCode(selectedLeague));
 
   els.reloadCatalogBtn.disabled = state.isCatalogLoading || state.isVerifying || state.isGenerating;
   els.verifyBothBtn.disabled = !canRun;
@@ -2108,7 +2123,8 @@ function syncActionState() {
   els.verifyParentBtn.disabled = !canRun;
   els.generateBtn.disabled = !canRun;
   if (els.refreshScheduleBtn) {
-    els.refreshScheduleBtn.disabled = state.isCatalogLoading || state.isVerifying || state.isGenerating || state.isScheduleLoading;
+    els.refreshScheduleBtn.disabled =
+      state.isCatalogLoading || state.isVerifying || state.isGenerating || state.isScheduleLoading || !hasScheduleSource;
   }
   els.generateEventFixtureSelect.disabled = state.isScheduleLoading || state.isCatalogLoading;
   els.generateFixtureSearchInput.disabled = state.isScheduleLoading || state.isCatalogLoading || state.upcomingScheduleFixtures.length === 0;

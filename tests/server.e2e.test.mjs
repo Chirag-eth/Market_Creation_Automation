@@ -93,6 +93,8 @@ test("server e2e: static auth, api auth, and rate limiting", async (t) => {
   assert.equal(Array.isArray(scheduleBody?.fixtures), true);
   assert.equal(scheduleBody.fixtures.length, 3);
   assert.equal(scheduleBody.fixtures[0]?.eventName, "Brentford FC vs Wolverhampton Wanderers FC");
+  assert.equal(scheduleBody.fixtures[0]?.gameId, "900002");
+  assert.equal(scheduleBody.fixtures[0]?.game_id, "900002");
   assert.equal(scheduleBody.fixtures[1]?.eventName, "AFC Bournemouth vs Manchester United FC");
 
   const rateStatuses = [];

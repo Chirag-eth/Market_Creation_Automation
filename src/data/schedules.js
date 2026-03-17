@@ -148,8 +148,10 @@ export function normalizeSportsDataRow(row) {
 
   const eventName = `${homeTeamName} vs ${awayTeamName}`;
   const kickoffIso = kickoffDate.toISOString();
+  const gameId = extractSportsDataGameId(row, eventName);
   return {
-    gameId: String(row?.GameId || row?.gameId || row?.GlobalGameId || eventName),
+    gameId,
+    game_id: gameId,
     roundId: row?.RoundId ?? row?.roundId ?? null,
     matchDay,
     roundLabel: roundLabel || null,
@@ -221,6 +223,28 @@ function buildFixtureOptionLabel(eventName, kickoffDate, matchDay, roundLabel = 
   const mm = String(kickoffDate.getUTCMinutes()).padStart(2, "0");
   const bucketLabel = matchDay ? `Matchday ${matchDay}` : roundLabel || "Upcoming round";
   return `${eventName} · ${weekday}, ${month} ${day} · ${hh}:${mm} UTC · ${bucketLabel}`;
+}
+
+function extractSportsDataGameId(row, fallbackValue) {
+  const candidates = [
+    row?.GameId,
+    row?.gameId,
+    row?.GameID,
+    row?.gameID,
+    row?.GlobalGameId,
+    row?.globalGameId,
+    row?.GlobalGameID,
+    row?.globalGameID,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = String(candidate ?? "").trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return String(fallbackValue || "").trim();
 }
 
 function stripInternalFixtureFields(fixture) {

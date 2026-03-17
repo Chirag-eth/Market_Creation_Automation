@@ -57,6 +57,8 @@ test("normalizeSportsDataRow builds fixture event name and UTC date/time fields"
   assert.equal(fixture?.fixtureDate, "2026-03-20");
   assert.equal(fixture?.kickoffTimeUtc, "20:00");
   assert.equal(fixture?.matchDay, 31);
+  assert.equal(fixture?.gameId, "123");
+  assert.equal(fixture?.game_id, "123");
 });
 
 test("selectUpcomingSportsDataWeek returns the next two upcoming matchdays", async () => {
