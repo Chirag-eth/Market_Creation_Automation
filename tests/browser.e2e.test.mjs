@@ -11,6 +11,7 @@ const LEAGUES_CSV = `${WORKSPACE}/Info-source/leagues.csv`;
 const TEAMS_CSV = `${WORKSPACE}/Info-source/teams.csv`;
 const EPL_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/epl_schedule.browser.sample.json`;
 const UCL_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/ucl_schedule.sample.json`;
+const UCL_EMPTY_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/ucl_schedule.empty.json`;
 const LALIGA_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/laliga_schedule.sample.json`;
 const TEST_REFERENCE_NOW_ISO = "2026-03-18T14:00:00Z";
 
@@ -414,4 +415,64 @@ test("browser e2e: schedule fetch failure keeps controls usable and surfaces cle
       /Could not load upcoming EPL fixtures: SPORTSDATA_API_KEY is not configured on the server\./i.test(status)
     );
   });
+});
+
+test("browser e2e: league switching clears stale search and shows explicit empty-state messaging", async (t) => {
+  const launched = await launchFixtureApp(t, {
+    serverEnv: {
+      SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH: UCL_EMPTY_SCHEDULE_FIXTURE,
+    },
+  });
+  if (!launched) {
+    return;
+  }
+
+  const { page, started } = launched;
+  await page.goto(`${started.baseUrl}/`, { waitUntil: "domcontentloaded" });
+  await waitForCatalogReady(page);
+
+  await selectLeague(page, /English Premier League/i);
+  await waitForBuilderWeeks(page, 6);
+  await page.locator("#generateFixturesPageBtn").click();
+  await page.waitForFunction(() => document.querySelector("#generateFixturesPageBtn")?.getAttribute("aria-selected") === "true");
+
+  await page.locator("#generateFixtureSearchInput").fill("Fulham");
+  await page.waitForFunction(() => document.querySelectorAll("#generateFixtureResults .schedule-fixture-btn").length >= 1);
+  assert.equal(await page.locator("#generateFixtureSearchInput").inputValue(), "Fulham");
+
+  await page.locator('.league-nav-tab:has-text("UCL")').click();
+  await page.waitForFunction(() => {
+    const summary = document.querySelector("#generateFixtureSummary")?.textContent || "";
+    return /UCL/i.test(summary) && /No upcoming fixtures right now/i.test(summary);
+  });
+
+  assert.equal(await page.locator("#generateFixtureSearchInput").inputValue(), "");
+  assert.match(
+    String(await page.locator("#generateScheduleStatus").textContent()),
+    /UCL has no upcoming fixtures from SportsData right now\./i
+  );
+  assert.match(
+    String(await page.locator("#generateFixtureResults").textContent()),
+    /UCL has no upcoming fixtures from SportsData right now\. Try Refetch Fixtures later\./i
+  );
+
+  await page.locator("#generateBuilderPageBtn").click();
+  await page.waitForFunction(() => document.querySelector("#generateBuilderPageBtn")?.getAttribute("aria-selected") === "true");
+  assert.match(
+    String(await page.locator("#generateBuilderFixturePreview").textContent()),
+    /UCL has no upcoming fixtures from SportsData right now\. Try Refetch Fixtures later\./i
+  );
+
+  await selectLeague(page, /English Premier League/i);
+  await page.waitForFunction(() => /Matchdays 31-36 loaded from EPL schedule API/i.test(document.querySelector("#generateScheduleStatus")?.textContent || ""));
+  await page.locator("#generateFixturesPageBtn").click();
+  await page.locator("#generateFixtureResults .schedule-fixture-btn").first().click();
+  await page.waitForFunction(() => {
+    const fixture = document.querySelector("#generatedFixtureOutput");
+    const parent = document.querySelector("#generatedParentOutput");
+    return fixture?.dataset.empty === "false" && parent?.dataset.empty === "false";
+  });
+
+  const generatedFixture = JSON.parse(String(await page.locator("#generatedFixtureOutput").textContent()));
+  assert.equal(generatedFixture.name, "Bournemouth vs Man Utd");
 });

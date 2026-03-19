@@ -1063,7 +1063,7 @@ function renderScheduleSuggestions(fixtures, selectedWeek, selectedLabel, league
   renderScheduleLeagueTabs();
 
   if (!fixtures || fixtures.length === 0) {
-    setScheduleStatus("No upcoming fixtures were found for this league in the schedule API.", "warn");
+    setScheduleStatus(buildNoFixturesStatusMessage(leagueCode), "warn");
     return;
   }
 
@@ -1084,6 +1084,13 @@ function applyScheduleSnapshot(leagueCode, snapshot, { reason = "snapshot" } = {
     : [];
   state.upcomingScheduleLabel = String(snapshot?.selectedLabel || "").trim();
   state.upcomingScheduleFixtures = fixtures;
+  if (leagueChanged) {
+    if (els.generateFixtureSearchInput) {
+      els.generateFixtureSearchInput.value = "";
+    }
+    setScheduleFilterMenuOpen(false);
+    persistInputSnapshot();
+  }
   state.builderScheduleWeek = resolveActiveScheduleWeek(
     leagueChanged ? defaultWeek : state.builderScheduleWeek ?? defaultWeek,
     fixtures
@@ -1113,8 +1120,10 @@ function applyScheduleSnapshot(leagueCode, snapshot, { reason = "snapshot" } = {
 
   const weekLabel = state.upcomingScheduleLabel || (state.upcomingScheduleWeek ? `Matchday ${state.upcomingScheduleWeek}` : "Upcoming fixtures");
   setScheduleStatus(
-    `${weekLabel} loaded from ${String(leagueCode || "").toUpperCase()} schedule API.`,
-    "success"
+    fixtures.length > 0
+      ? `${weekLabel} loaded from ${String(leagueCode || "").toUpperCase()} schedule API.`
+      : buildNoFixturesStatusMessage(leagueCode),
+    fixtures.length > 0 ? "success" : "warn"
   );
 }
 
@@ -1439,7 +1448,10 @@ function renderBuilderFixturePreview(fixtures = state.upcomingScheduleFixtures) 
   }
 
   if (!allFixtures.length || !Number.isInteger(activeWeek)) {
-    els.generateBuilderFixturePreview.innerHTML = `<div class="schedule-browser-empty">Select a supported league to preview the next 6 upcoming matchweeks.</div>`;
+    const emptyMessage = state.upcomingScheduleLeagueCode
+      ? buildNoFixturesBodyMessage(state.upcomingScheduleLeagueCode)
+      : "Select a supported league to preview the next 6 upcoming matchweeks.";
+    els.generateBuilderFixturePreview.innerHTML = `<div class="schedule-browser-empty">${escapeHtml(emptyMessage)}</div>`;
     return;
   }
 
@@ -1529,6 +1541,28 @@ function groupFixturesByScheduleWeek(fixtures = []) {
   });
 }
 
+function buildNoFixturesStatusMessage(leagueCode) {
+  const code = String(leagueCode || "").trim().toLowerCase();
+  if (code === "ucl") {
+    return "UCL has no upcoming fixtures from SportsData right now.";
+  }
+  if (code) {
+    return `No upcoming ${String(code).toUpperCase()} fixtures are available from SportsData right now.`;
+  }
+  return "No upcoming fixtures are available from SportsData right now.";
+}
+
+function buildNoFixturesBodyMessage(leagueCode) {
+  const code = String(leagueCode || "").trim().toLowerCase();
+  if (code === "ucl") {
+    return "UCL has no upcoming fixtures from SportsData right now. Try Refetch Fixtures later.";
+  }
+  if (code) {
+    return `No upcoming ${String(code).toUpperCase()} fixtures are available from SportsData right now. Try Refetch Fixtures later.`;
+  }
+  return "No upcoming fixtures are available from SportsData right now.";
+}
+
 function renderScheduleLeagueTabs() {
   if (!els.generateFixtureLeagueTabs) {
     return;
@@ -1566,7 +1600,11 @@ function renderUpcomingFixturesPage(fixtures, { selectedWeek = null, selectedLab
   if (selectedLabel) {
     summaryParts.push(selectedLabel);
   }
-  summaryParts.push(`${allFixtures.length} fixture${allFixtures.length === 1 ? "" : "s"} loaded`);
+  if (allFixtures.length > 0) {
+    summaryParts.push(`${allFixtures.length} fixture${allFixtures.length === 1 ? "" : "s"} loaded`);
+  } else {
+    summaryParts.push("No upcoming fixtures right now");
+  }
   if (weekOptions.length > 1) {
     summaryParts.push(`${weekOptions.length} matchweeks loaded`);
   }
@@ -1582,7 +1620,7 @@ function renderUpcomingFixturesPage(fixtures, { selectedWeek = null, selectedLab
   renderScheduleActiveSummary(selectedFixture, { leagueCode, selectedLabel });
 
   if (!allFixtures.length) {
-    els.generateFixtureResults.innerHTML = `<div class="schedule-browser-empty">No fixtures loaded for this league yet.</div>`;
+    els.generateFixtureResults.innerHTML = `<div class="schedule-browser-empty">${escapeHtml(buildNoFixturesBodyMessage(leagueCode))}</div>`;
     return;
   }
 
