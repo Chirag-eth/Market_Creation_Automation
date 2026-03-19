@@ -3,6 +3,7 @@ import { FALLBACK_TEAMS } from "./fallbackCatalog.js";
 import { normalizeForSearch, normalizeHexColor, slugify, generateCodeFromName } from "../shared/util.js";
 
 const FALLBACK_CODE_BY_ALIAS = buildFallbackCodeByAlias();
+const SCHEDULE_ALIAS_PRESETS = buildScheduleAliasPresets();
 
 export async function fetchCatalogPayload() {
   const response = await fetch(CATALOG_API_ENDPOINT, { cache: "no-store" });
@@ -170,15 +171,39 @@ export function expandLeagueAlias(value) {
 
 export function buildTeamAliases(name, alternateName, code = "") {
   const out = new Set();
-  for (const candidate of [name, alternateName]) {
-    const raw = String(candidate || "").trim();
-    if (!raw) {
+  const queue = [name, alternateName]
+    .map((candidate) => String(candidate || "").trim())
+    .filter(Boolean);
+  const seen = new Set();
+
+  while (queue.length > 0) {
+    const raw = String(queue.shift() || "").trim();
+    const normalized = normalizeForSearch(raw);
+    if (!raw || seen.has(normalized)) {
       continue;
     }
-    out.add(raw);
-    out.add(raw.replace(/\b(fc|cf|afc|sc)\b/gi, "").replace(/\s+/g, " ").trim());
-    out.add(raw.replace(/\bsl\b/gi, "").replace(/\s+/g, " ").trim());
-    out.add(raw.replace(/[\W_]+/g, ""));
+    seen.add(normalized);
+
+    for (const variant of deriveTeamAliasVariants(raw)) {
+      const alias = String(variant || "").trim();
+      if (!alias) {
+        continue;
+      }
+      out.add(alias);
+
+      const presetVariants = SCHEDULE_ALIAS_PRESETS.get(normalizeForSearch(alias)) || [];
+      for (const preset of presetVariants) {
+        const presetAlias = String(preset || "").trim();
+        if (!presetAlias) {
+          continue;
+        }
+        out.add(presetAlias);
+        const presetNormalized = normalizeForSearch(presetAlias);
+        if (presetNormalized && !seen.has(presetNormalized)) {
+          queue.push(presetAlias);
+        }
+      }
+    }
   }
 
   const codeRaw = String(code || "").trim().toUpperCase();
@@ -187,6 +212,58 @@ export function buildTeamAliases(name, alternateName, code = "") {
   }
 
   return Array.from(out).filter(Boolean);
+}
+
+function deriveTeamAliasVariants(raw) {
+  const out = new Set();
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) {
+    return out;
+  }
+
+  out.add(trimmed);
+  out.add(trimmed.replace(/\b(fc|cf|afc|sc)\b/gi, "").replace(/\s+/g, " ").trim());
+  out.add(trimmed.replace(/^\s*(?:afc|fc|cf|sc)\s+/i, "").replace(/\s+/g, " ").trim());
+  out.add(trimmed.replace(/\bsl\b/gi, "").replace(/\s+/g, " ").trim());
+  out.add(trimmed.replace(/\s*&\s*/g, " and ").replace(/\s+/g, " ").trim());
+  out.add(trimmed.replace(/\band\b/gi, "&").replace(/\s+/g, " ").trim());
+  out.add(trimmed.replace(/[\W_]+/g, ""));
+
+  return out;
+}
+
+function buildScheduleAliasPresets() {
+  const presets = new Map();
+  const seed = [
+    [["bournemouth"], ["AFC Bournemouth"]],
+    [["man utd", "man united"], ["Manchester United", "Manchester United FC"]],
+    [["man city"], ["Manchester City", "Manchester City FC"]],
+    [["brighton"], ["Brighton & Hove Albion", "Brighton & Hove Albion FC", "Brighton and Hove Albion", "Brighton and Hove Albion FC"]],
+    [["spurs", "tottenham"], ["Tottenham Hotspur", "Tottenham Hotspur FC"]],
+    [["forest", "nottm forest"], ["Nottingham Forest", "Nottingham Forest FC"]],
+    [["newcastle"], ["Newcastle United", "Newcastle United FC"]],
+    [["west ham"], ["West Ham United", "West Ham United FC"]],
+    [["wolves", "wolverhampton", "wolverhampton wanderers"], ["Wolverhampton Wanderers", "Wolverhampton Wanderers FC"]],
+    [["sunderland"], ["Sunderland AFC"]],
+    [["leeds"], ["Leeds United", "Leeds United FC"]],
+    [["villa", "aston villa"], ["Aston Villa FC"]],
+    [["athletic"], ["Athletic Club"]],
+    [["sociedad"], ["Real Sociedad", "Real Sociedad de Futbol"]],
+    [["betis"], ["Real Betis", "Real Betis Balompie"]],
+  ];
+
+  for (const [keys, values] of seed) {
+    for (const key of keys) {
+      const normalizedKey = normalizeForSearch(key);
+      if (!normalizedKey) {
+        continue;
+      }
+      const existing = presets.get(normalizedKey) || [];
+      presets.set(normalizedKey, Array.from(new Set([...existing, ...values])));
+    }
+  }
+
+  return presets;
 }
 
 export function buildTeamAliasIndex(teams) {

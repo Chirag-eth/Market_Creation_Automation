@@ -79,6 +79,19 @@ function buildFixtureAndParent() {
   };
 }
 
+function buildSelectedScheduleFixture(overrides = {}) {
+  return {
+    gameId: "900002",
+    game_id: "900002",
+    eventName: "Wolves vs Aston Villa",
+    fixtureDate: "2099-03-15",
+    kickoffTimeUtc: "14:00",
+    kickoffIso: "2099-03-15T14:00:00.000Z",
+    matchDay: 29,
+    ...overrides,
+  };
+}
+
 test("verifyFixtureJsonStrict passes for CSV-aligned fixture payload", () => {
   const { fixture } = buildFixtureAndParent();
   const result = verifyFixtureJsonStrict(fixture, catalog);
@@ -209,6 +222,49 @@ test("generateFromEventInput builds strict-valid payloads", () => {
   assert.equal(result.fixtureJson.home_team_id, catalog.teams[0].id);
   assert.equal(result.fixtureJson.away_team_id, catalog.teams[1].id);
   assert.ok(result.info.some((line) => line.includes("Deterministic reference UTC time")));
+});
+
+test("generateFromEventInput enforces the selected SportsData fixture", () => {
+  const result = generateFromEventInput(
+    {
+      eventName: "Wolves vs Aston Villa",
+      leagueSelection: "de1bd252-baf5-4417-89ba-77d635f5f8f0",
+      fixtureDate: "2099-03-15",
+      kickoffTimeUtc: "14:00",
+      matchDay: "29",
+      matchWeek: "",
+      location: "",
+      venue: "",
+      typeReferenceId: "",
+      now: new Date("2099-03-01T00:00:00Z"),
+      selectedScheduleFixture: buildSelectedScheduleFixture(),
+    },
+    catalog
+  );
+
+  assert.equal(result.ok, true);
+  assert.ok(result.info.some((line) => line.includes("Selected SportsData fixture verified against the current event setup.")));
+});
+
+test("generateFromEventInput fails when edited metadata drifts from the selected SportsData fixture", () => {
+  const result = generateFromEventInput(
+    {
+      eventName: "Wolves vs Aston Villa",
+      leagueSelection: "de1bd252-baf5-4417-89ba-77d635f5f8f0",
+      fixtureDate: "2099-03-15",
+      kickoffTimeUtc: "15:00",
+      matchDay: "29",
+      matchWeek: "",
+      location: "",
+      venue: "",
+      typeReferenceId: "",
+      selectedScheduleFixture: buildSelectedScheduleFixture(),
+    },
+    catalog
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((line) => line.includes("Kickoff Time (UTC) must match the selected SportsData fixture time")));
 });
 
 test("generateFromEventInput fails when event team is not in CSV", () => {
@@ -344,6 +400,36 @@ test("generateFromEventInput auto-detects league from a valid home-away pair whe
   assert.equal(result.fixtureJson.home_team_id, "44444444-4444-4444-8444-444444444444");
   assert.equal(result.fixtureJson.away_team_id, "66666666-6666-4666-8666-666666666666");
   assert.ok(result.info.some((line) => line.includes("Auto-detected league from teams")));
+});
+
+test("verifyBundleConsistency fails when parent timing drifts from the selected SportsData fixture", () => {
+  const { fixture, parent } = buildFixtureAndParent();
+  const driftedParent = {
+    ...parent,
+    parent_market: {
+      ...parent.parent_market,
+      markets_close_time: "2099-03-15T15:00:00Z",
+      payout_time: "2099-03-15T15:00:00Z",
+      time_remaining: "2099-03-15T15:00:00Z",
+    },
+    markets: parent.markets.map((market) => ({
+      ...market,
+      time_remaining: "2099-03-15T15:00:00Z",
+    })),
+  };
+
+  const result = verifyBundleConsistency(
+    fixture,
+    driftedParent,
+    catalog,
+    {
+      now: new Date("2099-03-01T00:00:00Z"),
+      selectedScheduleFixture: buildSelectedScheduleFixture(),
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(result.parentCheck.errors.some((line) => line.includes("Kickoff Time (UTC) must match the selected SportsData fixture time")));
 });
 
 test("generateVaultPayloadFromInput builds naming format and payload shape", () => {

@@ -1,0 +1,29 @@
+[
+  {
+    "GameId": 910101,
+    "Week": 16,
+    "DateTime": "2026-03-20T17:45:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "FC Barcelona",
+    "AwayTeamName": "Newcastle United FC"
+  },
+  {
+    "GameId": 910102,
+    "Week": 16,
+    "DateTime": "2026-03-20T20:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Liverpool FC",
+    "AwayTeamName": "Galatasaray SK"
+  },
+  {
+    "GameId": 910201,
+    "Week": 17,
+    "DateTime": "2026-04-08T20:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Tottenham Hotspur FC",
+    "AwayTeamName": "Club Atlético de Madrid"
+  }
+]

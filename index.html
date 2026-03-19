@@ -4,9 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Fixture JSON Verifier</title>
-  <link rel="icon" type="image/jpeg" href="favicon.jpg" />
-  <link rel="shortcut icon" type="image/jpeg" href="favicon.jpg" />
-  <link rel="apple-touch-icon" href="favicon.jpg" />
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+  <link rel="shortcut icon" href="assets/favicon.svg" />
+  <script src="assets/theme-init.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -16,11 +17,17 @@
 <body>
   <main class="app-shell">
     <header class="hero">
-      <div class="hero-copy hero-copy-compact">
-        <h1>Fixture & Parent Market Verifier</h1>
-        <p class="hero-lede">
-          Verify existing JSON or generate fixture + parent market payloads from event input.
-        </p>
+      <div class="hero-head">
+        <div class="hero-copy hero-copy-compact">
+          <h1>Fixture & Parent Market Verifier</h1>
+          <p class="hero-lede">
+            Verify JSON or generate clean fixture and parent market payloads.
+          </p>
+        </div>
+        <button id="themeToggleBtn" class="theme-toggle" type="button" aria-pressed="false">
+          <span id="themeToggleIcon" class="theme-toggle-icon" aria-hidden="true">☾</span>
+          <span id="themeToggleLabel">Dark theme</span>
+        </button>
       </div>
     </header>
 
@@ -35,7 +42,7 @@
     <details id="verifySection" class="card collapsible-card">
       <summary id="verifyToggleBtn" class="section-toggle">
         <span class="section-toggle-title">2. Verify Existing JSON</span>
-        <span id="verifyToggleCaption" class="section-toggle-caption">Collapsed. Click to open inputs and the live verification report.</span>
+        <span id="verifyToggleCaption" class="section-toggle-caption">Collapsed. Click to inspect inputs and the report.</span>
       </summary>
       <div id="verifyBody" class="verify-body">
         <div class="actions-inline verify-actions">
@@ -44,17 +51,10 @@
           <button id="verifyParentBtn" class="btn btn-secondary" type="button">Parent Only</button>
           <button id="copyVerifyReportBtn" class="btn btn-secondary" type="button">Copy Report</button>
         </div>
-        <div class="section-inline-note">
-          <span class="mini-badge mini-badge-live">Background verify on</span>
-          <p>The verification report below updates while you type, even when this section stays collapsed.</p>
-        </div>
         <div id="verifyWorkspace" class="verify-workspace">
           <div id="verifyEditor" class="verify-editor subsurface">
             <div class="subsurface-head">
-              <div>
-                <h3>Verification Inputs</h3>
-                <p>Paste either payload or both. The editor stays optional because verification continues in the background.</p>
-              </div>
+              <h3>Verification Inputs</h3>
             </div>
             <div class="grid two-col">
               <label class="field">
@@ -97,29 +97,23 @@
           <button id="copyGenerationStatusBtn" class="btn btn-secondary" type="button">Copy Status</button>
         </div>
       </div>
+      <div class="generate-page-switch" role="tablist" aria-label="Generate workspace pages">
+        <button id="generateBuilderPageBtn" class="generate-page-tab is-active" type="button" role="tab" aria-selected="true">Builder</button>
+        <button id="generateFixturesPageBtn" class="generate-page-tab" type="button" role="tab" aria-selected="false">Upcoming Fixtures</button>
+      </div>
       <div class="generate-workspace">
         <div class="generate-main-column">
-          <div class="stacked-panels">
+          <section id="generateBuilderPage" class="stacked-panels generate-page">
             <section class="subsurface subsurface-spotlight">
               <div class="subsurface-head">
-                <div>
-                  <h3>Event Setup</h3>
-                  <p>Start with the match name, then override league or type reference only if needed.</p>
-                </div>
+                <h3>Event Setup</h3>
               </div>
               <div class="grid two-col">
                 <label class="field span-2 field-hero">
                   Event Name
                   <input id="generateEventNameInput" type="text" list="generateEventNameSuggestions" placeholder="Man Utd vs Aston Villa" autocomplete="off" />
                   <datalist id="generateEventNameSuggestions"></datalist>
-                  <p id="generateScheduleStatus" class="field-hint schedule-status">Select a league to load upcoming scheduled fixtures, or keep typing manually.</p>
-                </label>
-
-                <label class="field span-2">
-                  Upcoming Fixtures
-                  <select id="generateEventFixtureSelect">
-                    <option value="">Pick a fixture after selecting a supported league</option>
-                  </select>
+                  <p id="generateScheduleStatus" class="field-hint schedule-status">Pick a league, then browse the next 6 matchweeks or keep typing manually.</p>
                 </label>
 
                 <label class="field">
@@ -134,11 +128,6 @@
                   <input id="generateTypeRefInput" type="text" placeholder="UUID" />
                 </label>
 
-                <label class="field span-2">
-                  Search Loaded Fixtures
-                  <input id="generateFixtureSearchInput" type="text" placeholder="Filter by team, date, or kickoff time" autocomplete="off" />
-                </label>
-
                 <section id="generateFixtureActiveSummary" class="schedule-active-card span-2" aria-live="polite">
                   <div class="schedule-active-main">
                     <div>
@@ -149,30 +138,35 @@
                   </div>
                 </section>
 
-                <section class="schedule-browser span-2" aria-labelledby="generateFixtureBrowserHeading">
-                  <div class="schedule-browser-head">
+                <section class="builder-preview span-2" aria-labelledby="generateBuilderPreviewHeading">
+                  <div class="builder-preview-head">
                     <div>
-                      <h4 id="generateFixtureBrowserHeading">Upcoming Matchday Browser</h4>
-                      <p id="generateFixtureSummary" class="schedule-browser-summary">Select a supported league to browse upcoming fixtures.</p>
+                      <h4 id="generateBuilderPreviewHeading">Upcoming Fixtures</h4>
+                      <p class="builder-preview-note">Default starts on the next matchweek.</p>
                     </div>
-                    <div class="schedule-browser-actions">
-                      <button id="refreshScheduleBtn" class="btn btn-secondary" type="button">Refetch Fixtures</button>
-                      <span class="mini-badge">Arrow keys move, Enter applies</span>
+                    <div class="builder-preview-actions">
+                      <button id="generateBuilderRefetchBtn" class="btn btn-secondary" type="button">Refetch Fixtures</button>
+                      <label class="field builder-week-field">
+                        <span class="sr-only">Select builder matchweek</span>
+                        <select id="generateBuilderWeekSelect">
+                          <option value="">Select a league first</option>
+                        </select>
+                      </label>
                     </div>
                   </div>
-                  <div id="generateFixtureResults" class="schedule-browser-results" role="listbox" aria-label="Upcoming fixtures" tabindex="0"></div>
+                  <div id="generateBuilderFixturePreview" class="builder-preview-results"></div>
                 </section>
               </div>
             </section>
 
-            <section class="subsurface">
-              <div class="subsurface-head">
-                <div>
-                  <h3>Schedule & Metadata</h3>
-                  <p>All date and time inputs here are UTC. Match and location details stay optional.</p>
-                </div>
-              </div>
-              <div class="grid two-col">
+            <details class="subsurface schedule-metadata-panel">
+              <summary class="schedule-metadata-toggle">
+                <span class="schedule-metadata-toggle-copy">
+                  <span class="schedule-metadata-toggle-title">Schedule & Metadata</span>
+                  <span class="schedule-metadata-toggle-note">UTC date/time and optional venue details.</span>
+                </span>
+              </summary>
+              <div class="schedule-metadata-body grid two-col">
                 <label class="field">
                   Fixture Date (UTC)
                   <input id="generateFixtureDateInput" type="date" />
@@ -193,50 +187,111 @@
                   <input id="generateMatchWeekInput" type="number" min="1" step="1" placeholder="Optional" />
                 </label>
 
-                <details class="optional-fields-panel grid-span-2">
-                  <summary class="optional-fields-toggle">Location & venue (optional)</summary>
-                  <div class="optional-fields-body grid two-col">
-                    <label class="field">
-                      Location (optional)
-                      <input id="generateLocationInput" type="text" placeholder="Optional" />
-                    </label>
+                <label class="field">
+                  Location (optional)
+                  <input id="generateLocationInput" type="text" placeholder="Optional" />
+                </label>
 
-                    <label class="field">
-                      Venue (optional)
-                      <input id="generateVenueInput" type="text" placeholder="Optional" />
+                <label class="field">
+                  Venue (optional)
+                  <input id="generateVenueInput" type="text" placeholder="Optional" />
+                </label>
+              </div>
+            </details>
+          </section>
+
+          <section id="generateFixturesPage" class="generate-page" hidden>
+            <section class="fixtures-screen" aria-labelledby="generateFixtureBrowserHeading">
+              <div id="generateFixtureLeagueTabs" class="league-nav" role="tablist" aria-label="Fixture leagues"></div>
+              <div class="fixtures-screen-head">
+                <div>
+                  <h3 id="generateFixtureBrowserHeading">Upcoming Fixtures</h3>
+                  <p id="generateFixtureSummary" class="fixtures-screen-summary">Browse loaded fixtures by league and matchweek.</p>
+                </div>
+                <div class="fixtures-screen-actions">
+                  <button id="refreshScheduleBtn" class="btn btn-secondary" type="button">Refetch Fixtures</button>
+                </div>
+              </div>
+              <div id="generateFixtureWeekTabs" class="fixtures-week-tabs" role="tablist" aria-label="Fixture matchweeks"></div>
+
+              <label class="field">
+                Search Loaded Fixtures
+                <div class="fixture-search-shell">
+                  <span class="fixture-search-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="M10.5 4a6.5 6.5 0 1 0 4.13 11.52l4.43 4.44 1.41-1.42-4.44-4.43A6.5 6.5 0 0 0 10.5 4Zm0 2a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9Z" />
+                    </svg>
+                  </span>
+                  <input
+                    id="generateFixtureSearchInput"
+                    type="text"
+                    placeholder="Search by team, date, kickoff, or matchday"
+                    autocomplete="off"
+                  />
+                  <button
+                    id="generateFixtureSearchFiltersBtn"
+                    class="fixture-search-filter-btn"
+                    type="button"
+                    aria-haspopup="true"
+                    aria-expanded="false"
+                    aria-controls="generateFixtureSearchFiltersMenu"
+                    aria-label="Select fixture search filters"
+                  >
+                    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                      <path d="M4 6h16v2H4V6Zm3 5h10v2H7v-2Zm3 5h4v2h-4v-2Z" />
+                    </svg>
+                    <span id="generateFixtureSearchFilterCount" class="fixture-search-filter-count">4</span>
+                  </button>
+                  <div id="generateFixtureSearchFiltersMenu" class="fixture-search-filters" hidden>
+                    <p class="fixture-search-filters-title">Search within</p>
+                    <label class="fixture-search-filter-option">
+                      <input id="generateFixtureSearchFilterTeam" type="checkbox" data-filter-key="team" checked />
+                      <span>Team names</span>
+                    </label>
+                    <label class="fixture-search-filter-option">
+                      <input id="generateFixtureSearchFilterDate" type="checkbox" data-filter-key="date" checked />
+                      <span>Date</span>
+                    </label>
+                    <label class="fixture-search-filter-option">
+                      <input id="generateFixtureSearchFilterKickoff" type="checkbox" data-filter-key="kickoff" checked />
+                      <span>Kickoff time</span>
+                    </label>
+                    <label class="fixture-search-filter-option">
+                      <input id="generateFixtureSearchFilterMatchday" type="checkbox" data-filter-key="matchday" checked />
+                      <span>Matchday</span>
                     </label>
                   </div>
-                </details>
-              </div>
+                </div>
+              </label>
+
+              <div id="generateFixtureResults" class="fixtures-grid" role="listbox" aria-label="Upcoming fixtures" tabindex="0"></div>
             </section>
-          </div>
+          </section>
         </div>
 
         <aside class="generate-side-column">
           <div id="generationStatus" class="result-panel" aria-live="polite">Waiting for input.</div>
 
-          <div class="output-column-stack">
-            <div class="output-block">
-              <div class="output-head">
-                <div class="output-head-copy">
-                  <h3>Generated Fixture JSON</h3>
-                  <p class="output-subtitle">Strict CSV-backed fixture payload</p>
+            <div class="output-column-stack">
+              <div class="output-block">
+                <div class="output-head">
+                  <div class="output-head-copy">
+                    <h3>Fixture JSON</h3>
+                  </div>
+                  <span id="generatedFixtureState" class="output-state">Waiting</span>
+                  <button id="copyGeneratedFixtureBtn" class="btn btn-secondary" type="button">Copy</button>
                 </div>
-                <span id="generatedFixtureState" class="output-state">Waiting</span>
-                <button id="copyGeneratedFixtureBtn" class="btn btn-secondary" type="button">Copy</button>
-              </div>
               <pre id="generatedFixtureOutput" class="json-output">{}</pre>
             </div>
 
-            <div class="output-block">
-              <div class="output-head">
-                <div class="output-head-copy">
-                  <h3>Generated Parent Market JSON</h3>
-                  <p class="output-subtitle">Validated parent + market payload</p>
+              <div class="output-block">
+                <div class="output-head">
+                  <div class="output-head-copy">
+                    <h3>Parent Market JSON</h3>
+                  </div>
+                  <span id="generatedParentState" class="output-state">Waiting</span>
+                  <button id="copyGeneratedParentBtn" class="btn btn-secondary" type="button">Copy</button>
                 </div>
-                <span id="generatedParentState" class="output-state">Waiting</span>
-                <button id="copyGeneratedParentBtn" class="btn btn-secondary" type="button">Copy</button>
-              </div>
               <pre id="generatedParentOutput" class="json-output">{}</pre>
             </div>
           </div>

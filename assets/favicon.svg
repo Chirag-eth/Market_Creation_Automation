@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Fixture verifier favicon">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1672e8"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#bg)"/>
+  <path d="M18 16L11 24V40L18 48" fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round" stroke-width="4.5"/>
+  <path d="M46 16L53 24V40L46 48" fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round" stroke-width="4.5"/>
+  <circle cx="32" cy="30" r="12.5" fill="#ffffff"/>
+  <polygon points="32,22.8 36.8,26.2 35,31.9 29,31.9 27.2,26.2" fill="#0f172a"/>
+  <path d="M24.3 27.2L19.9 24.9M39.7 27.2L44.1 24.9M24.6 34.4L21.1 37.2M39.4 34.4L42.9 37.2" fill="none" stroke="#0f172a" stroke-linecap="round" stroke-width="2"/>
+  <circle cx="47.5" cy="47.5" r="10" fill="#22c55e"/>
+  <path d="M42.9 47.7L46 50.8L52.3 44.4" fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round" stroke-width="3.4"/>
+</svg>

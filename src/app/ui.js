@@ -1,7 +1,7 @@
 import { fetchCatalogPayload, normalizeCatalogPayload } from "../data/catalog.js";
 import { fetchUpcomingFixturesForLeague, resolveScheduleLeagueCode } from "../data/schedules.js";
 import { createLogger } from "../shared/logger.js";
-import { loadSnapshot, saveSnapshot } from "./persistence.js";
+import { loadSnapshot, loadThemePreference, saveSnapshot, saveThemePreference } from "./persistence.js";
 import {
   generateFromEventInput,
   parseJsonInput,
@@ -9,11 +9,18 @@ import {
   verifyFixtureJsonStrict,
   verifyParentMarketJsonStrict,
 } from "../core/verifier.js";
-import { escapeHtml, normalizeForSearch } from "../shared/util.js";
+import { escapeHtml, escapeHtmlAttribute, normalizeForSearch } from "../shared/util.js";
 
 const uiLog = createLogger("ui");
 let resultPanelRenderId = 0;
-const SCHEDULE_SNAPSHOT_SCHEMA_VERSION = 3;
+const SCHEDULE_SNAPSHOT_SCHEMA_VERSION = 5;
+const DEFAULT_SCHEDULE_SEARCH_FILTERS = Object.freeze({
+  team: true,
+  date: true,
+  kickoff: true,
+  matchday: true,
+});
+const UPCOMING_MATCHWEEK_WINDOW = 6;
 
 const state = {
   leagues: [],
@@ -36,9 +43,18 @@ const state = {
   toastTimerId: null,
   upcomingScheduleLeagueCode: "",
   upcomingScheduleWeek: null,
+  upcomingScheduleWeeks: [],
   upcomingScheduleLabel: "",
   upcomingScheduleFixtures: [],
-  scheduleCursorEventName: "",
+  selectedScheduleFixtureId: "",
+  pendingRestoredSelectedScheduleFixtureId: "",
+  scheduleCursorFixtureId: "",
+  scheduleSearchFilters: createScheduleSearchFilters(),
+  isScheduleFilterMenuOpen: false,
+  currentGeneratePage: "builder",
+  builderScheduleWeek: null,
+  fixturesPageScheduleWeek: null,
+  theme: "light",
 };
 
 const els = {};
@@ -116,11 +132,14 @@ const SAMPLE_PARENT_JSON = {
 
 export function initApp() {
   cacheElements();
+  restoreThemePreference();
+  applyTheme(state.theme);
   bindEvents();
   restoreInputSnapshot();
   ensureDeterministicRuntime();
   seedDefaults();
   setVerifyEditorOpen(false);
+  setGeneratePage(state.currentGeneratePage);
 
   setCatalogStatus("Loading CSV catalog...", "working");
   setOverviewCard("catalog", {
@@ -155,6 +174,7 @@ export function initApp() {
   setScheduleStatus("Select a league to load upcoming scheduled fixtures, or keep typing manually.", "idle");
   renderDeterministicContext();
   renderGenerateReadiness();
+  renderScheduleSearchControls();
   updateJsonMeta("fixture");
   updateJsonMeta("parent");
   syncActionState();
@@ -197,8 +217,23 @@ function cacheElements() {
     "parentJsonMeta",
     "generateEventNameInput",
     "generateEventNameSuggestions",
-    "generateEventFixtureSelect",
+    "generateBuilderPageBtn",
+    "generateFixturesPageBtn",
+    "generateBuilderPage",
+    "generateFixturesPage",
+    "generateBuilderWeekSelect",
+    "generateBuilderRefetchBtn",
+    "generateBuilderFixturePreview",
+    "generateFixtureLeagueTabs",
+    "generateFixtureWeekTabs",
     "generateFixtureSearchInput",
+    "generateFixtureSearchFiltersBtn",
+    "generateFixtureSearchFiltersMenu",
+    "generateFixtureSearchFilterCount",
+    "generateFixtureSearchFilterTeam",
+    "generateFixtureSearchFilterDate",
+    "generateFixtureSearchFilterKickoff",
+    "generateFixtureSearchFilterMatchday",
     "generateFixtureActiveSummary",
     "generateFixtureActiveTitle",
     "generateFixtureActiveMeta",
@@ -242,11 +277,111 @@ function cacheElements() {
     "generatedParentState",
     "copyGeneratedFixtureBtn",
     "copyGeneratedParentBtn",
+    "themeToggleBtn",
+    "themeToggleIcon",
+    "themeToggleLabel",
     "toastRegion",
   ];
 
   for (const id of ids) {
     els[id] = document.getElementById(id);
+  }
+}
+
+function parseScheduleWeekValue(value) {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function getSupportedScheduleLeagues() {
+  return state.leagues
+    .map((league) => ({
+      ...league,
+      scheduleCode: resolveScheduleLeagueCode(league),
+    }))
+    .filter((league) => Boolean(league.scheduleCode));
+}
+
+function getScheduleLeagueDisplay(league) {
+  const code = String(league?.scheduleCode || "").trim().toLowerCase();
+  if (code === "epl") {
+    return { label: "EPL", icon: "⚽" };
+  }
+  if (code === "laliga") {
+    return { label: "La Liga", icon: "◢" };
+  }
+  if (code === "ucl") {
+    return { label: "UCL", icon: "✦" };
+  }
+  return { label: String(league?.key || league?.name || "").trim(), icon: "•" };
+}
+
+function getScheduleWeekOptions(fixtures = state.upcomingScheduleFixtures) {
+  const options = [];
+  const seen = new Set();
+  for (const fixture of fixtures || []) {
+    const week = parseScheduleWeekValue(fixture?.matchDay);
+    if (!Number.isInteger(week) || seen.has(week)) {
+      continue;
+    }
+    seen.add(week);
+    const count = (fixtures || []).filter((candidate) => parseScheduleWeekValue(candidate?.matchDay) === week).length;
+    options.push({
+      value: week,
+      label: `Matchday ${week}`,
+      count,
+    });
+  }
+  return options.sort((a, b) => a.value - b.value).slice(0, UPCOMING_MATCHWEEK_WINDOW);
+}
+
+function resolveActiveScheduleWeek(weekValue, fixtures = state.upcomingScheduleFixtures) {
+  const options = getScheduleWeekOptions(fixtures);
+  if (Number.isInteger(weekValue) && options.some((option) => option.value === weekValue)) {
+    return weekValue;
+  }
+  return options[0]?.value ?? null;
+}
+
+function getFixturesForScheduleWeek(weekValue, fixtures = state.upcomingScheduleFixtures) {
+  const activeWeek = resolveActiveScheduleWeek(weekValue, fixtures);
+  if (!Number.isInteger(activeWeek)) {
+    return [];
+  }
+  return (fixtures || []).filter((fixture) => parseScheduleWeekValue(fixture?.matchDay) === activeWeek);
+}
+
+function setGeneratePage(page, { focusTarget = null } = {}) {
+  const nextPage = page === "fixtures" ? "fixtures" : "builder";
+  state.currentGeneratePage = nextPage;
+
+  if (els.generateBuilderPage) {
+    els.generateBuilderPage.hidden = nextPage !== "builder";
+  }
+  if (els.generateFixturesPage) {
+    els.generateFixturesPage.hidden = nextPage !== "fixtures";
+  }
+
+  if (els.generateBuilderPageBtn) {
+    const isBuilder = nextPage === "builder";
+    els.generateBuilderPageBtn.classList.toggle("is-active", isBuilder);
+    els.generateBuilderPageBtn.setAttribute("aria-selected", String(isBuilder));
+    els.generateBuilderPageBtn.setAttribute("tabindex", isBuilder ? "0" : "-1");
+  }
+
+  if (els.generateFixturesPageBtn) {
+    const isFixtures = nextPage === "fixtures";
+    els.generateFixturesPageBtn.classList.toggle("is-active", isFixtures);
+    els.generateFixturesPageBtn.setAttribute("aria-selected", String(isFixtures));
+    els.generateFixturesPageBtn.setAttribute("tabindex", isFixtures ? "0" : "-1");
+  }
+
+  persistInputSnapshot();
+
+  if (focusTarget && typeof focusTarget.focus === "function") {
+    window.setTimeout(() => {
+      focusTarget.focus();
+    }, 0);
   }
 }
 
@@ -290,19 +425,55 @@ function bindEvents() {
   });
 
   els.generateLeagueSelect.addEventListener("change", () => {
+    const selectedLeagueId = String(els.generateLeagueSelect.value || "").trim();
+    const selectedLeague = state.leagues.find((league) => String(league.id || "") === selectedLeagueId) || null;
+    const nextScheduleLeagueCode = resolveScheduleLeagueCode(selectedLeague);
+    const currentScheduleLeagueCode = String(state.upcomingScheduleLeagueCode || "").trim().toLowerCase();
+    const currentSelectedFixture = getCurrentSelectedScheduleFixture();
+
+    if (currentSelectedFixture && currentScheduleLeagueCode && nextScheduleLeagueCode !== currentScheduleLeagueCode) {
+      clearSelectedScheduleFixtureState({ clearDerivedInputs: true, resetWeeks: true });
+    }
+
     persistInputSnapshot();
+    renderScheduleLeagueTabs();
     renderDeterministicContext();
     void refreshLeagueScheduleSuggestions();
   });
 
+  els.generateBuilderPageBtn?.addEventListener("click", () => {
+    setGeneratePage("builder", { focusTarget: els.generateEventNameInput });
+  });
+
+  els.generateFixturesPageBtn?.addEventListener("click", () => {
+    setGeneratePage("fixtures", { focusTarget: els.generateFixtureSearchInput });
+  });
+
+  els.generateBuilderWeekSelect?.addEventListener("change", () => {
+    const selectedWeek = parseScheduleWeekValue(els.generateBuilderWeekSelect.value);
+    state.builderScheduleWeek = selectedWeek;
+    state.fixturesPageScheduleWeek = selectedWeek;
+    persistInputSnapshot();
+    renderBuilderFixturePreview();
+    renderUpcomingFixturesPage();
+  });
+
+  const handleRefetchFixtures = () => {
+    void refreshLeagueScheduleSuggestions({ force: true });
+  };
+
   if (els.refreshScheduleBtn) {
-    els.refreshScheduleBtn.addEventListener("click", () => {
-      void refreshLeagueScheduleSuggestions({ force: true });
-    });
+    els.refreshScheduleBtn.addEventListener("click", handleRefetchFixtures);
   }
 
-  els.generateEventFixtureSelect.addEventListener("change", () => {
-    applySelectedScheduleFixture(els.generateEventFixtureSelect.value);
+  if (els.generateBuilderRefetchBtn) {
+    els.generateBuilderRefetchBtn.addEventListener("click", handleRefetchFixtures);
+  }
+
+  els.themeToggleBtn?.addEventListener("click", () => {
+    const nextTheme = state.theme === "dark" ? "light" : "dark";
+    applyTheme(nextTheme);
+    saveThemePreference(nextTheme);
   });
 
   els.generateEventNameInput.addEventListener("change", () => {
@@ -314,12 +485,26 @@ function bindEvents() {
   });
 
   els.generateFixtureSearchInput.addEventListener("input", () => {
-    renderScheduleFixtureBrowser(state.upcomingScheduleFixtures, {
+    persistInputSnapshot();
+    renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
       selectedWeek: state.upcomingScheduleWeek,
       selectedLabel: state.upcomingScheduleLabel,
       leagueCode: state.upcomingScheduleLeagueCode,
     });
   });
+
+  if (els.generateFixtureSearchFiltersBtn) {
+    els.generateFixtureSearchFiltersBtn.addEventListener("click", () => {
+      if (els.generateFixtureSearchFiltersBtn.disabled) {
+        return;
+      }
+      setScheduleFilterMenuOpen(!state.isScheduleFilterMenuOpen);
+    });
+  }
+
+  for (const checkbox of getScheduleFilterCheckboxes()) {
+    checkbox.addEventListener("change", handleScheduleSearchFilterChange);
+  }
 
   els.generateFixtureSearchInput.addEventListener("keydown", handleScheduleBrowserKeydown);
   els.generateFixtureResults.addEventListener("keydown", handleScheduleBrowserKeydown);
@@ -413,6 +598,12 @@ function bindEvents() {
   });
 
   document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.isScheduleFilterMenuOpen) {
+      setScheduleFilterMenuOpen(false);
+      els.generateFixtureSearchFiltersBtn?.focus();
+      return;
+    }
+
     const primaryMod = event.metaKey || event.ctrlKey;
     if (!primaryMod || event.key !== "Enter") {
       return;
@@ -426,7 +617,46 @@ function bindEvents() {
     void handleVerify("both");
   });
 
+  document.addEventListener("pointerdown", (event) => {
+    if (!state.isScheduleFilterMenuOpen) {
+      return;
+    }
+
+    if (!(event.target instanceof Element)) {
+      setScheduleFilterMenuOpen(false);
+      return;
+    }
+
+    if (!event.target.closest(".fixture-search-shell")) {
+      setScheduleFilterMenuOpen(false);
+    }
+  });
+
   document.addEventListener("click", (event) => {
+    const leagueTab = event.target instanceof Element ? event.target.closest(".league-nav-tab") : null;
+    if (leagueTab) {
+      const leagueId = String(leagueTab.getAttribute("data-league-id") || "").trim();
+      if (leagueId && els.generateLeagueSelect.value !== leagueId) {
+        els.generateLeagueSelect.value = leagueId;
+        persistInputSnapshot();
+        renderScheduleLeagueTabs();
+        renderDeterministicContext();
+        void refreshLeagueScheduleSuggestions({ force: true });
+      }
+      return;
+    }
+
+    const weekPill = event.target instanceof Element ? event.target.closest(".fixtures-week-pill") : null;
+    if (weekPill) {
+      const week = parseScheduleWeekValue(weekPill.getAttribute("data-week"));
+      state.fixturesPageScheduleWeek = week;
+      state.builderScheduleWeek = week;
+      persistInputSnapshot();
+      renderUpcomingFixturesPage();
+      renderBuilderFixturePreview();
+      return;
+    }
+
     const toggle = event.target instanceof Element ? event.target.closest(".result-chip-toggle") : null;
     if (toggle) {
       const targetId = String(toggle.getAttribute("aria-controls") || "").trim();
@@ -447,16 +677,24 @@ function bindEvents() {
       return;
     }
 
-    const scheduleButton = event.target instanceof Element ? event.target.closest(".schedule-fixture-btn") : null;
+    const scheduleButton = event.target instanceof Element
+      ? event.target.closest(".schedule-fixture-btn, .builder-fixture-row")
+      : null;
     if (!scheduleButton) {
       return;
     }
 
+    const fixtureId = String(scheduleButton.getAttribute("data-fixture-id") || "").trim();
     const eventName = String(scheduleButton.getAttribute("data-event-name") || "").trim();
-    if (!eventName) {
+    const selection = fixtureId || eventName;
+    if (!selection) {
       return;
     }
-    applySelectedScheduleFixture(eventName);
+    const preservePage = state.currentGeneratePage === "fixtures";
+    const appliedFixture = applySelectedScheduleFixture(selection, { preservePage });
+    if (appliedFixture && preservePage) {
+      void handleGenerate({ preserveGeneratePage: true });
+    }
   });
 
   bindInputPersistence();
@@ -515,8 +753,14 @@ function persistInputSnapshot() {
       parentJson: state.persistParentInput ? String(els.parentInputJson.value || "") : "",
     },
     generate: {
+      page: String(state.currentGeneratePage || "builder"),
+      builderScheduleWeek: Number.isInteger(state.builderScheduleWeek) ? state.builderScheduleWeek : "",
+      fixturesPageScheduleWeek: Number.isInteger(state.fixturesPageScheduleWeek) ? state.fixturesPageScheduleWeek : "",
       eventName: String(els.generateEventNameInput.value || ""),
       leagueSelection: String(els.generateLeagueSelect.value || state.pendingRestoredLeagueSelection || ""),
+      selectedScheduleFixtureId: String(state.selectedScheduleFixtureId || state.pendingRestoredSelectedScheduleFixtureId || ""),
+      fixtureSearch: String(els.generateFixtureSearchInput.value || ""),
+      fixtureSearchFilters: { ...state.scheduleSearchFilters },
       typeReferenceId: String(els.generateTypeRefInput.value || ""),
       fixtureDate: String(els.generateFixtureDateInput.value || ""),
       kickoffTimeUtc: String(els.generateKickoffTimeInput.value || ""),
@@ -553,8 +797,14 @@ function restoreInputSnapshot() {
   state.persistFixtureInput = true;
   state.persistParentInput = true;
 
+  state.currentGeneratePage = String(generate.page || "") === "fixtures" ? "fixtures" : "builder";
+  state.builderScheduleWeek = parseScheduleWeekValue(generate.builderScheduleWeek);
+  state.fixturesPageScheduleWeek = parseScheduleWeekValue(generate.fixturesPageScheduleWeek);
   els.generateEventNameInput.value = asRestoredString(generate.eventName);
   state.pendingRestoredLeagueSelection = asRestoredString(generate.leagueSelection);
+  state.pendingRestoredSelectedScheduleFixtureId = asRestoredString(generate.selectedScheduleFixtureId);
+  els.generateFixtureSearchInput.value = asRestoredString(generate.fixtureSearch);
+  state.scheduleSearchFilters = createScheduleSearchFilters(generate.fixtureSearchFilters);
   els.generateTypeRefInput.value = asRestoredString(generate.typeReferenceId);
   els.generateFixtureDateInput.value = asRestoredString(generate.fixtureDate) || els.generateFixtureDateInput.value;
   els.generateKickoffTimeInput.value = asRestoredString(generate.kickoffTimeUtc) || els.generateKickoffTimeInput.value;
@@ -640,6 +890,7 @@ function populateLeagueSelect() {
     els.generateLeagueSelect.value = current;
   }
   state.pendingRestoredLeagueSelection = "";
+  renderScheduleLeagueTabs();
   renderDeterministicContext();
 }
 
@@ -668,7 +919,12 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
     !force &&
     savedSnapshot &&
     Array.isArray(savedSnapshot.fixtures) &&
-    (snapshotMode === "immediate-week" || snapshotMode === "immediate-two-weeks");
+    (
+      snapshotMode === "immediate-week" ||
+      snapshotMode === "immediate-two-weeks" ||
+      snapshotMode === "immediate-five-weeks" ||
+      snapshotMode === "immediate-six-weeks"
+    );
 
   if (canUseSavedSnapshot) {
     applyScheduleSnapshot(scheduleLeagueCode, savedSnapshot, { reason: "snapshot" });
@@ -678,6 +934,11 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
       fixtures: savedSnapshot.fixtures.length,
       referenceNow: savedSnapshot.referenceNowIso || state.referenceNowIso,
     });
+    state.isScheduleLoading = false;
+    setButtonBusy(els.refreshScheduleBtn, false, "Refetch Fixtures");
+    setButtonBusy(els.generateBuilderRefetchBtn, false, "Refetch Fixtures");
+    syncActionState();
+    return;
   }
 
   const hasWarmCache =
@@ -691,15 +952,24 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
       state.upcomingScheduleLabel,
       scheduleLeagueCode
     );
+    state.isScheduleLoading = false;
+    setButtonBusy(els.refreshScheduleBtn, false, "Refetch Fixtures");
+    setButtonBusy(els.generateBuilderRefetchBtn, false, "Refetch Fixtures");
+    syncActionState();
+    return;
   }
 
   state.isScheduleLoading = true;
   setButtonBusy(els.refreshScheduleBtn, true, force ? "Refetching..." : "Loading...");
+  setButtonBusy(els.generateBuilderRefetchBtn, true, force ? "Refetching..." : "Loading...");
   syncActionState();
   setScheduleStatus(`Loading upcoming ${String(scheduleLeagueCode || "").toUpperCase()} fixtures...`, "working");
   if (!hasWarmCache) {
     els.generateFixtureSummary.textContent = "Loading upcoming fixtures...";
     els.generateFixtureResults.innerHTML = `<div class="schedule-browser-empty">Loading upcoming fixtures...</div>`;
+    if (els.generateBuilderFixturePreview) {
+      els.generateBuilderFixturePreview.innerHTML = `<div class="schedule-browser-empty">Loading upcoming fixtures...</div>`;
+    }
   }
   uiLog.info("schedule.load_start", {
     requestId,
@@ -710,7 +980,7 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
 
   try {
     const payload = await fetchUpcomingFixturesForLeague(scheduleLeagueCode, {
-      refresh: true,
+      refresh: force,
       referenceNowIso: state.referenceNowIso,
     });
     if (requestId !== state.scheduleRequestId) {
@@ -742,8 +1012,9 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
       fixtures: snapshot.fixtures.length,
       referenceNow: snapshot.referenceNowIso,
     });
-    if (els.generateEventNameInput.value.trim()) {
-      applySelectedScheduleFixture(els.generateEventNameInput.value, { fromManualEntry: true, silent: true });
+    const currentScheduleSelection = String(state.selectedScheduleFixtureId || els.generateEventNameInput.value || "").trim();
+    if (currentScheduleSelection) {
+      applySelectedScheduleFixture(currentScheduleSelection, { fromManualEntry: true, silent: true });
     }
   } catch (error) {
     if (requestId !== state.scheduleRequestId) {
@@ -756,6 +1027,7 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
       return;
     }
     clearScheduleSuggestions();
+    els.generateFixtureResults.innerHTML = `<div class="schedule-browser-empty">Could not load upcoming fixtures right now.</div>`;
     setScheduleStatus(`Could not load upcoming ${String(scheduleLeagueCode || "").toUpperCase()} fixtures: ${String(error?.message || error)}`, "error");
     uiLog.error("schedule.load_failed", {
       requestId,
@@ -766,6 +1038,7 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
     if (requestId === state.scheduleRequestId) {
       state.isScheduleLoading = false;
       setButtonBusy(els.refreshScheduleBtn, false, "Refetch Fixtures");
+      setButtonBusy(els.generateBuilderRefetchBtn, false, "Refetch Fixtures");
       syncActionState();
     }
   }
@@ -773,29 +1046,21 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
 
 function renderScheduleSuggestions(fixtures, selectedWeek, selectedLabel, leagueCode) {
   const datalistOptions = [];
-  const selectOptions = [`<option value="">Pick an upcoming fixture</option>`];
 
   for (const fixture of fixtures || []) {
     const eventName = String(fixture?.eventName || "").trim();
-    const label = String(fixture?.optionLabel || eventName).trim();
     if (!eventName) {
       continue;
     }
 
+    const label = String(fixture?.optionLabel || eventName).trim();
     datalistOptions.push(`<option value="${escapeHtml(eventName)}" label="${escapeHtml(label)}"></option>`);
-    selectOptions.push(`<option value="${escapeHtml(eventName)}">${escapeHtml(label)}</option>`);
   }
 
   els.generateEventNameSuggestions.innerHTML = datalistOptions.join("");
-  els.generateEventFixtureSelect.innerHTML = selectOptions.join("");
-  renderScheduleFixtureBrowser(fixtures, { selectedWeek, selectedLabel, leagueCode });
-
-  const currentEventName = String(els.generateEventNameInput.value || "").trim();
-  if (currentEventName && (fixtures || []).some((fixture) => String(fixture?.eventName || "") === currentEventName)) {
-    els.generateEventFixtureSelect.value = currentEventName;
-  } else {
-    els.generateEventFixtureSelect.value = "";
-  }
+  renderBuilderFixturePreview(fixtures);
+  renderUpcomingFixturesPage(fixtures, { selectedWeek, selectedLabel, leagueCode });
+  renderScheduleLeagueTabs();
 
   if (!fixtures || fixtures.length === 0) {
     setScheduleStatus("No upcoming fixtures were found for this league in the schedule API.", "warn");
@@ -803,23 +1068,52 @@ function renderScheduleSuggestions(fixtures, selectedWeek, selectedLabel, league
   }
 
   const weekLabel = selectedLabel || (Number.isInteger(selectedWeek) ? `Matchday ${selectedWeek}` : "Upcoming fixtures");
-  setScheduleStatus(`${weekLabel} loaded from ${String(leagueCode || "").toUpperCase()} schedule API. Pick a fixture or keep typing manually.`, "success");
+  setScheduleStatus(`${weekLabel} loaded from ${String(leagueCode || "").toUpperCase()} schedule API. Pick a fixture or type manually.`, "success");
 }
 
 function applyScheduleSnapshot(leagueCode, snapshot, { reason = "snapshot" } = {}) {
+  const previousSelectedFixture = getCurrentSelectedScheduleFixture();
   const fixtures = Array.isArray(snapshot?.fixtures) ? snapshot.fixtures : [];
+  const nextLeagueCode = String(leagueCode || "").trim().toLowerCase();
+  const leagueChanged = nextLeagueCode !== String(state.upcomingScheduleLeagueCode || "").trim().toLowerCase();
+  const defaultWeek = Number.isInteger(snapshot?.selectedWeek) ? snapshot.selectedWeek : null;
   state.upcomingScheduleLeagueCode = String(leagueCode || "").trim().toLowerCase();
   state.upcomingScheduleWeek = Number.isInteger(snapshot?.selectedWeek) ? snapshot.selectedWeek : null;
+  state.upcomingScheduleWeeks = Array.isArray(snapshot?.selectedWeeks)
+    ? snapshot.selectedWeeks.filter((value) => Number.isInteger(value)).slice(0, UPCOMING_MATCHWEEK_WINDOW)
+    : [];
   state.upcomingScheduleLabel = String(snapshot?.selectedLabel || "").trim();
   state.upcomingScheduleFixtures = fixtures;
+  state.builderScheduleWeek = resolveActiveScheduleWeek(
+    leagueChanged ? defaultWeek : state.builderScheduleWeek ?? defaultWeek,
+    fixtures
+  );
+  state.fixturesPageScheduleWeek = resolveActiveScheduleWeek(
+    leagueChanged ? defaultWeek : state.fixturesPageScheduleWeek ?? defaultWeek,
+    fixtures
+  );
+  const restoredFixture = resolveScheduleFixture(state.pendingRestoredSelectedScheduleFixtureId, fixtures);
+  if (restoredFixture) {
+    state.selectedScheduleFixtureId = getScheduleFixtureIdentity(restoredFixture);
+    state.pendingRestoredSelectedScheduleFixtureId = "";
+  } else if (
+    state.selectedScheduleFixtureId &&
+    !resolveScheduleFixture(state.selectedScheduleFixtureId, fixtures)
+  ) {
+    const shouldClearDerivedInputs =
+      leagueChanged &&
+      previousSelectedFixture &&
+      normalizeForSearch(els.generateEventNameInput.value || "") ===
+        normalizeForSearch(previousSelectedFixture.eventName || "");
+
+    clearSelectedScheduleFixtureState({ clearDerivedInputs: shouldClearDerivedInputs });
+  }
   renderScheduleSuggestions(fixtures, state.upcomingScheduleWeek, state.upcomingScheduleLabel, state.upcomingScheduleLeagueCode);
   renderDeterministicContext();
 
   const weekLabel = state.upcomingScheduleLabel || (state.upcomingScheduleWeek ? `Matchday ${state.upcomingScheduleWeek}` : "Upcoming fixtures");
-  const referenceNow = normalizeReferenceNowIso(snapshot?.referenceNowIso || state.referenceNowIso);
-  const sourceNote = reason === "snapshot" ? "Using deterministic saved snapshot." : "Using deterministic fetched snapshot.";
   setScheduleStatus(
-    `${weekLabel} loaded from ${String(leagueCode || "").toUpperCase()} schedule API. ${sourceNote} Reference UTC: ${referenceNow || "unknown"}.`,
+    `${weekLabel} loaded from ${String(leagueCode || "").toUpperCase()} schedule API.`,
     "success"
   );
 }
@@ -827,18 +1121,50 @@ function applyScheduleSnapshot(leagueCode, snapshot, { reason = "snapshot" } = {
 function clearScheduleSuggestions() {
   state.upcomingScheduleLeagueCode = "";
   state.upcomingScheduleWeek = null;
+  state.upcomingScheduleWeeks = [];
   state.upcomingScheduleLabel = "";
   state.upcomingScheduleFixtures = [];
-  state.scheduleCursorEventName = "";
+  clearSelectedScheduleFixtureState();
+  state.builderScheduleWeek = null;
+  state.fixturesPageScheduleWeek = null;
+  setScheduleFilterMenuOpen(false);
   els.generateFixtureSearchInput.value = "";
   els.generateEventNameSuggestions.innerHTML = "";
-  els.generateEventFixtureSelect.innerHTML = `<option value="">Pick a fixture after selecting a supported league</option>`;
-  els.generateEventFixtureSelect.value = "";
   els.generateFixtureSummary.textContent = "Select a supported league to browse upcoming fixtures.";
+  if (els.generateBuilderWeekSelect) {
+    els.generateBuilderWeekSelect.innerHTML = `<option value="">Select a league first</option>`;
+    els.generateBuilderWeekSelect.value = "";
+  }
+  if (els.generateBuilderFixturePreview) {
+    els.generateBuilderFixturePreview.innerHTML = `<div class="schedule-browser-empty">No schedule loaded yet.</div>`;
+  }
+  renderScheduleLeagueTabs();
+  if (els.generateFixtureWeekTabs) {
+    els.generateFixtureWeekTabs.innerHTML = "";
+    els.generateFixtureWeekTabs.hidden = true;
+  }
   els.generateFixtureResults.innerHTML = `<div class="schedule-browser-empty">No schedule loaded yet.</div>`;
   renderScheduleActiveSummary(null, { leagueCode: "" });
   renderDeterministicContext();
   renderGenerateReadiness();
+}
+
+function clearSelectedScheduleFixtureState({ clearDerivedInputs = false, resetWeeks = false } = {}) {
+  state.selectedScheduleFixtureId = "";
+  state.scheduleCursorFixtureId = "";
+
+  if (clearDerivedInputs) {
+    els.generateEventNameInput.value = "";
+    els.generateFixtureDateInput.value = "";
+    els.generateKickoffTimeInput.value = "";
+    els.generateMatchDayInput.value = "";
+    els.generateMatchWeekInput.value = "";
+  }
+
+  if (resetWeeks) {
+    state.builderScheduleWeek = null;
+    state.fixturesPageScheduleWeek = null;
+  }
 }
 
 function setScheduleStatus(message, tone = "idle") {
@@ -855,46 +1181,56 @@ function setScheduleStatus(message, tone = "idle") {
   }
 }
 
-function applySelectedScheduleFixture(rawEventName, { fromManualEntry = false, silent = false } = {}) {
-  const eventName = String(rawEventName || "").trim();
-  if (!eventName || !Array.isArray(state.upcomingScheduleFixtures) || state.upcomingScheduleFixtures.length === 0) {
-    if (!eventName) {
-      els.generateEventFixtureSelect.value = "";
+function applySelectedScheduleFixture(rawEventName, { fromManualEntry = false, silent = false, preservePage = false } = {}) {
+  const selection = String(rawEventName || "").trim();
+  if (!selection || !Array.isArray(state.upcomingScheduleFixtures) || state.upcomingScheduleFixtures.length === 0) {
+    if (!selection) {
+      state.selectedScheduleFixtureId = "";
     }
-    renderScheduleFixtureBrowser(state.upcomingScheduleFixtures, {
+    renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
       selectedWeek: state.upcomingScheduleWeek,
       selectedLabel: state.upcomingScheduleLabel,
       leagueCode: state.upcomingScheduleLeagueCode,
     });
+    renderBuilderFixturePreview(state.upcomingScheduleFixtures);
     return null;
   }
 
-  const normalizedTarget = normalizeForSearch(eventName);
-  const fixture = state.upcomingScheduleFixtures.find((entry) => normalizeForSearch(entry?.eventName) === normalizedTarget) || null;
+  const fixture = resolveScheduleFixture(selection, state.upcomingScheduleFixtures);
   if (!fixture) {
-    els.generateEventFixtureSelect.value = "";
     if (fromManualEntry) {
-      renderScheduleFixtureBrowser(state.upcomingScheduleFixtures, {
+      state.selectedScheduleFixtureId = "";
+      renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
         selectedWeek: state.upcomingScheduleWeek,
         selectedLabel: state.upcomingScheduleLabel,
         leagueCode: state.upcomingScheduleLeagueCode,
       });
+      renderBuilderFixturePreview(state.upcomingScheduleFixtures);
     }
     return null;
   }
 
   els.generateEventNameInput.value = fixture.eventName;
-  els.generateEventFixtureSelect.value = fixture.eventName;
   els.generateFixtureDateInput.value = String(fixture.fixtureDate || "");
   els.generateKickoffTimeInput.value = String(fixture.kickoffTimeUtc || "");
   els.generateMatchDayInput.value = String(fixture.matchDay || "");
-  state.scheduleCursorEventName = fixture.eventName;
-  renderScheduleFixtureBrowser(state.upcomingScheduleFixtures, {
+  state.selectedScheduleFixtureId = getScheduleFixtureIdentity(fixture);
+  state.scheduleCursorFixtureId = getScheduleFixtureIdentity(fixture);
+  const fixtureWeek = parseScheduleWeekValue(fixture.matchDay);
+  if (Number.isInteger(fixtureWeek)) {
+    state.builderScheduleWeek = fixtureWeek;
+    state.fixturesPageScheduleWeek = fixtureWeek;
+  }
+  renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
     selectedWeek: state.upcomingScheduleWeek,
     selectedLabel: state.upcomingScheduleLabel,
     leagueCode: state.upcomingScheduleLeagueCode,
   });
+  renderBuilderFixturePreview(state.upcomingScheduleFixtures);
   persistInputSnapshot();
+  if (!preservePage) {
+    setGeneratePage("builder");
+  }
 
   if (!silent) {
     showToast("Fixture schedule applied to Event Setup.", "success");
@@ -903,21 +1239,325 @@ function applySelectedScheduleFixture(rawEventName, { fromManualEntry = false, s
   return fixture;
 }
 
-function renderScheduleFixtureBrowser(fixtures, { selectedWeek = null, selectedLabel = "", leagueCode = "" } = {}) {
-  const allFixtures = Array.isArray(fixtures) ? fixtures : [];
-  const filter = normalizeForSearch(els.generateFixtureSearchInput.value || "");
-  const selectedEventName = normalizeForSearch(els.generateEventNameInput.value || "");
-  const filteredFixtures = !filter
-    ? allFixtures
-    : allFixtures.filter((fixture) => {
-        const haystack = normalizeForSearch(
-          `${fixture?.eventName || ""} ${fixture?.optionLabel || ""} ${fixture?.fixtureDate || ""} ${fixture?.kickoffTimeUtc || ""}`
-        );
-        return haystack.includes(filter);
-      });
+function getScheduleFixtureIdentity(fixture) {
+  const gameId = String(fixture?.gameId || fixture?.game_id || "").trim();
+  if (gameId) {
+    return `game:${gameId}`;
+  }
 
-  const selectedFixture =
-    allFixtures.find((fixture) => normalizeForSearch(fixture?.eventName) === selectedEventName) || null;
+  const kickoffIso = String(fixture?.kickoffIso || "").trim();
+  const eventName = normalizeForSearch(fixture?.eventName || "");
+  if (kickoffIso && eventName) {
+    return `fixture:${kickoffIso}:${eventName}`;
+  }
+
+  return eventName ? `event:${eventName}` : "";
+}
+
+function resolveScheduleFixture(selection, fixtures = []) {
+  const raw = String(selection || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const byIdentity = fixtures.find((fixture) => getScheduleFixtureIdentity(fixture) === raw);
+  if (byIdentity) {
+    return byIdentity;
+  }
+
+  const normalized = normalizeForSearch(raw);
+  if (!normalized) {
+    return null;
+  }
+
+  const matches = fixtures.filter((fixture) => normalizeForSearch(fixture?.eventName) === normalized);
+  if (matches.length === 1) {
+    return matches[0];
+  }
+
+  return null;
+}
+
+function getCurrentSelectedScheduleFixture(fixtures = state.upcomingScheduleFixtures) {
+  return resolveScheduleFixture(state.selectedScheduleFixtureId, fixtures);
+}
+
+function createScheduleSearchFilters(raw = {}) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  return {
+    team: source.team !== false,
+    date: source.date !== false,
+    kickoff: source.kickoff !== false,
+    matchday: source.matchday !== false,
+  };
+}
+
+function getScheduleFilterCheckboxes() {
+  return [
+    els.generateFixtureSearchFilterTeam,
+    els.generateFixtureSearchFilterDate,
+    els.generateFixtureSearchFilterKickoff,
+    els.generateFixtureSearchFilterMatchday,
+  ].filter(Boolean);
+}
+
+function getActiveScheduleSearchFilterKeys() {
+  return Object.entries(state.scheduleSearchFilters)
+    .filter(([, enabled]) => Boolean(enabled))
+    .map(([key]) => key);
+}
+
+function getScheduleSearchPlaceholder() {
+  const activeKeys = getActiveScheduleSearchFilterKeys();
+  if (activeKeys.length === 0 || activeKeys.length === Object.keys(DEFAULT_SCHEDULE_SEARCH_FILTERS).length) {
+    return "Search by team, date, kickoff, or matchday";
+  }
+
+  const labels = activeKeys.map((key) => {
+    if (key === "team") return "team";
+    if (key === "date") return "date";
+    if (key === "kickoff") return "kickoff";
+    if (key === "matchday") return "matchday";
+    return key;
+  });
+  return `Search by ${labels.join(", ")}`;
+}
+
+function renderScheduleSearchControls() {
+  const activeKeys = getActiveScheduleSearchFilterKeys();
+  const count = activeKeys.length || Object.keys(DEFAULT_SCHEDULE_SEARCH_FILTERS).length;
+  const searchDisabled =
+    state.isScheduleLoading || state.isCatalogLoading || state.upcomingScheduleFixtures.length === 0;
+
+  if (searchDisabled && state.isScheduleFilterMenuOpen) {
+    state.isScheduleFilterMenuOpen = false;
+  }
+
+  if (els.generateFixtureSearchInput) {
+    els.generateFixtureSearchInput.placeholder = getScheduleSearchPlaceholder();
+    els.generateFixtureSearchInput.disabled = searchDisabled;
+  }
+
+  if (els.generateFixtureSearchFilterCount) {
+    els.generateFixtureSearchFilterCount.textContent = String(count);
+  }
+
+  if (els.generateFixtureSearchFiltersBtn) {
+    els.generateFixtureSearchFiltersBtn.disabled = searchDisabled;
+    els.generateFixtureSearchFiltersBtn.setAttribute("aria-expanded", String(state.isScheduleFilterMenuOpen));
+    els.generateFixtureSearchFiltersBtn.title = `Search filters (${count} active)`;
+  }
+
+  if (els.generateFixtureSearchFiltersMenu) {
+    els.generateFixtureSearchFiltersMenu.hidden = searchDisabled || !state.isScheduleFilterMenuOpen;
+  }
+
+  for (const checkbox of getScheduleFilterCheckboxes()) {
+    const key = String(checkbox.dataset.filterKey || "").trim();
+    checkbox.checked = Boolean(state.scheduleSearchFilters[key]);
+    checkbox.disabled = searchDisabled;
+  }
+}
+
+function setScheduleFilterMenuOpen(isOpen) {
+  state.isScheduleFilterMenuOpen = Boolean(isOpen);
+  renderScheduleSearchControls();
+}
+
+function buildScheduleFixtureSearchSegments(fixture) {
+  const metaLine = buildScheduleFixtureMetaLine(fixture);
+  const matchDay = Number.isInteger(fixture?.matchDay) ? fixture.matchDay : "";
+  return {
+    team: `${fixture?.eventName || ""} ${fixture?.optionLabel || ""}`,
+    date: `${fixture?.fixtureDate || ""} ${metaLine || ""}`,
+    kickoff: `${fixture?.kickoffTimeUtc || ""} ${metaLine || ""}`,
+    matchday: `${matchDay ? `matchday ${matchDay}` : ""} ${fixture?.roundLabel || ""}`,
+  };
+}
+
+function fixtureMatchesScheduleSearch(fixture, filterNeedle) {
+  if (!filterNeedle) {
+    return true;
+  }
+
+  const activeKeys = getActiveScheduleSearchFilterKeys();
+  const effectiveKeys = activeKeys.length ? activeKeys : Object.keys(DEFAULT_SCHEDULE_SEARCH_FILTERS);
+  const segments = buildScheduleFixtureSearchSegments(fixture);
+  return effectiveKeys.some((key) => normalizeForSearch(segments[key] || "").includes(filterNeedle));
+}
+
+function handleScheduleSearchFilterChange(event) {
+  const checkbox = event.target;
+  if (!(checkbox instanceof HTMLInputElement)) {
+    return;
+  }
+
+  const key = String(checkbox.dataset.filterKey || "").trim();
+  if (!key || !(key in DEFAULT_SCHEDULE_SEARCH_FILTERS)) {
+    return;
+  }
+
+  const nextFilters = {
+    ...state.scheduleSearchFilters,
+    [key]: checkbox.checked,
+  };
+  const checkedCount = Object.values(nextFilters).filter(Boolean).length;
+  if (checkedCount === 0) {
+    checkbox.checked = true;
+    return;
+  }
+
+  state.scheduleSearchFilters = nextFilters;
+  persistInputSnapshot();
+  renderScheduleSearchControls();
+  renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
+    selectedWeek: state.upcomingScheduleWeek,
+    selectedLabel: state.upcomingScheduleLabel,
+    leagueCode: state.upcomingScheduleLeagueCode,
+  });
+}
+
+function renderBuilderFixturePreview(fixtures = state.upcomingScheduleFixtures) {
+  const allFixtures = Array.isArray(fixtures) ? fixtures : [];
+  const weekOptions = getScheduleWeekOptions(allFixtures);
+  const activeWeek = resolveActiveScheduleWeek(state.builderScheduleWeek, allFixtures);
+  state.builderScheduleWeek = activeWeek;
+
+  if (els.generateBuilderWeekSelect) {
+    const optionsHtml = weekOptions.length
+      ? weekOptions
+          .map((option) => `<option value="${escapeHtml(String(option.value))}">${escapeHtml(`${option.label} · ${option.count} fixture${option.count === 1 ? "" : "s"}`)}</option>`)
+          .join("")
+      : `<option value="">No upcoming weeks</option>`;
+    els.generateBuilderWeekSelect.innerHTML = optionsHtml;
+    els.generateBuilderWeekSelect.value = Number.isInteger(activeWeek) ? String(activeWeek) : "";
+    els.generateBuilderWeekSelect.disabled = weekOptions.length === 0 || state.isScheduleLoading || state.isCatalogLoading;
+  }
+
+  if (!els.generateBuilderFixturePreview) {
+    return;
+  }
+
+  if (!allFixtures.length || !Number.isInteger(activeWeek)) {
+    els.generateBuilderFixturePreview.innerHTML = `<div class="schedule-browser-empty">Select a supported league to preview the next 6 upcoming matchweeks.</div>`;
+    return;
+  }
+
+  const visibleFixtures = getFixturesForScheduleWeek(activeWeek, allFixtures);
+  els.generateBuilderFixturePreview.innerHTML = visibleFixtures
+    .map((fixture) => {
+      const fixtureId = getScheduleFixtureIdentity(fixture);
+      const eventName = String(fixture?.eventName || "").trim();
+      const isSelected = fixtureId && fixtureId === state.selectedScheduleFixtureId;
+      const sides = splitScheduleEventName(eventName);
+      return (
+        `<button type="button" class="builder-fixture-row${isSelected ? " is-selected" : ""}" data-event-name="${escapeHtml(eventName)}" data-fixture-id="${escapeHtml(fixtureId)}">` +
+        `<span class="builder-fixture-copy">` +
+        renderFixtureTeamsMarkup(sides, { compact: true }) +
+        `<span class="builder-fixture-footer">` +
+        `<span class="builder-fixture-meta">${escapeHtml(buildScheduleFixtureMetaLine(fixture))}</span>` +
+        `<span class="builder-fixture-cta">${isSelected ? "Applied" : "Apply"}</span>` +
+        `</span>` +
+        `</span>` +
+        `</button>`
+      );
+    })
+    .join("");
+}
+
+function splitScheduleEventName(eventName) {
+  const value = String(eventName || "").trim();
+  if (!value) {
+    return { home: "", away: "", full: "" };
+  }
+  const parts = value.split(/\s+vs\s+/i);
+  if (parts.length >= 2) {
+    return {
+      home: parts[0].trim(),
+      away: parts.slice(1).join(" vs ").trim(),
+      full: value,
+    };
+  }
+  return { home: value, away: "", full: value };
+}
+
+function renderFixtureTeamsMarkup(sides, { compact = false } = {}) {
+  const home = String(sides?.home || "").trim();
+  const away = String(sides?.away || "").trim();
+  const full = String(sides?.full || home || "").trim();
+  if (!away) {
+    return (
+      `<span class="fixture-card-teams${compact ? " is-compact" : ""}">` +
+      `<span class="fixture-card-team fixture-card-team--home">${escapeHtml(full)}</span>` +
+      `</span>`
+    );
+  }
+    return (
+      `<span class="fixture-card-teams${compact ? " is-compact" : ""}">` +
+      `<span class="fixture-card-team fixture-card-team--home">${escapeHtml(home)}</span>` +
+      `<span class="fixture-card-vs"> vs </span>` +
+      `<span class="fixture-card-team fixture-card-team--away">${escapeHtml(away)}</span>` +
+      `</span>`
+    );
+  }
+
+function groupFixturesByScheduleWeek(fixtures = []) {
+  const groups = new Map();
+  for (const fixture of fixtures || []) {
+    const week = parseScheduleWeekValue(fixture?.matchDay);
+    const key = Number.isInteger(week) ? `matchday:${week}` : `round:${String(fixture?.roundLabel || fixture?.fixtureDate || "upcoming")}`;
+    const title = Number.isInteger(week)
+      ? `Matchday ${week}`
+      : String(fixture?.roundLabel || fixture?.fixtureDate || "Upcoming fixtures");
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        title,
+        week,
+        fixtures: [],
+      });
+    }
+    groups.get(key).fixtures.push(fixture);
+  }
+  return Array.from(groups.values()).sort((a, b) => {
+    const weekA = Number.isInteger(a.week) ? a.week : Number.MAX_SAFE_INTEGER;
+    const weekB = Number.isInteger(b.week) ? b.week : Number.MAX_SAFE_INTEGER;
+    if (weekA !== weekB) {
+      return weekA - weekB;
+    }
+    return a.title.localeCompare(b.title);
+  });
+}
+
+function renderScheduleLeagueTabs() {
+  if (!els.generateFixtureLeagueTabs) {
+    return;
+  }
+
+  const supportedLeagues = getSupportedScheduleLeagues();
+  const currentLeagueId = String(els.generateLeagueSelect?.value || "").trim();
+  els.generateFixtureLeagueTabs.innerHTML = supportedLeagues
+    .map((league) => {
+      const isActive = currentLeagueId === String(league.id);
+      const display = getScheduleLeagueDisplay(league);
+      return (
+        `<button type="button" class="league-nav-tab${isActive ? " is-active" : ""}" ` +
+        `data-league-id="${escapeHtml(String(league.id))}" data-schedule-code="${escapeHtml(String(league.scheduleCode || ""))}" aria-pressed="${isActive ? "true" : "false"}">` +
+        `<span class="league-nav-tab__icon" aria-hidden="true">${escapeHtml(display.icon)}</span>` +
+        `<span class="league-nav-tab__label">${escapeHtml(display.label)}</span>` +
+        `</button>`
+      );
+    })
+    .join("");
+}
+
+function renderUpcomingFixturesPage(fixtures, { selectedWeek = null, selectedLabel = "", leagueCode = "" } = {}) {
+  const allFixtures = Array.isArray(fixtures) ? fixtures : [];
+  const weekOptions = getScheduleWeekOptions(allFixtures);
+  const filter = normalizeForSearch(els.generateFixtureSearchInput.value || "");
+  const filteredFixtures = !filter ? allFixtures : allFixtures.filter((fixture) => fixtureMatchesScheduleSearch(fixture, filter));
+  const groupedFixtures = groupFixturesByScheduleWeek(filteredFixtures);
+  const selectedFixture = getCurrentSelectedScheduleFixture(allFixtures);
 
   const summaryParts = [];
   if (leagueCode) {
@@ -925,14 +1565,19 @@ function renderScheduleFixtureBrowser(fixtures, { selectedWeek = null, selectedL
   }
   if (selectedLabel) {
     summaryParts.push(selectedLabel);
-  } else if (Number.isInteger(selectedWeek)) {
-    summaryParts.push(`Matchday ${selectedWeek}`);
   }
   summaryParts.push(`${allFixtures.length} fixture${allFixtures.length === 1 ? "" : "s"} loaded`);
+  if (weekOptions.length > 1) {
+    summaryParts.push(`${weekOptions.length} matchweeks loaded`);
+  }
   if (filter) {
     summaryParts.push(`${filteredFixtures.length} match${filteredFixtures.length === 1 ? "" : "es"} shown`);
   }
   els.generateFixtureSummary.textContent = summaryParts.join(" · ");
+  if (els.generateFixtureWeekTabs) {
+    els.generateFixtureWeekTabs.innerHTML = "";
+    els.generateFixtureWeekTabs.hidden = true;
+  }
   syncScheduleCursor(filteredFixtures, selectedFixture);
   renderScheduleActiveSummary(selectedFixture, { leagueCode, selectedLabel });
 
@@ -946,33 +1591,49 @@ function renderScheduleFixtureBrowser(fixtures, { selectedWeek = null, selectedL
     return;
   }
 
-  els.generateFixtureResults.innerHTML = filteredFixtures
-    .map((fixture) => {
+  els.generateFixtureResults.innerHTML = groupedFixtures
+    .map((group) => {
+      const groupCards = group.fixtures
+        .map((fixture) => {
       const eventName = String(fixture?.eventName || "").trim();
       const gameId = String(fixture?.gameId || fixture?.game_id || "").trim();
-      const isSelected = normalizeForSearch(eventName) === selectedEventName;
-      const isCursor = normalizeForSearch(eventName) === normalizeForSearch(state.scheduleCursorEventName);
+      const fixtureId = getScheduleFixtureIdentity(fixture);
+      const isSelected = fixtureId && fixtureId === state.selectedScheduleFixtureId;
+      const isCursor = fixtureId && fixtureId === state.scheduleCursorFixtureId;
       const metaLine = buildScheduleFixtureMetaLine(fixture);
-      const optionId = `schedule-option-${fixture.gameId || normalizeForSearch(eventName).replace(/[^a-z0-9]+/g, "-")}`;
+      const optionId = `schedule-option-${escapeHtmlAttribute(fixtureId || normalizeForSearch(eventName).replace(/[^a-z0-9]+/g, "-"))}`;
+      const sides = splitScheduleEventName(eventName);
       return (
         `<button type="button" id="${escapeHtml(optionId)}" class="schedule-fixture-btn${isSelected ? " is-selected" : ""}${isCursor ? " is-cursor" : ""}" ` +
-        `data-event-name="${escapeHtml(eventName)}" role="option" aria-selected="${isSelected ? "true" : "false"}" aria-pressed="${isSelected ? "true" : "false"}">` +
+        `data-event-name="${escapeHtml(eventName)}" data-fixture-id="${escapeHtml(fixtureId)}" role="option" aria-selected="${isSelected ? "true" : "false"}" aria-pressed="${isSelected ? "true" : "false"}">` +
         `<span class="schedule-fixture-copy">` +
-        `<span class="schedule-fixture-name">${escapeHtml(eventName)}</span>` +
-        `<span class="schedule-fixture-meta">${escapeHtml(metaLine)}</span>` +
+        `<span class="schedule-fixture-topline">` +
+        `<span class="schedule-fixture-week">Matchday ${escapeHtml(String(parseScheduleWeekValue(fixture?.matchDay) ?? fixture?.matchDay ?? ""))}</span>` +
         (gameId ? `<span class="schedule-fixture-id">Game ID ${escapeHtml(gameId)}</span>` : ``) +
+        `</span>` +
+        renderFixtureTeamsMarkup(sides) +
+        `<span class="schedule-fixture-meta">${escapeHtml(metaLine)}</span>` +
         `</span>` +
         `<span class="schedule-fixture-cta">${isSelected ? "Applied" : "Apply"}</span>` +
         `</button>`
       );
+        })
+        .join("");
+      return (
+        `<section class="fixtures-week-group" aria-label="${escapeHtml(group.title)}">` +
+        `<div class="fixtures-week-group__head">` +
+        `<h4 class="fixtures-week-group__title">${escapeHtml(group.title)}</h4>` +
+        `<span class="fixtures-week-group__count">${escapeHtml(`${group.fixtures.length} fixture${group.fixtures.length === 1 ? "" : "s"}`)}</span>` +
+        `</div>` +
+        `<div class="fixtures-week-group__grid">${groupCards}</div>` +
+        `</section>`
+      );
     })
     .join("");
 
-  const cursorFixture = filteredFixtures.find(
-    (fixture) => normalizeForSearch(fixture?.eventName) === normalizeForSearch(state.scheduleCursorEventName)
-  );
+  const cursorFixture = filteredFixtures.find((fixture) => getScheduleFixtureIdentity(fixture) === state.scheduleCursorFixtureId);
   const cursorId = cursorFixture
-    ? `schedule-option-${cursorFixture.gameId || normalizeForSearch(cursorFixture.eventName).replace(/[^a-z0-9]+/g, "-")}`
+    ? `schedule-option-${getScheduleFixtureIdentity(cursorFixture) || normalizeForSearch(cursorFixture.eventName).replace(/[^a-z0-9]+/g, "-")}`
     : "";
   if (cursorId) {
     els.generateFixtureResults.setAttribute("aria-activedescendant", cursorId);
@@ -984,16 +1645,16 @@ function renderScheduleFixtureBrowser(fixtures, { selectedWeek = null, selectedL
 function syncScheduleCursor(fixtures, selectedFixture = null) {
   const list = Array.isArray(fixtures) ? fixtures : [];
   if (list.length === 0) {
-    state.scheduleCursorEventName = "";
+    state.scheduleCursorFixtureId = "";
     return;
   }
 
-  const currentCursor = normalizeForSearch(state.scheduleCursorEventName);
-  if (currentCursor && list.some((fixture) => normalizeForSearch(fixture?.eventName) === currentCursor)) {
+  const currentCursor = String(state.scheduleCursorFixtureId || "").trim();
+  if (currentCursor && list.some((fixture) => getScheduleFixtureIdentity(fixture) === currentCursor)) {
     return;
   }
 
-  state.scheduleCursorEventName = selectedFixture?.eventName || list[0]?.eventName || "";
+  state.scheduleCursorFixtureId = getScheduleFixtureIdentity(selectedFixture) || getScheduleFixtureIdentity(list[0]) || "";
 }
 
 function renderScheduleActiveSummary(fixture, { leagueCode = "", selectedLabel = "" } = {}) {
@@ -1017,10 +1678,6 @@ function renderScheduleActiveSummary(fixture, { leagueCode = "", selectedLabel =
     metaParts.push(`Matchday ${fixture.matchDay}`);
   }
   metaParts.push(`${fixture.fixtureDate} · ${fixture.kickoffTimeUtc} UTC`);
-  const gameId = String(fixture?.gameId || fixture?.game_id || "").trim();
-  if (gameId) {
-    metaParts.push(`Game ID ${gameId}`);
-  }
 
   els.generateFixtureActiveTitle.textContent = String(fixture.eventName || "");
   els.generateFixtureActiveMeta.textContent = metaParts.join(" · ");
@@ -1031,11 +1688,12 @@ function renderScheduleActiveSummary(fixture, { leagueCode = "", selectedLabel =
 }
 
 function syncScheduleActiveSelection() {
-  renderScheduleFixtureBrowser(state.upcomingScheduleFixtures, {
+  renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
     selectedWeek: state.upcomingScheduleWeek,
     selectedLabel: state.upcomingScheduleLabel,
     leagueCode: state.upcomingScheduleLeagueCode,
   });
+  renderBuilderFixturePreview(state.upcomingScheduleFixtures);
 }
 
 function handleScheduleBrowserKeydown(event) {
@@ -1051,12 +1709,12 @@ function handleScheduleBrowserKeydown(event) {
   }
 
   if (event.key === "Enter") {
-    const cursorEventName = String(state.scheduleCursorEventName || "").trim();
-    if (!cursorEventName) {
+    const cursorFixtureId = String(state.scheduleCursorFixtureId || "").trim();
+    if (!cursorFixtureId) {
       return;
     }
     event.preventDefault();
-    applySelectedScheduleFixture(cursorEventName);
+    applySelectedScheduleFixture(cursorFixtureId);
   }
 }
 
@@ -1066,12 +1724,7 @@ function getVisibleScheduleFixtures() {
   if (!filter) {
     return allFixtures;
   }
-  return allFixtures.filter((fixture) => {
-    const haystack = normalizeForSearch(
-      `${fixture?.eventName || ""} ${fixture?.optionLabel || ""} ${fixture?.fixtureDate || ""} ${fixture?.kickoffTimeUtc || ""}`
-    );
-    return haystack.includes(filter);
-  });
+  return allFixtures.filter((fixture) => fixtureMatchesScheduleSearch(fixture, filter));
 }
 
 function moveScheduleCursor(key, fixtures) {
@@ -1080,9 +1733,7 @@ function moveScheduleCursor(key, fixtures) {
     return;
   }
 
-  const currentIndex = list.findIndex(
-    (fixture) => normalizeForSearch(fixture?.eventName) === normalizeForSearch(state.scheduleCursorEventName)
-  );
+  const currentIndex = list.findIndex((fixture) => getScheduleFixtureIdentity(fixture) === state.scheduleCursorFixtureId);
   let nextIndex = currentIndex >= 0 ? currentIndex : 0;
 
   if (key === "ArrowDown") {
@@ -1095,8 +1746,8 @@ function moveScheduleCursor(key, fixtures) {
     nextIndex = list.length - 1;
   }
 
-  state.scheduleCursorEventName = list[nextIndex]?.eventName || "";
-  renderScheduleFixtureBrowser(state.upcomingScheduleFixtures, {
+  state.scheduleCursorFixtureId = getScheduleFixtureIdentity(list[nextIndex]) || "";
+  renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
     selectedWeek: state.upcomingScheduleWeek,
     selectedLabel: state.upcomingScheduleLabel,
     leagueCode: state.upcomingScheduleLeagueCode,
@@ -1105,15 +1756,13 @@ function moveScheduleCursor(key, fixtures) {
 }
 
 function scrollScheduleCursorIntoView() {
-  const cursorEventName = String(state.scheduleCursorEventName || "").trim();
-  if (!cursorEventName) {
+  const cursorFixtureId = String(state.scheduleCursorFixtureId || "").trim();
+  if (!cursorFixtureId) {
     return;
   }
 
   const buttons = Array.from(els.generateFixtureResults.querySelectorAll(".schedule-fixture-btn"));
-  const button = buttons.find(
-    (candidate) => String(candidate.getAttribute("data-event-name") || "") === cursorEventName
-  );
+  const button = buttons.find((candidate) => String(candidate.getAttribute("data-fixture-id") || "") === cursorFixtureId);
   if (button && typeof button.scrollIntoView === "function") {
     button.scrollIntoView({ block: "nearest" });
   }
@@ -1121,17 +1770,14 @@ function scrollScheduleCursorIntoView() {
 
 function buildScheduleFixtureMetaLine(fixture) {
   const kickoff = String(fixture?.kickoffIso || "").trim();
-  const gameId = String(fixture?.gameId || fixture?.game_id || "").trim();
   if (!kickoff) {
-    const base = String(fixture?.roundLabel || (fixture?.matchDay ? `Matchday ${fixture.matchDay}` : "")).trim();
-    return gameId ? `${base} · Game ID ${gameId}`.trim() : base;
+    return String(fixture?.roundLabel || (fixture?.matchDay ? `Matchday ${fixture.matchDay}` : "")).trim();
   }
 
   const parsed = new Date(kickoff);
   if (Number.isNaN(parsed.getTime())) {
     const roundSuffix = fixture?.matchDay ? `Matchday ${fixture.matchDay}` : String(fixture?.roundLabel || "");
-    const base = `${String(fixture?.fixtureDate || "")} · ${String(fixture?.kickoffTimeUtc || "")} UTC · ${roundSuffix}`.trim();
-    return gameId ? `${base} · Game ID ${gameId}` : base;
+    return `${String(fixture?.fixtureDate || "")} · ${String(fixture?.kickoffTimeUtc || "")} UTC · ${roundSuffix}`.trim();
   }
 
   const weekday = parsed.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
@@ -1140,8 +1786,7 @@ function buildScheduleFixtureMetaLine(fixture) {
   const hh = String(parsed.getUTCHours()).padStart(2, "0");
   const mm = String(parsed.getUTCMinutes()).padStart(2, "0");
   const roundSuffix = fixture?.matchDay ? `Matchday ${fixture.matchDay}` : String(fixture?.roundLabel || "");
-  const base = `${weekday}, ${month} ${day} · ${hh}:${mm} UTC · ${roundSuffix}`.trim();
-  return gameId ? `${base} · Game ID ${gameId}` : base;
+  return `${weekday}, ${month} ${day} · ${hh}:${mm} UTC · ${roundSuffix}`.trim();
 }
 
 async function handleVerify(mode, { background = false } = {}) {
@@ -1209,11 +1854,14 @@ async function handleVerify(mode, { background = false } = {}) {
     let fixtureResult = null;
     let parentResult = null;
     let bundleResult = null;
+    const selectedScheduleFixture = getCurrentSelectedScheduleFixture();
 
     if (mode === "fixture" || mode === "both") {
       fixtureResult = verifyFixtureJsonStrict(fixtureParse.value, {
         leagues: state.leagues,
         teams: state.teams,
+      }, {
+        selectedScheduleFixture,
       });
     }
 
@@ -1228,6 +1876,7 @@ async function handleVerify(mode, { background = false } = {}) {
           fixture: fixtureParse.value,
           fixtureResolved: fixtureResult,
           now: referenceNow,
+          selectedScheduleFixture,
         }
       );
     }
@@ -1238,6 +1887,7 @@ async function handleVerify(mode, { background = false } = {}) {
         teams: state.teams,
       }, {
         now: referenceNow,
+        selectedScheduleFixture,
       });
     }
 
@@ -1310,12 +1960,16 @@ async function handleVerify(mode, { background = false } = {}) {
   }
 }
 
-async function handleGenerate() {
+async function handleGenerate({ preserveGeneratePage = state.currentGeneratePage === "fixtures" } = {}) {
   if (state.isCatalogLoading || state.isVerifying || state.isGenerating) {
     return;
   }
 
-  applySelectedScheduleFixture(els.generateEventNameInput.value, { fromManualEntry: true, silent: true });
+  applySelectedScheduleFixture(els.generateEventNameInput.value, {
+    fromManualEntry: true,
+    silent: true,
+    preservePage: preserveGeneratePage,
+  });
 
   state.isGenerating = true;
   syncActionState();
@@ -1354,6 +2008,7 @@ async function handleGenerate() {
         location: els.generateLocationInput.value,
         venue: els.generateVenueInput.value,
         now: referenceNow,
+        selectedScheduleFixture: getCurrentSelectedScheduleFixture(),
       },
       {
         leagues: state.leagues,
@@ -1952,23 +2607,18 @@ function renderGenerateReadiness() {
   }
 
   const eventName = String(els.generateEventNameInput?.value || "").trim();
-  const selectedFixture =
-    Array.isArray(state.upcomingScheduleFixtures)
-      ? state.upcomingScheduleFixtures.find(
-          (fixture) => normalizeForSearch(fixture?.eventName) === normalizeForSearch(eventName)
-        ) || null
-      : null;
-  if (!eventName) {
-    setPulseCard("Fixture", {
-      value: "Awaiting event",
-      note: "Type an event name manually or apply one from the upcoming fixture browser.",
-      tone: "idle",
-    });
-  } else if (selectedFixture) {
+  const selectedFixture = getCurrentSelectedScheduleFixture();
+  if (selectedFixture) {
     setPulseCard("Fixture", {
       value: selectedFixture.eventName,
       note: `${selectedFixture.fixtureDate} · ${selectedFixture.kickoffTimeUtc} UTC · Matchday ${selectedFixture.matchDay}`,
       tone: "success",
+    });
+  } else if (!eventName) {
+    setPulseCard("Fixture", {
+      value: "Awaiting event",
+      note: "Type an event name manually or apply one from the upcoming fixture browser.",
+      tone: "idle",
     });
   } else if (state.upcomingScheduleFixtures.length > 0) {
     setPulseCard("Fixture", {
@@ -2126,12 +2776,19 @@ function syncActionState() {
     els.refreshScheduleBtn.disabled =
       state.isCatalogLoading || state.isVerifying || state.isGenerating || state.isScheduleLoading || !hasScheduleSource;
   }
-  els.generateEventFixtureSelect.disabled = state.isScheduleLoading || state.isCatalogLoading;
-  els.generateFixtureSearchInput.disabled = state.isScheduleLoading || state.isCatalogLoading || state.upcomingScheduleFixtures.length === 0;
+  if (els.generateBuilderRefetchBtn) {
+    els.generateBuilderRefetchBtn.disabled =
+      state.isCatalogLoading || state.isVerifying || state.isGenerating || state.isScheduleLoading || !hasScheduleSource;
+  }
+  if (els.generateBuilderWeekSelect) {
+    const hasWeekOptions = Array.from(els.generateBuilderWeekSelect.options || []).some((option) => Boolean(String(option.value || "").trim()));
+    els.generateBuilderWeekSelect.disabled = !hasWeekOptions || state.isScheduleLoading || state.isCatalogLoading;
+  }
   els.copyVerifyReportBtn.disabled = !canCopyReport;
   els.copyGeneratedFixtureBtn.disabled = busy || !hasGeneratedFixture;
   els.copyGeneratedParentBtn.disabled = busy || !hasGeneratedParent;
   els.copyGenerationStatusBtn.disabled = busy;
+  renderScheduleSearchControls();
 }
 
 function setButtonBusy(button, busy, busyLabel) {
@@ -2142,6 +2799,31 @@ function setButtonBusy(button, busy, busyLabel) {
     button.dataset.defaultLabel = button.textContent || "";
   }
   button.textContent = busy ? String(busyLabel || "Working...") : String(button.dataset.defaultLabel || "");
+}
+
+function restoreThemePreference() {
+  const restoredTheme = String(loadThemePreference() || "").trim().toLowerCase();
+  state.theme = restoredTheme === "dark" ? "dark" : "light";
+}
+
+function applyTheme(theme) {
+  const nextTheme = String(theme || "").trim().toLowerCase() === "dark" ? "dark" : "light";
+  state.theme = nextTheme;
+  document.documentElement.dataset.theme = nextTheme;
+  document.documentElement.style.colorScheme = nextTheme;
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  if (themeMeta) {
+    themeMeta.setAttribute("content", nextTheme === "dark" ? "#0f1724" : "#f4f9fc");
+  }
+  if (els.themeToggleBtn) {
+    els.themeToggleBtn.setAttribute("aria-pressed", String(nextTheme === "dark"));
+  }
+  if (els.themeToggleIcon) {
+    els.themeToggleIcon.textContent = nextTheme === "dark" ? "☀" : "☾";
+  }
+  if (els.themeToggleLabel) {
+    els.themeToggleLabel.textContent = nextTheme === "dark" ? "Light theme" : "Dark theme";
+  }
 }
 
 function showToast(message, tone = "info") {

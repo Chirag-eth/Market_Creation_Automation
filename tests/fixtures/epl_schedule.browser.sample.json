@@ -1,0 +1,65 @@
+[
+  {
+    "GameId": 930101,
+    "Week": 31,
+    "DateTime": "2026-03-20T20:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "AFC Bournemouth",
+    "AwayTeamName": "Manchester United FC"
+  },
+  {
+    "GameId": 930102,
+    "Week": 31,
+    "DateTime": "2026-03-21T12:30:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Brighton & Hove Albion FC",
+    "AwayTeamName": "Liverpool FC"
+  },
+  {
+    "GameId": 930201,
+    "Week": 32,
+    "DateTime": "2026-04-11T11:30:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Arsenal FC",
+    "AwayTeamName": "AFC Bournemouth"
+  },
+  {
+    "GameId": 930301,
+    "Week": 33,
+    "DateTime": "2026-04-18T15:30:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Chelsea FC",
+    "AwayTeamName": "Manchester City FC"
+  },
+  {
+    "GameId": 930401,
+    "Week": 34,
+    "DateTime": "2026-04-25T14:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Fulham FC",
+    "AwayTeamName": "Tottenham Hotspur FC"
+  },
+  {
+    "GameId": 930501,
+    "Week": 35,
+    "DateTime": "2026-05-02T14:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Manchester United FC",
+    "AwayTeamName": "Liverpool FC"
+  },
+  {
+    "GameId": 930601,
+    "Week": 36,
+    "DateTime": "2026-05-09T14:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Sunderland AFC",
+    "AwayTeamName": "Manchester United FC"
+  }
+]

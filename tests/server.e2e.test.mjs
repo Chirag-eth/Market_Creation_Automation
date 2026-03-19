@@ -10,6 +10,8 @@ const WORKSPACE = path.resolve(path.dirname(__filename), "..");
 const LEAGUES_CSV = `${WORKSPACE}/Info-source/leagues.csv`;
 const TEAMS_CSV = `${WORKSPACE}/Info-source/teams.csv`;
 const EPL_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/epl_schedule.sample.json`;
+const UCL_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/ucl_schedule.sample.json`;
+const LALIGA_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/laliga_schedule.sample.json`;
 
 function nextPort() {
   return 24000 + Math.floor(Math.random() * 2000);
@@ -90,6 +92,7 @@ test("server e2e: static auth, api auth, and rate limiting", async (t) => {
   assert.equal(scheduleBody?.selected_week, 30);
   assert.deepEqual(scheduleBody?.selected_weeks, [30, 31]);
   assert.equal(scheduleBody?.selected_label, "Matchdays 30-31");
+  assert.equal(scheduleBody?.selection_mode, "immediate-six-weeks");
   assert.equal(Array.isArray(scheduleBody?.fixtures), true);
   assert.equal(scheduleBody.fixtures.length, 3);
   assert.equal(scheduleBody.fixtures[0]?.eventName, "Brentford FC vs Wolverhampton Wanderers FC");
@@ -105,4 +108,125 @@ test("server e2e: static auth, api auth, and rate limiting", async (t) => {
     rateStatuses.push(response.status);
   }
   assert.ok(rateStatuses.includes(429), `Expected at least one 429 status. Got: ${rateStatuses.join(",")}`);
+});
+
+test("server e2e: multi-league schedule contracts stay normalized across providers", async (t) => {
+  const port = nextPort();
+  const bearer = "api-test-token";
+
+  const started = await startServerForTest({
+    cwd: WORKSPACE,
+    port,
+    env: {
+      LEAGUES_CSV_PATH: LEAGUES_CSV,
+      TEAMS_CSV_PATH: TEAMS_CSV,
+      API_BEARER_TOKEN: bearer,
+      SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH: EPL_SCHEDULE_FIXTURE,
+      SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH: UCL_SCHEDULE_FIXTURE,
+      SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH: LALIGA_SCHEDULE_FIXTURE,
+      SCHEDULE_NOW_ISO: "2026-03-18T14:00:00Z",
+    },
+  });
+
+  if (started.skipReason) {
+    t.skip(started.skipReason);
+    return;
+  }
+
+  t.after(async () => {
+    await started.stop();
+  });
+
+  const authHeaders = { Authorization: `Bearer ${bearer}` };
+
+  const eplResponse = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=epl`, {
+    headers: authHeaders,
+  });
+  assert.equal(eplResponse.status, 200);
+  const eplBody = await eplResponse.json();
+  assert.equal(eplBody?.league, "epl");
+  assert.equal(eplBody?.selection_mode, "immediate-six-weeks");
+  assert.equal(eplBody?.selected_week, 31);
+  assert.deepEqual(eplBody?.selected_weeks, [31]);
+  assert.equal(eplBody?.fixtures?.length, 2);
+  assert.equal(eplBody?.fixtures?.[0]?.eventName, "AFC Bournemouth vs Manchester United FC");
+  assert.equal(eplBody?.fixtures?.[0]?.gameId, "900003");
+
+  const uclResponse = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=ucl`, {
+    headers: authHeaders,
+  });
+  assert.equal(uclResponse.status, 200);
+  const uclBody = await uclResponse.json();
+  assert.equal(uclBody?.league, "ucl");
+  assert.equal(uclBody?.selection_mode, "immediate-six-weeks");
+  assert.equal(uclBody?.selected_week, 16);
+  assert.deepEqual(uclBody?.selected_weeks, [16, 17]);
+  assert.equal(uclBody?.fixtures?.length, 3);
+  assert.equal(uclBody?.fixtures?.[0]?.eventName, "FC Barcelona vs Newcastle United FC");
+  assert.equal(uclBody?.fixtures?.[2]?.game_id, "910201");
+
+  const laligaResponse = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=laliga`, {
+    headers: authHeaders,
+  });
+  assert.equal(laligaResponse.status, 200);
+  const laligaBody = await laligaResponse.json();
+  assert.equal(laligaBody?.league, "laliga");
+  assert.equal(laligaBody?.selection_mode, "immediate-six-weeks");
+  assert.equal(laligaBody?.selected_week, 29);
+  assert.deepEqual(laligaBody?.selected_weeks, [29, 30]);
+  assert.equal(laligaBody?.fixtures?.length, 3);
+  assert.equal(laligaBody?.fixtures?.[0]?.eventName, "Villarreal CF vs Real Sociedad de Fútbol");
+  assert.equal(laligaBody?.fixtures?.[2]?.gameId, "920201");
+});
+
+test("server e2e: schedule endpoint validates request params and surfaces provider failures", async (t) => {
+  const port = nextPort();
+  const bearer = "api-test-token";
+
+  const started = await startServerForTest({
+    cwd: WORKSPACE,
+    port,
+    env: {
+      LEAGUES_CSV_PATH: LEAGUES_CSV,
+      TEAMS_CSV_PATH: TEAMS_CSV,
+      API_BEARER_TOKEN: bearer,
+      SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH: "",
+      SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH: "",
+      SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH: "",
+      SPORTSDATA_API_KEY: "",
+      SCHEDULE_NOW_ISO: "2026-03-18T14:00:00Z",
+    },
+  });
+
+  if (started.skipReason) {
+    t.skip(started.skipReason);
+    return;
+  }
+
+  t.after(async () => {
+    await started.stop();
+  });
+
+  const authHeaders = { Authorization: `Bearer ${bearer}` };
+
+  const unsupportedLeague = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=seriea`, {
+    headers: authHeaders,
+  });
+  assert.equal(unsupportedLeague.status, 400);
+  assert.match(String((await unsupportedLeague.json())?.detail || ""), /\?league=epl, \?league=ucl, or \?league=laliga/i);
+
+  const invalidNow = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=epl&now=not-a-date`, {
+    headers: authHeaders,
+  });
+  assert.equal(invalidNow.status, 400);
+  assert.match(String((await invalidNow.json())?.detail || ""), /valid ISO-8601 UTC timestamp/i);
+
+  const missingProviderConfig = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=epl`, {
+    headers: authHeaders,
+  });
+  assert.equal(missingProviderConfig.status, 502);
+  const missingProviderBody = await missingProviderConfig.json();
+  assert.equal(missingProviderBody?.error, "Failed to load schedule data");
+  assert.match(String(missingProviderBody?.detail || ""), /SPORTSDATA_API_KEY is not configured on the server/i);
+  assert.equal(missingProviderBody?.league, "epl");
 });

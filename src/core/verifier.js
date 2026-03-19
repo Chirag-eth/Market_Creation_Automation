@@ -38,7 +38,7 @@ export function parseJsonInput(rawValue, label) {
   }
 }
 
-export function verifyFixtureJsonStrict(fixture, catalog) {
+export function verifyFixtureJsonStrict(fixture, catalog, { selectedScheduleFixture = null } = {}) {
   const errors = validateFixtureJson(fixture);
   const warnings = [];
   const info = [];
@@ -112,6 +112,20 @@ export function verifyFixtureJsonStrict(fixture, catalog) {
     info.push(`Away team verified from CSV: ${awayTeam.name} (${awayTeam.id}).`);
   }
 
+  const scheduleFixtureCheck = verifySelectedScheduleFixtureConsistency(
+    {
+      selectedScheduleFixture,
+      league,
+      homeTeam,
+      awayTeam,
+      matchDay: fixture?.match_day,
+    },
+    catalog
+  );
+  errors.push(...scheduleFixtureCheck.errors);
+  warnings.push(...scheduleFixtureCheck.warnings);
+  info.push(...scheduleFixtureCheck.info);
+
   return {
     ok: errors.length === 0,
     errors,
@@ -125,7 +139,7 @@ export function verifyFixtureJsonStrict(fixture, catalog) {
   };
 }
 
-export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtureResolved, now } = {}) {
+export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtureResolved, now, selectedScheduleFixture = null } = {}) {
   const errors = validateParentMarketPayload(payload);
   const warnings = [];
   const info = [];
@@ -160,7 +174,7 @@ export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtur
     }
   }
 
-  const fixtureCheck = fixtureResolved || (fixture ? verifyFixtureJsonStrict(fixture, catalog) : null);
+  const fixtureCheck = fixtureResolved || (fixture ? verifyFixtureJsonStrict(fixture, catalog, { selectedScheduleFixture }) : null);
   const homeTeam = fixtureCheck?.resolved?.homeTeam || inferHomeTeamFromMarkets(markets, catalog?.teams || []);
   const awayTeam = fixtureCheck?.resolved?.awayTeam || inferAwayTeamFromMarkets(markets, catalog?.teams || [], homeTeam?.id || null);
 
@@ -270,6 +284,22 @@ export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtur
     }
 
     if (homeTeam && awayTeam && league && closeDate) {
+      const scheduleFixtureCheck = verifySelectedScheduleFixtureConsistency(
+        {
+          selectedScheduleFixture,
+          league,
+          homeTeam,
+          awayTeam,
+          fixtureDate: closeDate.toISOString().slice(0, 10),
+          kickoffTimeUtc: closeDate.toISOString().slice(11, 16),
+          matchDay: fixture?.match_day,
+        },
+        catalog
+      );
+      errors.push(...scheduleFixtureCheck.errors);
+      warnings.push(...scheduleFixtureCheck.warnings);
+      info.push(...scheduleFixtureCheck.info);
+
       const fixtureDateIso = deriveFixtureDateIsoForExpectedParent(parent, markets, closeDate, warnings);
       const kickoffTimeUtc = closeDate.toISOString().slice(11, 16);
       const fixtureTemplate = fixture || {
@@ -339,7 +369,7 @@ export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtur
   };
 }
 
-export function verifyBundleConsistency(fixture, parentPayload, catalog, { now } = {}) {
+export function verifyBundleConsistency(fixture, parentPayload, catalog, { now, selectedScheduleFixture = null } = {}) {
   const errors = [];
   const warnings = [];
   const info = [];
@@ -353,11 +383,12 @@ export function verifyBundleConsistency(fixture, parentPayload, catalog, { now }
     };
   }
 
-  const fixtureCheck = verifyFixtureJsonStrict(fixture, catalog);
+  const fixtureCheck = verifyFixtureJsonStrict(fixture, catalog, { selectedScheduleFixture });
   const parentCheck = verifyParentMarketJsonStrict(parentPayload, catalog, {
     fixture,
     fixtureResolved: fixtureCheck,
     now,
+    selectedScheduleFixture,
   });
 
   if (!fixtureCheck.ok) {
@@ -396,6 +427,10 @@ export function generateFromEventInput(input, catalog) {
   const venue = String(input?.venue || "");
   const typeReferenceId = String(input?.typeReferenceId || "").trim();
   const current = input?.now instanceof Date ? input.now : null;
+  const selectedScheduleFixture =
+    input?.selectedScheduleFixture && typeof input.selectedScheduleFixture === "object"
+      ? input.selectedScheduleFixture
+      : null;
 
   const parsedEvent = parseEventName(eventName);
   if (!parsedEvent) {
@@ -513,6 +548,38 @@ export function generateFromEventInput(input, catalog) {
     };
   }
 
+  const canonicalEventName = `${homeTeam.team.name} vs ${awayTeam.team.name}`;
+  if (normalizeForSearch(eventName) !== normalizeForSearch(canonicalEventName)) {
+    info.push(`Normalized event name to CSV teams: ${canonicalEventName}.`);
+  }
+
+  const scheduleFixtureCheck = verifySelectedScheduleFixtureConsistency(
+    {
+      selectedScheduleFixture,
+      league,
+      homeTeam: homeTeam.team,
+      awayTeam: awayTeam.team,
+      fixtureDate,
+      kickoffTimeUtc,
+      matchDay,
+    },
+    catalog
+  );
+  errors.push(...scheduleFixtureCheck.errors);
+  warnings.push(...scheduleFixtureCheck.warnings);
+  info.push(...scheduleFixtureCheck.info);
+
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      errors,
+      warnings,
+      info,
+      fixtureJson: null,
+      parentPayload: null,
+    };
+  }
+
   const inference = {
     leagueSelectValue: league.key,
     leagueId: league.id,
@@ -558,11 +625,12 @@ export function generateFromEventInput(input, catalog) {
     };
   }
 
-  const fixtureCheck = verifyFixtureJsonStrict(bundle.fixtureJson, catalog);
+  const fixtureCheck = verifyFixtureJsonStrict(bundle.fixtureJson, catalog, { selectedScheduleFixture });
   const parentCheck = verifyParentMarketJsonStrict(parentPayload, catalog, {
     fixture: bundle.fixtureJson,
     fixtureResolved: fixtureCheck,
     now: current,
+    selectedScheduleFixture,
   });
 
   errors.push(...fixtureCheck.errors, ...parentCheck.errors);
@@ -1384,21 +1452,106 @@ function deriveVaultTeamCode(rawName) {
   return normalizeVaultSegment(generateCodeFromName(raw));
 }
 
-function resolveEventTeam(rawName, teams, leagueId) {
-  const scoped = findExactTeamForLeague(rawName, teams || [], leagueId || null);
-  if (scoped) {
-    return { team: scoped, error: null };
+function verifySelectedScheduleFixtureConsistency(input, catalog) {
+  const errors = [];
+  const warnings = [];
+  const info = [];
+
+  const selectedScheduleFixture =
+    input?.selectedScheduleFixture && typeof input.selectedScheduleFixture === "object"
+      ? input.selectedScheduleFixture
+      : null;
+  if (!selectedScheduleFixture) {
+    return { errors, warnings, info };
   }
 
-  const scopedByCode = findTeamByExactCode(rawName, teams || [], leagueId || null);
-  if (scopedByCode.ambiguous) {
-    return {
-      team: null,
-      error: `Team code "${String(rawName || "").trim()}" maps to multiple teams. Enter full team name or select league explicitly.`,
-    };
+  const gameId = String(selectedScheduleFixture?.gameId || selectedScheduleFixture?.game_id || "").trim();
+  if (!gameId) {
+    errors.push("Selected SportsData fixture is missing a game ID. Refetch fixtures and re-apply before continuing.");
+    return { errors, warnings, info };
   }
-  if (scopedByCode.team) {
-    return { team: scopedByCode.team, error: null };
+
+  const scheduleEventName = String(selectedScheduleFixture?.eventName || "").trim();
+  const parsedScheduleEvent = parseEventName(scheduleEventName);
+  if (!parsedScheduleEvent) {
+    errors.push("Selected SportsData fixture could not be parsed into home and away teams.");
+    return { errors, warnings, info };
+  }
+
+  const preferredLeagueId = String(input?.league?.id || "").trim() || null;
+  const scheduleHome = resolveEventTeam(parsedScheduleEvent.homeRaw, catalog?.teams || [], preferredLeagueId);
+  const scheduleAway = resolveEventTeam(parsedScheduleEvent.awayRaw, catalog?.teams || [], preferredLeagueId);
+
+  if (!scheduleHome.team) {
+    errors.push(scheduleHome.error || `Selected SportsData home team "${parsedScheduleEvent.homeRaw}" could not be matched to teams.csv.`);
+  }
+  if (!scheduleAway.team) {
+    errors.push(scheduleAway.error || `Selected SportsData away team "${parsedScheduleEvent.awayRaw}" could not be matched to teams.csv.`);
+  }
+  if (!scheduleHome.team || !scheduleAway.team) {
+    return { errors, warnings, info };
+  }
+
+  if (input?.homeTeam && String(input.homeTeam.id || "") !== String(scheduleHome.team.id || "")) {
+    errors.push(
+      `Selected SportsData fixture home team resolves to "${scheduleHome.team.name}", which does not match the current home team "${input.homeTeam.name}".`
+    );
+  }
+
+  if (input?.awayTeam && String(input.awayTeam.id || "") !== String(scheduleAway.team.id || "")) {
+    errors.push(
+      `Selected SportsData fixture away team resolves to "${scheduleAway.team.name}", which does not match the current away team "${input.awayTeam.name}".`
+    );
+  }
+
+  if (input?.league && String(input.league.id || "") !== String(scheduleHome.team.leagueId || "")) {
+    errors.push(
+      `Selected SportsData fixture resolves to league_id "${scheduleHome.team.leagueId}", which does not match the current league "${input.league.id}".`
+    );
+  }
+
+  const expectedFixtureDate = String(input?.fixtureDate || "").trim();
+  const scheduleFixtureDate = String(selectedScheduleFixture?.fixtureDate || "").trim();
+  if (expectedFixtureDate && scheduleFixtureDate && expectedFixtureDate !== scheduleFixtureDate) {
+    errors.push(`Fixture Date (UTC) must match the selected SportsData fixture date (${scheduleFixtureDate}).`);
+  }
+
+  const expectedKickoffTimeUtc = String(input?.kickoffTimeUtc || "").trim();
+  const scheduleKickoffTimeUtc = String(selectedScheduleFixture?.kickoffTimeUtc || "").trim();
+  if (expectedKickoffTimeUtc && scheduleKickoffTimeUtc && expectedKickoffTimeUtc !== scheduleKickoffTimeUtc) {
+    errors.push(`Kickoff Time (UTC) must match the selected SportsData fixture time (${scheduleKickoffTimeUtc}).`);
+  }
+
+  const expectedMatchDay =
+    input?.matchDay == null || input?.matchDay === ""
+      ? null
+      : Number.parseInt(String(input.matchDay || "").trim(), 10);
+  const scheduleMatchDay = Number.isInteger(selectedScheduleFixture?.matchDay) ? selectedScheduleFixture.matchDay : null;
+  if (Number.isInteger(expectedMatchDay) && Number.isInteger(scheduleMatchDay) && expectedMatchDay !== scheduleMatchDay) {
+    errors.push(`Match Day must match the selected SportsData fixture matchday (${scheduleMatchDay}).`);
+  }
+
+  info.push("Selected SportsData fixture verified against the current event setup.");
+  return { errors, warnings, info };
+}
+
+function resolveEventTeam(rawName, teams, leagueId) {
+  for (const variant of buildEventTeamLookupVariants(rawName)) {
+    const scoped = findExactTeamForLeague(variant, teams || [], leagueId || null);
+    if (scoped) {
+      return { team: scoped, error: null };
+    }
+
+    const scopedByCode = findTeamByExactCode(variant, teams || [], leagueId || null);
+    if (scopedByCode.ambiguous) {
+      return {
+        team: null,
+        error: `Team code "${String(rawName || "").trim()}" maps to multiple teams. Enter full team name or select league explicitly.`,
+      };
+    }
+    if (scopedByCode.team) {
+      return { team: scopedByCode.team, error: null };
+    }
   }
 
   if (leagueId) {
@@ -1408,20 +1561,22 @@ function resolveEventTeam(rawName, teams, leagueId) {
     };
   }
 
-  const global = findExactTeamForLeague(rawName, teams || [], null);
-  if (global) {
-    return { team: global, error: null };
-  }
+  for (const variant of buildEventTeamLookupVariants(rawName)) {
+    const global = findExactTeamForLeague(variant, teams || [], null);
+    if (global) {
+      return { team: global, error: null };
+    }
 
-  const globalByCode = findTeamByExactCode(rawName, teams || [], null);
-  if (globalByCode.ambiguous) {
-    return {
-      team: null,
-      error: `Team code "${String(rawName || "").trim()}" maps to multiple teams across leagues. Use full team name.`,
-    };
-  }
-  if (globalByCode.team) {
-    return { team: globalByCode.team, error: null };
+    const globalByCode = findTeamByExactCode(variant, teams || [], null);
+    if (globalByCode.ambiguous) {
+      return {
+        team: null,
+        error: `Team code "${String(rawName || "").trim()}" maps to multiple teams across leagues. Use full team name.`,
+      };
+    }
+    if (globalByCode.team) {
+      return { team: globalByCode.team, error: null };
+    }
   }
 
   return {
@@ -1530,38 +1685,63 @@ function inferEventTeamPairAndLeague(homeRawName, awayRawName, teams, leagues) {
 }
 
 function collectEventTeamCandidates(rawName, teams) {
-  const normalized = normalizeForSearch(rawName);
-  const normalizedCode = normalizeCode(rawName);
-  if (!normalized && !normalizedCode) {
-    return [];
-  }
-
   const out = [];
   const seen = new Set();
 
-  for (const team of teams || []) {
-    const aliases = Array.isArray(team?.aliases) && team.aliases.length
-      ? team.aliases
-      : [team?.name, team?.alternateName].filter(Boolean);
-
-    const aliasMatch = normalized
-      ? aliases.some((alias) => normalizeForSearch(alias) === normalized)
-      : false;
-    const codeMatch = normalizedCode && normalizeCode(team?.code) === normalizedCode;
-
-    if (!aliasMatch && !codeMatch) {
+  for (const variant of buildEventTeamLookupVariants(rawName)) {
+    const normalized = normalizeForSearch(variant);
+    const normalizedCode = normalizeCode(variant);
+    if (!normalized && !normalizedCode) {
       continue;
     }
 
-    const key = String(team?.id || `${team?.name || ""}:${team?.leagueId || ""}`);
-    if (seen.has(key)) {
-      continue;
+    for (const team of teams || []) {
+      const aliases = Array.isArray(team?.aliases) && team.aliases.length
+        ? team.aliases
+        : [team?.name, team?.alternateName].filter(Boolean);
+
+      const aliasMatch = normalized
+        ? aliases.some((alias) => normalizeForSearch(alias) === normalized)
+        : false;
+      const codeMatch = normalizedCode && normalizeCode(team?.code) === normalizedCode;
+
+      if (!aliasMatch && !codeMatch) {
+        continue;
+      }
+
+      const key = String(team?.id || `${team?.name || ""}:${team?.leagueId || ""}`);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      out.push(team);
     }
-    seen.add(key);
-    out.push(team);
   }
 
   return out;
+}
+
+function buildEventTeamLookupVariants(rawName) {
+  const raw = String(rawName || "").trim();
+  if (!raw) {
+    return [];
+  }
+
+  const variants = new Set([raw]);
+  const compact = raw.replace(/\s+/g, " ").trim();
+  variants.add(compact);
+
+  const strippedAffixes = compact
+    .replace(/^\s*(?:afc|fc|cf|sc)\s+/i, "")
+    .replace(/\s+(?:afc|fc|cf|sc)\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (strippedAffixes) {
+    variants.add(strippedAffixes);
+  }
+
+  return Array.from(variants).filter(Boolean);
 }
 
 function getTeamCandidateMatchScore(rawName, team) {

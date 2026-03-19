@@ -1,0 +1,29 @@
+[
+  {
+    "GameId": 920101,
+    "Week": 29,
+    "DateTime": "2026-03-20T20:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Villarreal CF",
+    "AwayTeamName": "Real Sociedad de Fútbol"
+  },
+  {
+    "GameId": 920102,
+    "Week": 29,
+    "DateTime": "2026-03-22T20:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "Real Madrid CF",
+    "AwayTeamName": "Club Atlético de Madrid"
+  },
+  {
+    "GameId": 920201,
+    "Week": 30,
+    "DateTime": "2026-03-29T20:00:00",
+    "Status": "Scheduled",
+    "IsClosed": false,
+    "HomeTeamName": "FC Barcelona",
+    "AwayTeamName": "Sevilla FC"
+  }
+]

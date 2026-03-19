@@ -66,6 +66,8 @@ export async function fetchUpcomingFixturesForLeague(leagueCode, { refresh = tru
   return payload;
 }
 
+const UPCOMING_MATCHWEEK_WINDOW = 6;
+
 export function selectUpcomingSportsDataWeek(rows, { now = new Date() } = {}) {
   const nowDate = normalizeDate(now) || new Date();
   const nowMs = nowDate.getTime();
@@ -89,13 +91,13 @@ export function selectUpcomingSportsDataWeek(rows, { now = new Date() } = {}) {
     }))
     .filter((entry) => entry.fixtures.length > 0);
 
-  const selectedWeeks = upcomingWeeks.slice(0, 2);
+  const selectedWeeks = upcomingWeeks.slice(0, UPCOMING_MATCHWEEK_WINDOW);
   if (selectedWeeks.length > 0) {
     return {
       selectedWeek: selectedWeeks[0].selectedWeek,
       selectedWeeks: selectedWeeks.map((entry) => entry.selectedWeek).filter((value) => Number.isInteger(value)),
       selectedLabel: buildSelectionWindowLabel(selectedWeeks),
-      selectionMode: "immediate-two-weeks",
+      selectionMode: "immediate-six-weeks",
       fixtures: selectedWeeks
         .flatMap((entry) => entry.fixtures)
         .map(stripInternalFixtureFields),
@@ -244,7 +246,7 @@ function extractSportsDataGameId(row, fallbackValue) {
     }
   }
 
-  return String(fallbackValue || "").trim();
+  return "";
 }
 
 function stripInternalFixtureFields(fixture) {
