@@ -1,4 +1,5 @@
 import { CATALOG_API_ENDPOINT, FIXTURE_LOGO_URL } from "../shared/constants.js";
+import { fetchApiJson } from "../shared/apiClient.js";
 import { FALLBACK_TEAMS } from "./fallbackCatalog.js";
 import { normalizeForSearch, normalizeHexColor, slugify, generateCodeFromName } from "../shared/util.js";
 
@@ -6,11 +7,7 @@ const FALLBACK_CODE_BY_ALIAS = buildFallbackCodeByAlias();
 const SCHEDULE_ALIAS_PRESETS = buildScheduleAliasPresets();
 
 export async function fetchCatalogPayload() {
-  const response = await fetch(CATALOG_API_ENDPOINT, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Catalog endpoint returned ${response.status}`);
-  }
-  return response.json();
+  return fetchApiJson(CATALOG_API_ENDPOINT, { cache: "no-store" });
 }
 
 export function normalizeCatalogPayload(payload) {
@@ -19,9 +16,28 @@ export function normalizeCatalogPayload(payload) {
 
   const leagues = normalizeLeagueRows(rawLeagues);
   const leagueIdSet = new Set(leagues.map((league) => league.id));
-  const teams = normalizeTeamRows(rawTeams).filter((team) => !team.leagueId || leagueIdSet.has(team.leagueId));
+  const teams = normalizeTeamRows(rawTeams, leagues).filter((team) => !team.leagueId || leagueIdSet.has(team.leagueId));
 
   return { leagues, teams };
+}
+
+export function extractScheduleReadyLeagueCodes(payload) {
+  const scheduleSupport = payload?.schedule_support;
+  const rawCodes = normalizeScheduleReadyLeagueCodes(scheduleSupport?.ready_leagues);
+  if (rawCodes) {
+    return rawCodes;
+  }
+
+  const leagues = Array.isArray(scheduleSupport?.leagues) ? scheduleSupport.leagues : null;
+  if (!leagues) {
+    return null;
+  }
+
+  return normalizeScheduleReadyLeagueCodes(
+    leagues
+      .filter((league) => league?.ready)
+      .map((league) => league?.code)
+  );
 }
 
 export function normalizeLeagueRows(rows) {
@@ -67,8 +83,10 @@ export function normalizeLeagueRows(rows) {
   return leagues;
 }
 
-export function normalizeTeamRows(rows) {
+export function normalizeTeamRows(rows, leagues = []) {
   const teams = [];
+  const leagueAliasMap = buildLeagueAliasMap(leagues);
+  const leagueIdSet = new Set((Array.isArray(leagues) ? leagues : []).map((league) => String(league?.id || "").trim()).filter(Boolean));
 
   for (const row of rows) {
     const id = String(row?.team_id || row?.id || "").trim();
@@ -79,6 +97,7 @@ export function normalizeTeamRows(rows) {
     }
 
     const alternateName = String(row?.alternate_name || "").trim();
+    const resolvedLeagueId = resolveTeamLeagueId({ leagueId, name, alternateName }, leagueIdSet, leagueAliasMap);
     const logoUrl = String(row?.logo_url || "").trim();
     const themeColor = normalizeHexColor(row?.theme_color || "#FFFFFF");
     const code = resolveCsvTeamCode(row, name, alternateName);
@@ -86,7 +105,8 @@ export function normalizeTeamRows(rows) {
 
     teams.push({
       id,
-      leagueId: leagueId || null,
+      leagueId: resolvedLeagueId || null,
+      sourceLeagueId: leagueId || null,
       name,
       alternateName: alternateName || name,
       code,
@@ -98,6 +118,76 @@ export function normalizeTeamRows(rows) {
   }
 
   return teams;
+}
+
+function resolveTeamLeagueId({ leagueId, name, alternateName }, leagueIdSet, leagueAliasMap) {
+  const normalizedLeagueId = String(leagueId || "").trim();
+  if (!normalizedLeagueId) {
+    return "";
+  }
+  if (leagueIdSet.has(normalizedLeagueId)) {
+    return normalizedLeagueId;
+  }
+
+  const candidates = buildTeamLeagueAliasCandidates(name, alternateName);
+  for (const candidate of candidates) {
+    const normalized = normalizeForSearch(candidate);
+    if (!normalized) {
+      continue;
+    }
+    const mappedLeagueId = leagueAliasMap.get(normalized);
+    if (mappedLeagueId) {
+      return mappedLeagueId;
+    }
+  }
+
+  return normalizedLeagueId;
+}
+
+function buildTeamLeagueAliasCandidates(name, alternateName) {
+  const candidates = new Set();
+  for (const raw of [alternateName, name]) {
+    const text = String(raw || "").trim();
+    if (!text) {
+      continue;
+    }
+    candidates.add(text);
+    if (text.includes("_")) {
+      const parts = text.split("_").map((part) => String(part || "").trim()).filter(Boolean);
+      if (parts.length > 1) {
+        candidates.add(parts.slice(1).join(" "));
+        candidates.add(parts.slice(1).join("_"));
+      }
+      for (const part of parts) {
+        candidates.add(part);
+      }
+    }
+  }
+  return Array.from(candidates);
+}
+
+function buildLeagueAliasMap(leagues) {
+  const map = new Map();
+  for (const league of Array.isArray(leagues) ? leagues : []) {
+    const leagueId = String(league?.id || "").trim();
+    if (!leagueId) {
+      continue;
+    }
+    const aliases = new Set([
+      league?.name,
+      league?.alternateName,
+      league?.slug,
+      ...(Array.isArray(league?.aliases) ? league.aliases : []),
+    ]);
+    for (const alias of aliases) {
+      const normalized = normalizeForSearch(alias);
+      if (!normalized || map.has(normalized)) {
+        continue;
+      }
+      map.set(normalized, leagueId);
+    }
+  }
+  return map;
 }
 
 function resolveCsvTeamCode(row, name, alternateName) {
@@ -126,6 +216,20 @@ function lookupFallbackCode(name, alternateName) {
     }
   }
   return null;
+}
+
+function normalizeScheduleReadyLeagueCodes(values) {
+  if (!Array.isArray(values)) {
+    return null;
+  }
+
+  return Array.from(
+    new Set(
+      values
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean)
+    )
+  );
 }
 
 function buildFallbackCodeByAlias() {
@@ -224,6 +328,12 @@ function deriveTeamAliasVariants(raw) {
   out.add(trimmed);
   out.add(trimmed.replace(/\b(fc|cf|afc|sc)\b/gi, "").replace(/\s+/g, " ").trim());
   out.add(trimmed.replace(/^\s*(?:afc|fc|cf|sc)\s+/i, "").replace(/\s+/g, " ").trim());
+  out.add(
+    trimmed
+      .replace(/\b(fc|cf|afc|sc|sk|sl|rc|rcd|ca|cd|sd|ud|fk|kv|club|deportivo)\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
   out.add(trimmed.replace(/\bsl\b/gi, "").replace(/\s+/g, " ").trim());
   out.add(trimmed.replace(/\s*&\s*/g, " and ").replace(/\s+/g, " ").trim());
   out.add(trimmed.replace(/\band\b/gi, "&").replace(/\s+/g, " ").trim());
@@ -250,6 +360,12 @@ function buildScheduleAliasPresets() {
     [["athletic"], ["Athletic Club"]],
     [["sociedad"], ["Real Sociedad", "Real Sociedad de Futbol"]],
     [["betis"], ["Real Betis", "Real Betis Balompie"]],
+    [["atletico madrid", "atletico de madrid", "club atletico de madrid"], ["Atletico de Madrid"]],
+    [["rayo vallecano de madrid", "rayo vallecano"], ["Rayo Vallecano"]],
+    [["celta de vigo", "rc celta de vigo"], ["Celta Vigo"]],
+    [["alaves", "deportivo alaves"], ["Deportivo Alaves"]],
+    [["osasuna", "ca osasuna"], ["Osasuna"]],
+    [["mallorca", "rcd mallorca"], ["Mallorca"]],
   ];
 
   for (const [keys, values] of seed) {

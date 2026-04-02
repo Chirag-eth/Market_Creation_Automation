@@ -1,0 +1,20 @@
+[
+  {
+    "GameId": 991001,
+    "Week": 1,
+    "HomeTeamName": "England",
+    "AwayTeamName": "France",
+    "DateTime": "2026-03-21T19:30:00",
+    "Status": "Scheduled",
+    "IsClosed": false
+  },
+  {
+    "GameId": 991002,
+    "Week": 2,
+    "HomeTeamName": "Germany",
+    "AwayTeamName": "Croatia",
+    "DateTime": "2026-03-25T17:45:00",
+    "Status": "Scheduled",
+    "IsClosed": false
+  }
+]

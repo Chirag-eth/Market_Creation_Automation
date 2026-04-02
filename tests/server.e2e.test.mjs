@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,14 +8,75 @@ import { getBasicAuthHeader, startServerForTest } from "./helpers/serverHarness.
 
 const __filename = fileURLToPath(import.meta.url);
 const WORKSPACE = path.resolve(path.dirname(__filename), "..");
-const LEAGUES_CSV = `${WORKSPACE}/Info-source/leagues.csv`;
-const TEAMS_CSV = `${WORKSPACE}/Info-source/teams.csv`;
+const LEAGUES_CSV = `${WORKSPACE}/catalog/leagues-main.csv`;
+const TEAMS_CSV = `${WORKSPACE}/catalog/teams-main.csv`;
+const EXTRA_LEAGUES_CSV = `${WORKSPACE}/tests/fixtures/catalog_extra_leagues.sample.csv`;
+const EXTRA_TEAMS_CSV = `${WORKSPACE}/tests/fixtures/catalog_extra_teams.sample.csv`;
 const EPL_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/epl_schedule.sample.json`;
 const UCL_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/ucl_schedule.sample.json`;
 const LALIGA_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/laliga_schedule.sample.json`;
+const FIFA_FRIENDLIES_SCHEDULE_FIXTURE = `${WORKSPACE}/tests/fixtures/fifa_friendlies_schedule.sample.json`;
 
 function nextPort() {
   return 24000 + Math.floor(Math.random() * 2000);
+}
+
+async function startCmsStub({
+  port,
+  failStep = "",
+  expectedBearer = "",
+} = {}) {
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk || "")));
+    }
+    const raw = Buffer.concat(chunks).toString("utf8");
+    const body = raw ? JSON.parse(raw) : null;
+    requests.push({
+      method: req.method,
+      url: req.url,
+      authorization: String(req.headers.authorization || ""),
+      body,
+    });
+
+    if (expectedBearer) {
+      assert.equal(req.headers.authorization, `Bearer ${expectedBearer}`);
+    }
+
+    const stepKey =
+      req.url === "/api/v1/cms/internal/fixtures/"
+        ? "fixture"
+        : req.url === "/api/v1/cms/internal/type-reference"
+          ? "type_reference"
+          : req.url === "/api/v1/cms/internal/parent-and-market/"
+            ? "parent_market"
+            : "unknown";
+
+    if (stepKey === failStep) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, step: stepKey }));
+      return;
+    }
+
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, step: stepKey, id: `${stepKey}-created` }));
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolve);
+  });
+
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    requests,
+    close: () =>
+      new Promise((resolve) => {
+        server.close(() => resolve());
+      }),
+  };
 }
 
 test("server e2e: static auth, api auth, and rate limiting", async (t) => {
@@ -74,6 +136,11 @@ test("server e2e: static auth, api auth, and rate limiting", async (t) => {
   const apiDenied = await fetch(`${started.baseUrl}/api/catalog/meta`);
   assert.equal(apiDenied.status, 401);
 
+  const apiDeniedWithBasicOnly = await fetch(`${started.baseUrl}/api/catalog/meta`, {
+    headers: { Authorization: basicAuth },
+  });
+  assert.equal(apiDeniedWithBasicOnly.status, 401);
+
   const apiAllowed = await fetch(`${started.baseUrl}/api/catalog/meta`, {
     headers: { Authorization: `Bearer ${bearer}` },
   });
@@ -108,6 +175,203 @@ test("server e2e: static auth, api auth, and rate limiting", async (t) => {
     rateStatuses.push(response.status);
   }
   assert.ok(rateStatuses.includes(429), `Expected at least one 429 status. Got: ${rateStatuses.join(",")}`);
+});
+
+test("server e2e: runtime environment can switch between Mainnet and UAT without restart", async (t) => {
+  const port = nextPort();
+  const bearer = "api-test-token";
+
+  const started = await startServerForTest({
+    cwd: WORKSPACE,
+    port,
+    env: {
+      APP_ENV: "mainnet",
+      API_BEARER_TOKEN: bearer,
+      LEAGUES_CSV_PATH: LEAGUES_CSV,
+      TEAMS_CSV_PATH: TEAMS_CSV,
+    },
+  });
+
+  if (started.skipReason) {
+    t.skip(started.skipReason);
+    return;
+  }
+
+  t.after(async () => {
+    await started.stop();
+  });
+
+  const headers = {
+    Authorization: `Bearer ${bearer}`,
+    "Content-Type": "application/json",
+  };
+
+  const initialResponse = await fetch(`${started.baseUrl}/api/runtime/environment`, {
+    headers: { Authorization: `Bearer ${bearer}` },
+  });
+  assert.equal(initialResponse.status, 200);
+  const initialPayload = await initialResponse.json();
+  assert.equal(initialPayload?.active_env?.code, "mainnet");
+  assert.equal(initialPayload?.active_env?.label, "Mainnet");
+
+  const switchToUatResponse = await fetch(`${started.baseUrl}/api/runtime/environment`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ app_env: "uat" }),
+  });
+  assert.equal(switchToUatResponse.status, 200);
+  const switchToUatPayload = await switchToUatResponse.json();
+  assert.equal(switchToUatPayload?.active_env?.code, "uat");
+  assert.equal(switchToUatPayload?.active_env?.label, "UAT");
+
+  const metaAfterUatResponse = await fetch(`${started.baseUrl}/api/catalog/meta`, {
+    headers: { Authorization: `Bearer ${bearer}` },
+  });
+  assert.equal(metaAfterUatResponse.status, 200);
+  const metaAfterUat = await metaAfterUatResponse.json();
+  assert.equal(metaAfterUat?.source?.environment?.app_env, "uat");
+  assert.equal(metaAfterUat?.source?.environment?.app_env_label, "UAT");
+
+  const switchToMainnetResponse = await fetch(`${started.baseUrl}/api/runtime/environment`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ app_env: "mainnet" }),
+  });
+  assert.equal(switchToMainnetResponse.status, 200);
+  const switchToMainnetPayload = await switchToMainnetResponse.json();
+  assert.equal(switchToMainnetPayload?.active_env?.code, "mainnet");
+  assert.equal(switchToMainnetPayload?.active_env?.label, "Mainnet");
+});
+
+test("server e2e: CMS publish posts fixture, type reference, and parent market in order", async (t) => {
+  const port = nextPort();
+  const cmsPort = nextPort();
+  const bearer = "api-test-token";
+  const cmsBearer = "cms-test-token";
+
+  const cms = await startCmsStub({ port: cmsPort, expectedBearer: cmsBearer });
+  t.after(async () => {
+    await cms.close();
+  });
+
+  const started = await startServerForTest({
+    cwd: WORKSPACE,
+    port,
+    env: {
+      APP_ENV: "mainnet",
+      API_BEARER_TOKEN: bearer,
+      LEAGUES_CSV_PATH: LEAGUES_CSV,
+      TEAMS_CSV_PATH: TEAMS_CSV,
+      COMP_SERVICE_INTERNAL_HOST: cms.baseUrl,
+      COMP_SERVICE_INTERNAL_BEARER_TOKEN: cmsBearer,
+    },
+  });
+
+  if (started.skipReason) {
+    t.skip(started.skipReason);
+    return;
+  }
+
+  t.after(async () => {
+    await started.stop();
+  });
+
+  const response = await fetch(`${started.baseUrl}/api/cms/publish`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${bearer}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      fixture_json: { name: "Fulham vs Aston Villa" },
+      type_reference_payloads: {
+        fixture: { canonical_name: "fulham-vs-aston-villa-2026-04-25" },
+      },
+      uat_parent_payloads: {
+        moneyline: { parent_market: { title: "Fulham vs Aston Villa" }, markets: [] },
+      },
+      parent_market_family: "moneyline",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body?.ok, true);
+  assert.equal(body?.failed_step, null);
+  assert.equal(body?.environment?.code, "mainnet");
+  assert.equal(body?.requested_family, "moneyline");
+  assert.deepEqual(
+    body?.steps?.map((step) => step.key),
+    ["fixture", "type_reference", "parent_market"]
+  );
+  assert.deepEqual(
+    cms.requests.map((request) => request.url),
+    [
+      "/api/v1/cms/internal/fixtures/",
+      "/api/v1/cms/internal/type-reference",
+      "/api/v1/cms/internal/parent-and-market/",
+    ]
+  );
+  assert.deepEqual(cms.requests[0]?.body, { name: "Fulham vs Aston Villa" });
+  assert.deepEqual(cms.requests[1]?.body, { canonical_name: "fulham-vs-aston-villa-2026-04-25" });
+  assert.deepEqual(cms.requests[2]?.body, { parent_market: { title: "Fulham vs Aston Villa" }, markets: [] });
+});
+
+test("server e2e: CMS publish stops when an intermediate step fails", async (t) => {
+  const port = nextPort();
+  const cmsPort = nextPort();
+  const bearer = "api-test-token";
+
+  const cms = await startCmsStub({ port: cmsPort, failStep: "type_reference" });
+  t.after(async () => {
+    await cms.close();
+  });
+
+  const started = await startServerForTest({
+    cwd: WORKSPACE,
+    port,
+    env: {
+      APP_ENV: "mainnet",
+      API_BEARER_TOKEN: bearer,
+      LEAGUES_CSV_PATH: LEAGUES_CSV,
+      TEAMS_CSV_PATH: TEAMS_CSV,
+      COMP_SERVICE_INTERNAL_HOST: cms.baseUrl,
+    },
+  });
+
+  if (started.skipReason) {
+    t.skip(started.skipReason);
+    return;
+  }
+
+  t.after(async () => {
+    await started.stop();
+  });
+
+  const response = await fetch(`${started.baseUrl}/api/cms/publish`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${bearer}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      fixture_payload: { name: "Fixture One" },
+      type_reference_payload: { canonical_name: "fixture-one-2026-04-25" },
+      parent_market_payload: { parent_market: { title: "Fixture One" }, markets: [] },
+    }),
+  });
+
+  assert.equal(response.status, 502);
+  const body = await response.json();
+  assert.equal(body?.ok, false);
+  assert.equal(body?.failed_step, "type_reference");
+  assert.deepEqual(
+    cms.requests.map((request) => request.url),
+    [
+      "/api/v1/cms/internal/fixtures/",
+      "/api/v1/cms/internal/type-reference",
+    ]
+  );
 });
 
 test("server e2e: multi-league schedule contracts stay normalized across providers", async (t) => {
@@ -213,7 +477,10 @@ test("server e2e: schedule endpoint validates request params and surfaces provid
     headers: authHeaders,
   });
   assert.equal(unsupportedLeague.status, 400);
-  assert.match(String((await unsupportedLeague.json())?.detail || ""), /\?league=epl, \?league=ucl, or \?league=laliga/i);
+  assert.match(
+    String((await unsupportedLeague.json())?.detail || ""),
+    /\?league=epl, \?league=ucl, \?league=laliga, \?league=fifa-worldcup, or \?league=fifa-friendlies/i
+  );
 
   const invalidNow = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=epl&now=not-a-date`, {
     headers: authHeaders,
@@ -229,4 +496,109 @@ test("server e2e: schedule endpoint validates request params and surfaces provid
   assert.equal(missingProviderBody?.error, "Failed to load schedule data");
   assert.match(String(missingProviderBody?.detail || ""), /SPORTSDATA_API_KEY is not configured on the server/i);
   assert.equal(missingProviderBody?.league, "epl");
+});
+
+test("server e2e: supplemental catalog CSVs merge into the source of truth", async (t) => {
+  const port = nextPort();
+  const bearer = "api-test-token";
+
+  const started = await startServerForTest({
+    cwd: WORKSPACE,
+    port,
+    env: {
+      LEAGUES_CSV_PATH: LEAGUES_CSV,
+      TEAMS_CSV_PATH: TEAMS_CSV,
+      EXTRA_LEAGUES_CSV_PATHS: EXTRA_LEAGUES_CSV,
+      EXTRA_TEAMS_CSV_PATHS: EXTRA_TEAMS_CSV,
+      SPORTSDATA_FIFA_FRIENDLIES_SCHEDULE_FIXTURE_PATH: FIFA_FRIENDLIES_SCHEDULE_FIXTURE,
+      API_BEARER_TOKEN: bearer,
+    },
+  });
+
+  if (started.skipReason) {
+    t.skip(started.skipReason);
+    return;
+  }
+
+  t.after(async () => {
+    await started.stop();
+  });
+
+  const authHeaders = { Authorization: `Bearer ${bearer}` };
+
+  const metaResponse = await fetch(`${started.baseUrl}/api/catalog/meta`, {
+    headers: authHeaders,
+  });
+  assert.equal(metaResponse.status, 200);
+  const meta = await metaResponse.json();
+  assert.equal(meta?.counts?.leagues, 5);
+  assert.equal(meta?.counts?.teams, 120);
+  assert.equal(meta?.source?.label, "CSV files (env override) + supplemental CSV files");
+  assert.deepEqual(meta?.source?.supplemental_leagues_files, ["catalog_extra_leagues.sample.csv"]);
+  assert.deepEqual(meta?.source?.supplemental_teams_files, ["catalog_extra_teams.sample.csv"]);
+
+  const catalogResponse = await fetch(`${started.baseUrl}/api/catalog`, {
+    headers: authHeaders,
+  });
+  assert.equal(catalogResponse.status, 200);
+  const catalog = await catalogResponse.json();
+  assert.equal(catalog?.counts?.leagues, 5);
+  assert.equal(catalog?.counts?.teams, 120);
+  assert.equal(
+    catalog?.leagues?.some((league) => league?.league_id === "b6e39e21-8fdf-44ee-9fd0-abe8578854a6"),
+    true
+  );
+  assert.equal(
+    catalog?.teams?.some((team) => team?.team_id === "f11b97f6-54f4-4e07-88d0-2143fbfbb656"),
+    true
+  );
+  assert.equal(
+    catalog?.teams?.some((team) => team?.team_id === "efcc800b-92c3-4327-9955-1c8de62cb556"),
+    true
+  );
+  assert.ok(Array.isArray(catalog?.schedule_support?.ready_leagues));
+  assert.equal(catalog.schedule_support.ready_leagues.includes("fifa-friendlies"), true);
+});
+
+test("server e2e: supplemental CSVs stay opt-in and do not auto-merge from Downloads", async (t) => {
+  const port = nextPort();
+  const bearer = "api-test-token";
+
+  const started = await startServerForTest({
+    cwd: WORKSPACE,
+    port,
+    env: {
+      LEAGUES_CSV_PATH: LEAGUES_CSV,
+      TEAMS_CSV_PATH: TEAMS_CSV,
+      EXTRA_LEAGUES_CSV_PATHS: "",
+      EXTRA_TEAMS_CSV_PATHS: "",
+      API_BEARER_TOKEN: bearer,
+    },
+  });
+
+  if (started.skipReason) {
+    t.skip(started.skipReason);
+    return;
+  }
+
+  t.after(async () => {
+    await started.stop();
+  });
+
+  const authHeaders = { Authorization: `Bearer ${bearer}` };
+  const metaResponse = await fetch(`${started.baseUrl}/api/catalog/meta`, {
+    headers: authHeaders,
+  });
+  assert.equal(metaResponse.status, 200);
+  const meta = await metaResponse.json();
+  assert.deepEqual(meta?.source?.supplemental_leagues_files, []);
+  assert.deepEqual(meta?.source?.supplemental_teams_files, []);
+
+  const catalogResponse = await fetch(`${started.baseUrl}/api/catalog`, {
+    headers: authHeaders,
+  });
+  assert.equal(catalogResponse.status, 200);
+  const catalog = await catalogResponse.json();
+  assert.equal(catalog?.counts?.leagues, 4);
+  assert.equal(catalog?.counts?.teams, 120);
 });

@@ -1,16 +1,15 @@
-# Fixture OCR Market Builder
+# Fixture & Parent Market Verifier
 
 Standalone dashboard to:
 
-1. Upload a fixture image
-2. Run OCR in-browser (single or multiple fixtures in one image)
-3. Generate fixture JSON for all detected fixtures
-4. Choose a fixture to load into the editor
-5. Generate a single parent market payload or bulk-generate multiple parent market payloads using multiple `type_reference_id` values
+1. Verify incoming fixture JSON and parent market JSON against CSV source-of-truth data
+2. Generate fixture and parent market payloads from event input
+3. Load upcoming fixtures from SportsData schedule endpoints by league
+4. Apply fetched fixtures directly into the builder and generate verified payloads
 
 ## Run locally (CSV source of truth)
 
-Start the included local server:
+Start the included server:
 
 ```bash
 npm start
@@ -18,14 +17,34 @@ npm start
 
 Optional: copy `.env.example` to `.env` and fill any values you want to override.
 
+Environment-specific files are also supported:
+
+```bash
+npm run start:mainnet
+npm run start:uat
+```
+
+This keeps env selection explicit:
+
+- `npm run start:mainnet` runs the app in `Mainnet` mode
+- `npm run start:uat` runs the app in `UAT` mode and loads `/Users/chirag/Desktop/Market_Making/.env.uat` first, then fills any missing values from `/Users/chirag/Desktop/Market_Making/.env`
+
+Committed env files should stay portable:
+
+- keep secrets like `SPORTSDATA_API_KEY` out of the repo
+- prefer repo-relative CSV paths such as `catalog/leagues-main.csv`
+- use your shell environment or an untracked local `.env` for machine-specific secrets
+
 Then open:
 
 `http://localhost:2020`
 
 Default CSV source:
 
-- `Info-source/leagues.csv`
-- `Info-source/teams.csv`
+- `catalog/leagues-main.csv`
+- `catalog/teams-main.csv`
+
+The server also falls back to `catalog/leagues.csv` / `catalog/teams.csv` if those are the files present in another checkout.
 
 Optional overrides:
 
@@ -33,7 +52,24 @@ Optional overrides:
 LEAGUES_CSV_PATH=/path/to/leagues.csv TEAMS_CSV_PATH=/path/to/teams.csv node server.js
 ```
 
-Optional local-only fallback to `~/Downloads` if `Info-source/` files are unavailable:
+You can also point to a specific env file directly:
+
+```bash
+ENV_FILE=/path/to/.env.uat node server.js
+```
+
+The active env choice is exposed in `/api/catalog/meta` under:
+
+- `source.environment.app_env`
+- `source.environment.env_file`
+
+Optional supplemental CSVs are merged only when you explicitly configure them:
+
+```bash
+EXTRA_LEAGUES_CSV_PATHS=/path/to/extra-leagues.csv EXTRA_TEAMS_CSV_PATHS=/path/to/extra-teams.csv node server.js
+```
+
+Optional machine-local fallback to `~/Downloads` if `catalog/` files are unavailable:
 
 ```bash
 ALLOW_DOWNLOADS_CSV_FALLBACK=1 node server.js
@@ -67,6 +103,67 @@ APP_BASIC_AUTH_USER=admin APP_BASIC_AUTH_PASS=change_me node server.js
 
 When set, all non-API pages require HTTP Basic authentication.
 
+## CMS publish integration
+
+The server can publish generated payloads directly to the CMS chain:
+
+1. `POST /api/v1/cms/internal/fixtures/`
+2. `POST /api/v1/cms/internal/type-reference`
+3. `POST /api/v1/cms/internal/parent-and-market/`
+
+Configure the active environment with:
+
+```bash
+COMP_SERVICE_INTERNAL_HOST=https://your-comp-service.internal
+COMP_SERVICE_INTERNAL_BEARER_TOKEN=replace_with_internal_token
+CMS_PUBLISH_TIMEOUT_MS=8000
+```
+
+The dashboard/backend route is:
+
+- `POST /api/cms/publish`
+
+You can call it either with direct payloads:
+
+```json
+{
+  "fixture_payload": { "...": "..." },
+  "type_reference_payload": { "...": "..." },
+  "parent_market_payload": { "...": "..." }
+}
+```
+
+Or with the generated-output shape already used by the app:
+
+```json
+{
+  "fixture_json": { "...": "..." },
+  "type_reference_payloads": {
+    "fixture": { "...": "..." }
+  },
+  "uat_parent_payloads": {
+    "moneyline": { "...": "..." }
+  },
+  "parent_market_family": "moneyline"
+}
+```
+
+Response shape:
+
+- `ok`
+- `failed_step`
+- `requested_family`
+- `environment`
+- `steps`
+
+Each entry in `steps` contains:
+
+- `key`
+- `ok`
+- `status`
+- `url`
+- `response`
+
 Health endpoint (for load balancers/uptime checks):
 
 - `GET /api/healthz`
@@ -97,29 +194,16 @@ GitHub Actions workflow is included at:
 
 ## Project structure
 
-- `/Users/chirag/Desktop/Market_Making/src/` active frontend modules (`main.js`, `ui.js`, parser/OCR/catalog/market helpers)
-- `/Users/chirag/Desktop/Market_Making/index.html` dashboard shell
-- `/Users/chirag/Desktop/Market_Making/styles.css` dashboard styles
-- `/Users/chirag/Desktop/Market_Making/server.js` local static server + CSV catalog API
-- `/Users/chirag/Desktop/Market_Making/legacy/app.js` archived pre-modular monolith (not used)
+- `/Users/chirag/Desktop/Market_Making/public/` served UI shell, styles, and browser assets
+- `/Users/chirag/Desktop/Market_Making/src/` application modules (`app/`, `core/`, `data/`, `shared/`)
+- `/Users/chirag/Desktop/Market_Making/catalog/` CSV source-of-truth files
+- `/Users/chirag/Desktop/Market_Making/tests/` unit, server, and browser regression tests
+- `/Users/chirag/Desktop/Market_Making/archive/legacy/` archived pre-modular code kept for reference
+- `/Users/chirag/Desktop/Market_Making/server.js` static/API server
 
 ## Notes
 
-- OCR is client-side (`tesseract.js`) and runs CDN/browser-first for speed, with local `node_modules` OCR assets as fallback.
-- If OCR still fails, check that `npm install` was run and restart the server so fallback OCR worker/lang assets are available.
-- Team IDs and league IDs are loaded from `leagues.csv` and `teams.csv` (source of truth).
-- Multi-fixture images are supported for both `vs`/`v` separator text and row/lane schedule boards without separators.
-- When OCR detects multiple fixtures, use the fixture multi-select dropdown to choose which fixtures to generate in batch.
-- You can also select/unselect fixtures directly from row checkboxes in the review queue (selection stays in sync with the dropdown).
-- The dropdown supports click-to-toggle multi-selection without requiring Cmd/Ctrl modifiers.
-- Use the fixture filter input above the dropdown to narrow long fixture lists quickly.
-- If OCR-derived date/time/timezone are not confidently detected, the row is flagged `Needs Review` and blocked until confirmed/approved.
-- You can convert all selected fixtures to UTC in one action using **Convert Selected Fixtures To UTC**.
-- Parent market JSON previews are generated automatically from fixture metadata, even before `type_reference_id` is entered.
-- When a valid `type_reference_id` is entered, parent market `type_reference_id` and canonical/code suffixes update automatically.
-- Parent market payload follows the strict CMS shape with top-level `parent_market` and `markets` arrays.
-- Fixture and parent generation now block with field-specific validation errors if required inputs are missing (for example: missing date, kickoff time, match day, or CSV team/league mapping).
-- Use **Copy Debug Log** in the OCR section to export timestamped UI/OCR action logs for failure triage.
-- Optional strict publish mode can hard-block bulk output until all selected fixtures are approved and date/time/timezone-confirmed.
-- Bulk mapped type-reference input supports quoted labels with commas, e.g. `"Wolves, FC vs Aston Villa",<uuid>`.
-- For unconfigured teams, use the **Team Mapping Overrides** section to fill IDs / codes / logos manually.
+- Team IDs and league IDs are loaded from the workspace catalog pair the server finds first, preferring `catalog/leagues-main.csv` and `catalog/teams-main.csv`.
+- Schedule browsing uses SportsData-backed endpoints via the server.
+- The server serves UI files from `public/` and application modules from `src/`.
+- Deterministic schedule snapshots and theme/input preferences are persisted in the browser for operator continuity.

@@ -27,6 +27,20 @@ export const FALLBACK_LEAGUES = [
     slug: "uel",
     aliases: ["europa league", "uefa europa league", "uel"],
   },
+  {
+    key: "fifa-worldcup",
+    id: "00000000-0000-0000-0000-00000000f001",
+    name: "FIFA World Cup",
+    slug: "fifa-world-cup",
+    aliases: ["fifa world cup", "world cup", "fifa wc", "fifa-worldcup"],
+  },
+  {
+    key: "fifa-friendlies",
+    id: "00000000-0000-0000-0000-00000000f002",
+    name: "FIFA Friendlies",
+    slug: "fifa-friendlies",
+    aliases: ["fifa friendlies", "friendlies", "international friendlies", "intl friendlies"],
+  },
 ];
 
 export const FALLBACK_TEAMS = [
@@ -111,4 +125,3 @@ export const FALLBACK_TEAMS = [
     aliases: ["chelsea", "chelsea fc"],
   },
 ];
-

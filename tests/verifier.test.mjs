@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { buildParentMarketPayload } from "../src/core/markets.js";
 import { collectFixtureBundleFromInference } from "../src/core/parser.js";
+import { buildUatFixtureAlternateName } from "../src/core/uatFormats.js";
 import {
   generateBulkVaultPayloadsFromInput,
   generateFromEventInput,
@@ -20,6 +21,14 @@ const catalog = {
       name: "English Premier League",
       slug: "epl",
       aliases: ["english premier league", "epl"],
+    },
+    {
+      key: "fifa-friendlies",
+      id: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+      name: "International Federation of Association Football",
+      alternateName: "FIFA Friendlies",
+      slug: "fifa-friendlies",
+      aliases: ["fifa friendlies", "friendlies", "international friendlies"],
     },
   ],
   teams: [
@@ -44,6 +53,28 @@ const catalog = {
       themeColor: "#670E36",
       logoUrl: "https://example.com/aston-villa.png",
       aliases: ["aston villa", "aston villa fc", "villa"],
+    },
+    {
+      id: "13513513-5135-4513-9135-135135135135",
+      leagueId: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+      name: "England",
+      alternateName: "England_FIFA_Friendlies",
+      code: "ENG",
+      slug: "england",
+      themeColor: "#BE2A2A",
+      logoUrl: "https://example.com/england.png",
+      aliases: ["england", "england fifa friendlies"],
+    },
+    {
+      id: "13613613-6136-4613-9136-136136136136",
+      leagueId: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+      name: "France",
+      alternateName: "France_FIFA_Friendlies",
+      code: "FRA",
+      slug: "france",
+      themeColor: "#4A5A6A",
+      logoUrl: "https://example.com/france.png",
+      aliases: ["france", "france fifa friendlies"],
     },
   ],
 };
@@ -224,6 +255,367 @@ test("generateFromEventInput builds strict-valid payloads", () => {
   assert.ok(result.info.some((line) => line.includes("Deterministic reference UTC time")));
 });
 
+test("generateFromEventInput emits the UAT fixture format when requested", () => {
+  const result = generateFromEventInput(
+    {
+      eventName: "England vs France",
+      leagueSelection: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+      fixtureDate: "2099-03-31",
+      kickoffTimeUtc: "17:00",
+      matchDay: "34",
+      matchWeek: "",
+      location: "",
+      venue: "",
+      typeReferenceId: "",
+      outputProfile: "uat",
+      now: new Date("2099-03-01T00:00:00Z"),
+    },
+    catalog
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.fixtureJson, {
+    name: "England vs France",
+    alternate_name: "ENG vs FRA",
+    league_id: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+    home_team_id: "13513513-5135-4513-9135-135135135135",
+    away_team_id: "13613613-6136-4613-9136-136136136136",
+    format: null,
+    logo_url: "https://public-assets.pred.app/market-assets/fixture_128x128.png",
+    theme_color: "#FFFFFF",
+    match_day: 34,
+    match_week: 0,
+    location: "",
+    venue: "",
+    game_start_time: "2099-03-31T17:00:00.000Z",
+  });
+});
+
+test("generateFromEventInput emits 3-letter alternate codes for UAT fixtures across team naming styles", () => {
+  const result = generateFromEventInput(
+    {
+      eventName: "Wolves vs Aston Villa",
+      leagueSelection: "de1bd252-baf5-4417-89ba-77d635f5f8f0",
+      fixtureDate: "2099-04-25",
+      kickoffTimeUtc: "11:30",
+      matchDay: "34",
+      matchWeek: "",
+      location: "",
+      venue: "",
+      typeReferenceId: "",
+      outputProfile: "uat",
+      now: new Date("2099-03-01T00:00:00Z"),
+    },
+    catalog
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.fixtureJson?.alternate_name, "WOL vs AVL");
+});
+
+test("buildUatFixtureAlternateName always emits 3-letter codes across league naming styles", () => {
+  assert.equal(
+    buildUatFixtureAlternateName(
+      { name: "Aston Villa", alternateName: "Aston Villa FC", code: "AVL" },
+      { name: "Liverpool", alternateName: "Liverpool FC", code: "LIV" }
+    ),
+    "AVL vs LIV"
+  );
+
+  assert.equal(
+    buildUatFixtureAlternateName(
+      { name: "England", alternateName: "England_FIFA_Friendlies" },
+      { name: "France", alternateName: "France_FIFA_Friendlies" }
+    ),
+    "ENG vs FRA"
+  );
+
+  assert.match(
+    buildUatFixtureAlternateName(
+      { name: "Bayern Munich", alternateName: "FC Bayern Munchen" },
+      { name: "Real Madrid", alternateName: "Real Madrid CF" }
+    ),
+    /^[A-Z0-9]{3} vs [A-Z0-9]{3}$/
+  );
+});
+
+test("verifyFixtureJsonStrict accepts the UAT fixture format", () => {
+  const fixture = {
+    name: "England vs France",
+    alternate_name: "ENG vs FRA",
+    league_id: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+    home_team_id: "13513513-5135-4513-9135-135135135135",
+    away_team_id: "13613613-6136-4613-9136-136136136136",
+    format: null,
+    logo_url: "https://public-assets.pred.app/market-assets/fixture_128x128.png",
+    theme_color: "#FFFFFF",
+    match_day: 34,
+    match_week: 0,
+    location: "",
+    venue: "",
+    game_start_time: "2099-03-31T17:00:00Z",
+  };
+
+  const result = verifyFixtureJsonStrict(fixture, catalog);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.errors.length, 0);
+});
+
+test("generateFromEventInput emits UAT type reference payloads when a type reference id is provided", () => {
+  const result = generateFromEventInput(
+    {
+      eventName: "Hungary vs Greece",
+      leagueSelection: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+      fixtureDate: "2099-03-31",
+      kickoffTimeUtc: "17:00",
+      matchDay: "34",
+      matchWeek: "0",
+      location: "",
+      venue: "",
+      typeReferenceId: "1be3abef-9230-4f38-b371-42aad85f7c8c",
+      outputProfile: "uat",
+      now: new Date("2099-03-01T00:00:00Z"),
+    },
+    {
+      leagues: [
+        ...catalog.leagues,
+      ],
+      teams: [
+        ...catalog.teams,
+        {
+          id: "fd30f168-fbd9-4956-8dd8-9f763d9fae88",
+          leagueId: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+          name: "Hungary",
+          alternateName: "Hungary_FIFA_Friendlies",
+          code: "HUN",
+          slug: "hungary",
+          themeColor: "#FFFFFF",
+          logoUrl: "https://example.com/hungary.png",
+          aliases: ["hungary", "hungary fifa friendlies"],
+        },
+        {
+          id: "98571e85-7646-499c-b6bd-6cb55fbefbf7",
+          leagueId: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+          name: "Greece",
+          alternateName: "Greece_FIFA_Friendlies",
+          code: "GRE",
+          slug: "greece",
+          themeColor: "#FFFFFF",
+          logoUrl: "https://example.com/greece.png",
+          aliases: ["greece", "greece fifa friendlies"],
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.typeReferencePayloads, {
+    fixture: {
+      type_value: "fixture",
+      type_value_id: "1be3abef-9230-4f38-b371-42aad85f7c8c",
+      canonical_name: "hungary-vs-greece-2099-03-31",
+    },
+    generic: {
+      type_value: "generic",
+      type_value_id: "1be3abef-9230-4f38-b371-42aad85f7c8c",
+      canonical_name: "hungary-vs-greece-2099",
+    },
+  });
+});
+
+test("generateFromEventInput emits UAT parent-market family payloads when requested", () => {
+  const result = generateFromEventInput(
+    {
+      eventName: "Hungary vs Greece",
+      leagueSelection: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+      fixtureDate: "2099-03-31",
+      kickoffTimeUtc: "17:00",
+      matchDay: "34",
+      matchWeek: "0",
+      location: "",
+      venue: "",
+      typeReferenceId: "8b09bc68-077c-4c07-9673-df79f1e24453",
+      uatMarketLine: "2.5",
+      uatSpreadTeamSide: "away",
+      outputProfile: "uat",
+      now: new Date("2099-03-01T00:00:00Z"),
+    },
+    {
+      leagues: [
+        ...catalog.leagues,
+      ],
+      teams: [
+        ...catalog.teams,
+        {
+          id: "fd30f168-fbd9-4956-8dd8-9f763d9fae88",
+          leagueId: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+          name: "Hungary",
+          alternateName: "Hungary_FIFA_Friendlies",
+          code: "HUN",
+          slug: "hungary",
+          themeColor: "#FFFFFF",
+          logoUrl: "https://example.com/hungary.png",
+          aliases: ["hungary", "hungary fifa friendlies"],
+        },
+        {
+          id: "98571e85-7646-499c-b6bd-6cb55fbefbf7",
+          leagueId: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+          name: "Greece",
+          alternateName: "Greece_FIFA_Friendlies",
+          code: "GRE",
+          slug: "greece",
+          themeColor: "#FFFFFF",
+          logoUrl: "https://example.com/greece.png",
+          aliases: ["greece", "greece fifa friendlies"],
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.ok(result.uatParentPayloads);
+  assert.deepEqual(Object.keys(result.uatParentPayloads).sort(), ["btts", "moneyline", "spreads", "totals"]);
+  assert.equal(result.uatParentPayloads.moneyline.parent_market.parent_market_family, "moneyline");
+  assert.equal(result.uatParentPayloads.moneyline.parent_market.title, "Hungary vs Greece");
+  assert.equal(result.uatParentPayloads.moneyline.parent_market.market_line, "0");
+  assert.equal(result.uatParentPayloads.moneyline.parent_market.is_cross_matching_enabled, true);
+  assert.ok(!("contract_type" in result.uatParentPayloads.moneyline.parent_market));
+  assert.equal(
+    result.uatParentPayloads.moneyline.parent_market.rules,
+    'This Moneyline market resolves based on the official result of Hungary vs Greece scheduled on March 31, 2099 at 5 PM UTC after 90 minutes of regular play plus stoppage time. It either resolves to "Long" ($1) or "Short" ($0). If the match is postponed, the market remains open until the match has been completed. If the match is canceled entirely with no make-up game, Draw in moneyline resolves to "Long" ($1) and all the other markets resolve to "Short" ($0). This market was created on March 1, 2099 at 12 AM UTC.'
+  );
+  assert.equal(result.uatParentPayloads.moneyline.markets.length, 3);
+  assert.equal(result.uatParentPayloads.moneyline.markets[0].tick_size, "0.01");
+  assert.equal(result.uatParentPayloads.moneyline.markets[1].tick_size, "0.01");
+  assert.equal(result.uatParentPayloads.moneyline.markets[2].tick_size, "0.01");
+  assert.equal(result.uatParentPayloads.moneyline.markets[2].market_code, "DRAW");
+  assert.equal(
+    result.uatParentPayloads.moneyline.markets[0].rules,
+    'In the Hungary vs Greece game scheduled for March 31, 2099, if Hungary wins, this market will resolve to "Long" ($1 for Hungary). Otherwise, this market will resolve to "Short" ($0 for Hungary). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Short" ($0 for Hungary). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. This market was created on March 1, 2099 at 12 AM UTC.'
+  );
+  assert.equal(
+    result.uatParentPayloads.moneyline.markets[1].rules,
+    'In the Hungary vs Greece game scheduled for March 31, 2099, if Greece wins, this market will resolve to "Long" ($1 for Greece). Otherwise, this market will resolve to "Short" ($0 for Greece). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Short" ($0 for Greece). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. This market was created on March 1, 2099 at 12 AM UTC.'
+  );
+  assert.equal(
+    result.uatParentPayloads.moneyline.markets[2].rules,
+    'In the Hungary vs Greece game scheduled for March 31, 2099, if the game ends in a draw, this market will resolve to "Long" ($1 for Draw). Otherwise, this market will resolve to "Short" ($0 for Draw). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Long" ($1 for Draw). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. This market was created on March 1, 2099 at 12 AM UTC.'
+  );
+  assert.ok(!("team_id" in result.uatParentPayloads.moneyline.markets[2]));
+  assert.equal(result.uatParentPayloads.spreads.parent_market.parent_market_family, "spreads");
+  assert.equal(result.uatParentPayloads.spreads.parent_market.title, "Greece Over 2.5 Goals");
+  assert.equal(result.uatParentPayloads.spreads.parent_market.market_line, "-2.5");
+  assert.ok(!("is_cross_matching_enabled" in result.uatParentPayloads.spreads.parent_market));
+  assert.ok(!("contract_type" in result.uatParentPayloads.spreads.parent_market));
+  assert.equal(
+    result.uatParentPayloads.spreads.parent_market.rules,
+    'This market resolves based on the official result of Hungary vs Greece scheduled on March 31, 2099 at 5 PM UTC after 90 minutes of regular play plus stoppage time. It either resolves to "Long" ($1) or "Short" ($0). If the match is postponed, the market remains open until the match has been completed. If the match is canceled entirely with no make-up game, Draw resolves to "Long" ($1) and both teams resolve to "Short" ($0). Whichever market wins takes it all. This market was created on March 1, 2099 at 12 AM UTC.'
+  );
+  assert.equal(result.uatParentPayloads.spreads.markets[0].name, "Greece Over 2.5 Goals");
+  assert.equal(result.uatParentPayloads.spreads.markets[0].tick_size, "0.01");
+  assert.ok(!("market_display_name" in result.uatParentPayloads.spreads.markets[0]));
+  assert.equal(
+    result.uatParentPayloads.spreads.markets[0].rules,
+    'In the upcoming FIFA Friendlies game, scheduled for March 31 at 1:00 PM ET: This market will resolve to "Greece" if Greece win the game by 3 or more goals. Otherwise, this market will resolve to "Hungary". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. This market will resolve according to the official final score published on fifa.com. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. This market was created on March 1, 2099 at 12 AM UTC.'
+  );
+  assert.equal(result.uatParentPayloads.spreads.markets[0].market_code, "Over 2.5");
+  assert.equal(result.uatParentPayloads.spreads.markets[0].team_id, "98571e85-7646-499c-b6bd-6cb55fbefbf7");
+  assert.equal(result.uatParentPayloads.totals.parent_market.parent_market_family, "totals");
+  assert.equal(result.uatParentPayloads.totals.parent_market.title, "Total Over 2.5 Goals");
+  assert.equal(result.uatParentPayloads.totals.parent_market.market_line, "2.5");
+  assert.equal(
+    result.uatParentPayloads.totals.parent_market.rules,
+    'This Totals (2.5) market resolves based on the official result of Hungary vs Greece scheduled on March 31, 2099 at 5 PM UTC after 90 minutes of regular play plus stoppage time. It either resolves to "Long" ($1) or "Short" ($0). If the match is postponed, the market remains open until the match has been completed. If the match is canceled entirely with no make-up game, Draw in moneyline resolves to "Long" ($1) and all the other markets resolve to "Short" ($0). This market was created on March 1, 2099 at 12 AM UTC.'
+  );
+  assert.ok(!("is_cross_matching_enabled" in result.uatParentPayloads.totals.parent_market));
+  assert.ok(!("contract_type" in result.uatParentPayloads.totals.parent_market));
+  assert.equal(result.uatParentPayloads.totals.markets[0].name, "Over 2.5 Goals");
+  assert.equal(result.uatParentPayloads.totals.markets[0].tick_size, "0.01");
+  assert.equal(result.uatParentPayloads.totals.markets[0].market_code, "Over 2.5");
+  assert.equal(
+    result.uatParentPayloads.totals.markets[0].rules,
+    'In the upcoming FIFA Friendlies game between Hungary and Greece, scheduled for March 31 at 1:00 PM ET: This market will resolve to "Over" if Hungary and Greece combine to score 3 or more goals in this game. If the combined total is less than 3, this market will resolve to "Under". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on fifa.com. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. This market was created on March 1, 2099 at 12 AM UTC.'
+  );
+  assert.equal(result.uatParentPayloads.btts.parent_market.parent_market_family, "btts");
+  assert.ok(!("is_cross_matching_enabled" in result.uatParentPayloads.btts.parent_market));
+  assert.ok(!("contract_type" in result.uatParentPayloads.btts.parent_market));
+  assert.equal(
+    result.uatParentPayloads.btts.parent_market.rules,
+    'This BTTS (0) market resolves based on the official result of Hungary vs Greece scheduled on March 31, 2099 at 5 PM UTC after 90 minutes of regular play plus stoppage time. It either resolves to "Long" ($1) or "Short" ($0). If the match is postponed, the market remains open until the match has been completed. If the match is canceled entirely with no make-up game, Draw in moneyline resolves to "Long" ($1) and all the other markets resolve to "Short" ($0). This market was created on March 1, 2099 at 12 AM UTC.'
+  );
+  assert.equal(result.uatParentPayloads.btts.markets[0].tick_size, "0.01");
+  assert.equal(result.uatParentPayloads.btts.markets[0].market_code, "Both Teams To Score");
+  assert.equal(
+    result.uatParentPayloads.btts.markets[0].rules,
+    'In the upcoming FIFA Friendlies game between Hungary and Greece, scheduled for March 31 at 1:00 PM ET: This market will resolve to "Yes" if both Hungary and Greece each score at least one goal during the game. This market will resolve to "No" if either team fails to score (i.e., if one or both teams finish with zero goals). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on fifa.com. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. This market was created on March 1, 2099 at 12 AM UTC.'
+  );
+});
+
+test("generateFromEventInput hardcodes a future kickoff when the selected timing is already in the past", () => {
+  const result = generateFromEventInput(
+    {
+      eventName: "Wolves vs Aston Villa",
+      leagueSelection: "de1bd252-baf5-4417-89ba-77d635f5f8f0",
+      fixtureDate: "2026-03-20",
+      kickoffTimeUtc: "14:00",
+      matchDay: "29",
+      matchWeek: "",
+      location: "",
+      venue: "",
+      typeReferenceId: "4b57bb5d-c292-4d3d-ab05-9f19e2b77aaf",
+      now: new Date("2026-03-27T06:40:24.908Z"),
+    },
+    catalog
+  );
+
+  assert.equal(result.ok, true);
+  assert.ok(
+    result.warnings.some((line) =>
+      line.includes("Kickoff was hardcoded to 2026-03-27 08:41 UTC because the selected/manual kickoff was behind current UTC")
+    )
+  );
+  assert.ok(result.parentPayload);
+  assert.equal(result.parentPayload.parent_market.markets_open_time, "2026-03-27T06:41:00Z");
+  assert.equal(result.parentPayload.parent_market.markets_close_time, "2026-03-27T08:41:00Z");
+});
+
+test("generateFromEventInput ignores stale selected schedule timing after hardcoding a future kickoff", () => {
+  const result = generateFromEventInput(
+    {
+      eventName: "Wolves vs Aston Villa",
+      leagueSelection: "de1bd252-baf5-4417-89ba-77d635f5f8f0",
+      fixtureDate: "2026-03-20",
+      kickoffTimeUtc: "14:00",
+      matchDay: "29",
+      matchWeek: "",
+      location: "",
+      venue: "",
+      typeReferenceId: "4b57bb5d-c292-4d3d-ab05-9f19e2b77aaf",
+      uatMarketLine: "1.5",
+      uatSpreadTeamSide: "home",
+      outputProfile: "uat",
+      now: new Date("2026-03-27T06:40:24.908Z"),
+      selectedScheduleFixture: buildSelectedScheduleFixture(),
+    },
+    catalog
+  );
+
+  assert.equal(result.ok, true);
+  assert.ok(result.fixtureJson);
+  assert.ok(result.uatParentPayloads);
+  assert.ok(
+    !result.errors.some((line) =>
+      line.includes("Fixture Date (UTC) must match the selected SportsData fixture date")
+    )
+  );
+  assert.ok(
+    !result.errors.some((line) =>
+      line.includes("Kickoff Time (UTC) must match the selected SportsData fixture time")
+    )
+  );
+});
+
 test("generateFromEventInput enforces the selected SportsData fixture", () => {
   const result = generateFromEventInput(
     {
@@ -305,6 +697,28 @@ test("generateFromEventInput supports short team codes in event name", () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.fixtureJson.name, "Wolves vs Aston Villa");
+});
+
+test("generateFromEventInput accepts schedule-code league selection when the catalog league resolves through aliases", () => {
+  const result = generateFromEventInput(
+    {
+      eventName: "England vs France",
+      leagueSelection: "fifa-friendlies",
+      fixtureDate: "2099-03-21",
+      kickoffTimeUtc: "19:30",
+      matchDay: "1",
+      matchWeek: "",
+      location: "",
+      venue: "",
+      typeReferenceId: "",
+      now: new Date("2099-03-01T00:00:00Z"),
+    },
+    catalog
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.fixtureJson.league_id, "b6e39e21-8fdf-44ee-9fd0-abe8578854a6");
+  assert.equal(result.fixtureJson.name, "England vs France");
 });
 
 test("generateFromEventInput auto-detects league from a valid home-away pair when names are multi-league ambiguous", () => {

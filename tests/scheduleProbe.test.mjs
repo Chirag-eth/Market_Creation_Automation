@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   buildSportsDataScheduleProbeUrl,
+  resolveSportsDataScheduleProbeLeagues,
   summarizeSportsDataScheduleProbe,
 } from "../src/data/scheduleProbe.js";
 
@@ -72,4 +73,17 @@ test("summarizeSportsDataScheduleProbe returns a compact normalized probe summar
       matchDay: 31,
     },
   ]);
+});
+
+test("resolveSportsDataScheduleProbeLeagues includes FIFA lanes once competition IDs are configured", () => {
+  const leagues = resolveSportsDataScheduleProbeLeagues({
+    SPORTSDATA_FIFA_WORLD_CUP_COMPETITION_ID: "77",
+    SPORTSDATA_FIFA_FRIENDLIES_COMPETITION_ID: "88",
+  });
+
+  assert.ok(leagues.some((league) => league.code === "epl" && league.competitionId === 1));
+  assert.ok(leagues.some((league) => league.code === "ucl" && league.competitionId === 3));
+  assert.ok(leagues.some((league) => league.code === "laliga" && league.competitionId === 4));
+  assert.ok(leagues.some((league) => league.code === "fifa-worldcup" && league.competitionId === 77));
+  assert.ok(leagues.some((league) => league.code === "fifa-friendlies" && league.competitionId === 88));
 });

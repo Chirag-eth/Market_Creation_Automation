@@ -16,7 +16,7 @@ const __filename = fileURLToPath(import.meta.url);
 const WORKSPACE = path.resolve(path.dirname(__filename), "..");
 const FIXTURE_PATH = path.join(WORKSPACE, "tests", "fixtures", "epl_schedule.sample.json");
 
-test("resolveScheduleLeagueCode recognizes EPL league metadata", () => {
+test("resolveScheduleLeagueCode recognizes wired league metadata", () => {
   assert.equal(
     resolveScheduleLeagueCode({
       key: "epl",
@@ -40,6 +40,23 @@ test("resolveScheduleLeagueCode recognizes EPL league metadata", () => {
       name: "La Liga",
     }),
     "laliga"
+  );
+
+  assert.equal(
+    resolveScheduleLeagueCode({
+      key: "fifa-worldcup",
+      name: "FIFA World Cup",
+    }),
+    "fifa-worldcup"
+  );
+
+  assert.equal(
+    resolveScheduleLeagueCode({
+      key: "fifa-friendlies",
+      name: "FIFA Friendlies",
+      alternateName: "International Friendlies",
+    }),
+    "fifa-friendlies"
   );
 });
 

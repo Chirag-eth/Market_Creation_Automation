@@ -27,6 +27,10 @@ export async function startServerForTest({
     env: {
       ...process.env,
       PORT: String(resolvedPort),
+      APP_ENV: "mainnet",
+      ENV_FILE: "",
+      EXTRA_LEAGUES_CSV_PATHS: "",
+      EXTRA_TEAMS_CSV_PATHS: "",
       ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],

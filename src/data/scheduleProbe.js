@@ -1,4 +1,10 @@
-import { normalizeSportsDataRows, selectUpcomingSportsDataWeek } from "./schedules.js";
+import {
+  buildSportsDataScheduleUrl,
+  normalizeSportsDataRows,
+  parseCompetitionId,
+  selectUpcomingSportsDataWeek,
+} from "../shared/sportsdataFixtures.js";
+import { getLeagueScheduleDefinitions } from "../shared/leagueRegistry.js";
 
 export const SPORTS_DATA_SCHEDULE_LEAGUES = Object.freeze([
   { code: "epl", label: "EPL", competitionId: 1 },
@@ -6,33 +12,32 @@ export const SPORTS_DATA_SCHEDULE_LEAGUES = Object.freeze([
   { code: "ucl", label: "UCL", competitionId: 3 },
 ]);
 
+export function resolveSportsDataScheduleProbeLeagues(env = process.env) {
+  return getLeagueScheduleDefinitions()
+    .map((definition) => {
+      const configuredCompetitionId = parseCompetitionId(
+        env?.[definition.competitionIdEnvName],
+        definition.defaultCompetitionId
+      );
+      if (!configuredCompetitionId) {
+        return null;
+      }
+      return {
+        code: definition.code,
+        label: definition.label,
+        competitionId: configuredCompetitionId,
+      };
+    })
+    .filter(Boolean);
+}
+
 export function buildSportsDataScheduleProbeUrl({
   baseUrl,
   competitionId,
   season,
   apiKey,
 } = {}) {
-  const normalizedBaseUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
-  const normalizedApiKey = String(apiKey || "").trim();
-  const normalizedSeason = Number.parseInt(String(season || "").trim(), 10);
-  const normalizedCompetitionId = Number.parseInt(String(competitionId || "").trim(), 10);
-
-  if (!normalizedBaseUrl) {
-    throw new Error("SPORTSDATA_SCHEDULE_BASE_URL is required.");
-  }
-  if (!normalizedApiKey) {
-    throw new Error("SPORTSDATA_API_KEY is required.");
-  }
-  if (!Number.isFinite(normalizedSeason) || normalizedSeason < 2000) {
-    throw new Error("SPORTSDATA_SCHEDULE_SEASON must be a valid year.");
-  }
-  if (!Number.isFinite(normalizedCompetitionId) || normalizedCompetitionId <= 0) {
-    throw new Error("competitionId must be a positive integer.");
-  }
-
-  const url = new URL(`${normalizedBaseUrl}/${normalizedCompetitionId}/${normalizedSeason}`);
-  url.searchParams.set("key", normalizedApiKey);
-  return url.toString();
+  return buildSportsDataScheduleUrl({ baseUrl, competitionId, season, apiKey });
 }
 
 export function summarizeSportsDataScheduleProbe(rows, {

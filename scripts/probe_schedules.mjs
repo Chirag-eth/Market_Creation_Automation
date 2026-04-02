@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   buildSportsDataScheduleProbeUrl,
-  SPORTS_DATA_SCHEDULE_LEAGUES,
+  resolveSportsDataScheduleProbeLeagues,
   summarizeSportsDataScheduleProbe,
 } from "../src/data/scheduleProbe.js";
 
@@ -31,8 +31,14 @@ if (!SPORTSDATA_API_KEY) {
 
 let failed = false;
 const summaries = [];
+const probeLeagues = resolveSportsDataScheduleProbeLeagues(process.env);
 
-for (const league of SPORTS_DATA_SCHEDULE_LEAGUES) {
+if (probeLeagues.length === 0) {
+  console.error("No schedule leagues are configured for probing. Set SportsData competition IDs or fixture paths first.");
+  process.exit(1);
+}
+
+for (const league of probeLeagues) {
   try {
     const url = buildSportsDataScheduleProbeUrl({
       baseUrl: SPORTSDATA_SCHEDULE_BASE_URL,

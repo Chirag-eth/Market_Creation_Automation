@@ -5,10 +5,14 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "start:mainnet": "APP_ENV=mainnet node server.js",
+    "start:uat": "APP_ENV=uat node server.js",
     "dev": "node server.js",
+    "dev:mainnet": "APP_ENV=mainnet node server.js",
+    "dev:uat": "APP_ENV=uat node server.js",
     "probe:schedules": "node scripts/probe_schedules.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check server.js src/app/*.js src/core/*.js src/data/*.js src/shared/*.js tests/*.mjs tests/helpers/*.mjs scripts/*.mjs"
+    "check": "node --check server.js src/app/*.js src/backend/*.js src/backend/*/*.js src/composer/*.js src/core/*.js src/data/*.js src/shared/*.js tests/*.mjs tests/helpers/*.mjs scripts/*.mjs"
   },
   "engines": {
     "node": ">=20"

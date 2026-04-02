@@ -1,5 +1,14 @@
-import { fetchCatalogPayload, normalizeCatalogPayload } from "../data/catalog.js";
-import { fetchUpcomingFixturesForLeague, resolveScheduleLeagueCode } from "../data/schedules.js";
+import { extractScheduleReadyLeagueCodes, fetchCatalogPayload, normalizeCatalogPayload } from "../data/catalog.js";
+import { fetchRuntimeEnvironmentPayload, updateRuntimeEnvironment } from "../data/runtime.js";
+import { fetchUpcomingFixturesForLeague } from "../data/schedules.js";
+import { getActiveMarketSchemas, getDefaultMarketSchemaKey, getMarketSchema } from "../composer/marketSchemas.js";
+import { getDefaultFixtureSourceKey, getFixtureSource, getFixtureSources } from "../shared/fixtureSourceRegistry.js";
+import {
+  clearApiBearerToken,
+  isBearerAuthError,
+  loadApiBearerToken,
+  saveApiBearerToken,
+} from "../shared/apiClient.js";
 import { createLogger } from "../shared/logger.js";
 import { loadSnapshot, loadThemePreference, saveSnapshot, saveThemePreference } from "./persistence.js";
 import {
@@ -9,7 +18,20 @@ import {
   verifyFixtureJsonStrict,
   verifyParentMarketJsonStrict,
 } from "../core/verifier.js";
+import {
+  DEFAULT_UAT_MARKET_LINE,
+  UAT_MARKET_LINE_OPTIONS,
+  UAT_SPREAD_MARKET_LINE_OPTIONS,
+} from "../core/uatFormats.js";
+import {
+  validateUatParentMarketFamilyPayload,
+  validateUatTypeReferencePayloads,
+} from "../core/validation.js";
 import { escapeHtml, escapeHtmlAttribute, normalizeForSearch } from "../shared/util.js";
+import { getLeagueScheduleDefinition, getLeagueScheduleDefinitions } from "../shared/leagueRegistry.js";
+import { resolveAppliedMatchDayValue } from "../shared/scheduleFixtureSelection.js";
+import { getAppWorkspace, getAppWorkspaces } from "../shared/workspaceRegistry.js";
+import { resolveCatalogLeagueScheduleCode } from "../shared/scheduleLeagueBinding.js";
 
 const uiLog = createLogger("ui");
 let resultPanelRenderId = 0;
@@ -20,6 +42,42 @@ const DEFAULT_SCHEDULE_SEARCH_FILTERS = Object.freeze({
   kickoff: true,
   matchday: true,
 });
+const DEFAULT_RUNTIME_ENV_OPTIONS = Object.freeze([
+  Object.freeze({ code: "mainnet", label: "Mainnet", available: true }),
+  Object.freeze({ code: "uat", label: "UAT", available: true }),
+]);
+const DEFAULT_UAT_MARKET_FAMILY = "moneyline";
+const DEFAULT_UAT_SPREAD_TEAM_SIDE = "home";
+const UAT_MARKET_FAMILY_OPTIONS = Object.freeze([
+  Object.freeze({
+    key: "moneyline",
+    label: "Moneyline",
+    shortLabel: "1X2",
+    description: "Three-way home / draw / away family payload for UAT.",
+    outputLabel: "Moneyline Family JSON",
+  }),
+  Object.freeze({
+    key: "spreads",
+    label: "Spreads",
+    shortLabel: "Handicap",
+    description: "Single-sided team spread payload for UAT parent-market families.",
+    outputLabel: "Spreads Family JSON",
+  }),
+  Object.freeze({
+    key: "totals",
+    label: "Totals",
+    shortLabel: "Over/Under",
+    description: "Line-based totals payload for UAT parent-market families.",
+    outputLabel: "Totals Family JSON",
+  }),
+  Object.freeze({
+    key: "btts",
+    label: "Both Teams To Score",
+    shortLabel: "BTTS",
+    description: "Binary both-teams-to-score payload for UAT family output.",
+    outputLabel: "BTTS Family JSON",
+  }),
+]);
 const UPCOMING_MATCHWEEK_WINDOW = 6;
 
 const state = {
@@ -27,9 +85,12 @@ const state = {
   teams: [],
   catalogLoaded: false,
   catalogSourceLabel: "",
+  apiAccessRequired: false,
+  apiAccessMessage: "",
   autoVerifyTimerId: null,
   pendingAutoVerifyMode: null,
   pendingRestoredLeagueSelection: "",
+  pendingRestoredScheduleLeagueOverrideCode: "",
   persistFixtureInput: true,
   persistParentInput: true,
   referenceNowIso: "",
@@ -41,6 +102,12 @@ const state = {
   isScheduleLoading: false,
   scheduleRequestId: 0,
   toastTimerId: null,
+  scheduleReadyLeagueCodes: null,
+  runtimeAppEnv: "",
+  runtimeAppEnvLabel: "Mainnet",
+  runtimeEnvOptions: [],
+  isRuntimeEnvSwitching: false,
+  scheduleLeagueOverrideCode: "",
   upcomingScheduleLeagueCode: "",
   upcomingScheduleWeek: null,
   upcomingScheduleWeeks: [],
@@ -52,8 +119,16 @@ const state = {
   scheduleSearchFilters: createScheduleSearchFilters(),
   isScheduleFilterMenuOpen: false,
   currentGeneratePage: "builder",
+  activeWorkspace: "composer",
+  activeFixtureSource: getDefaultFixtureSourceKey(),
+  selectedMarketSchemaKey: getDefaultMarketSchemaKey(),
+  selectedUatMarketFamily: DEFAULT_UAT_MARKET_FAMILY,
+  selectedUatMarketLine: DEFAULT_UAT_MARKET_LINE,
+  selectedUatSpreadTeamSide: DEFAULT_UAT_SPREAD_TEAM_SIDE,
   builderScheduleWeek: null,
   fixturesPageScheduleWeek: null,
+  lastGenerationResult: null,
+  outputValidation: createInitialOutputValidationState(),
   theme: "light",
 };
 
@@ -130,6 +205,119 @@ const SAMPLE_PARENT_JSON = {
   ],
 };
 
+function createInitialOutputValidationState() {
+  return {
+    fixture: null,
+    parent: null,
+    uatFamily: null,
+    typeReferences: null,
+  };
+}
+
+function normalizeUatMarketFamilyKey(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return UAT_MARKET_FAMILY_OPTIONS.some((option) => option.key === normalized)
+    ? normalized
+    : DEFAULT_UAT_MARKET_FAMILY;
+}
+
+function getUatMarketFamilyDefinition(value) {
+  const key = normalizeUatMarketFamilyKey(value);
+  return UAT_MARKET_FAMILY_OPTIONS.find((option) => option.key === key) || UAT_MARKET_FAMILY_OPTIONS[0];
+}
+
+function getAvailableUatMarketLineOptions(familyKey = state.selectedUatMarketFamily) {
+  const family = normalizeUatMarketFamilyKey(familyKey);
+  return family === "spreads" ? UAT_SPREAD_MARKET_LINE_OPTIONS : UAT_MARKET_LINE_OPTIONS;
+}
+
+function normalizeUatMarketLine(value, familyKey = state.selectedUatMarketFamily) {
+  const normalized = String(value || "").trim();
+  const options = getAvailableUatMarketLineOptions(familyKey);
+  return options.some((option) => option.key === normalized)
+    ? normalized
+    : (options[0]?.key || DEFAULT_UAT_MARKET_LINE);
+}
+
+function supportsUatMarketLine(value) {
+  const familyKey = normalizeUatMarketFamilyKey(value);
+  return familyKey === "totals" || familyKey === "spreads";
+}
+
+function normalizeUatSpreadTeamSide(value) {
+  return String(value || "").trim().toLowerCase() === "away" ? "away" : DEFAULT_UAT_SPREAD_TEAM_SIDE;
+}
+
+function getSelectedUatMarketLine(familyKey = state.selectedUatMarketFamily) {
+  return normalizeUatMarketLine(state.selectedUatMarketLine, familyKey);
+}
+
+function getCurrentUatSpreadTeamOptions() {
+  const selectedFixture = getCurrentSelectedScheduleFixture();
+  const fallbackSides = splitScheduleEventName(els.generateEventNameInput?.value || "");
+  const homeLabel = String(selectedFixture?.homeTeamName || fallbackSides.home || "Home team").trim() || "Home team";
+  const awayLabel = String(selectedFixture?.awayTeamName || fallbackSides.away || "Away team").trim() || "Away team";
+  return [
+    { key: "home", label: homeLabel },
+    { key: "away", label: awayLabel },
+  ];
+}
+
+function getSelectedUatSpreadTeamSide() {
+  return normalizeUatSpreadTeamSide(state.selectedUatSpreadTeamSide);
+}
+
+function getSelectedUatSpreadTeamLabel() {
+  const selectedSide = getSelectedUatSpreadTeamSide();
+  const selectedOption = getCurrentUatSpreadTeamOptions().find((option) => option.key === selectedSide);
+  return selectedOption?.label || getCurrentUatSpreadTeamOptions()[0]?.label || "Home team";
+}
+
+function getUatFamilyOutputLabel(familyKey = state.selectedUatMarketFamily, marketLine = state.selectedUatMarketLine) {
+  const family = getUatMarketFamilyDefinition(familyKey);
+  if (family.key === "spreads") {
+    return `${family.outputLabel} · ${getSelectedUatSpreadTeamLabel()} · ${normalizeUatMarketLine(marketLine, family.key)}`;
+  }
+  if (!supportsUatMarketLine(family.key)) {
+    return family.outputLabel;
+  }
+  return `${family.outputLabel} · ${normalizeUatMarketLine(marketLine, family.key)}`;
+}
+
+function isSelectionSpecificUatFamilyOutputStale(generationResult = state.lastGenerationResult) {
+  if (!generationResult || typeof generationResult !== "object") {
+    return false;
+  }
+
+  const family = getUatMarketFamilyDefinition(state.selectedUatMarketFamily);
+  if (!supportsUatMarketLine(family.key)) {
+    return family.key === "spreads"
+      ? normalizeUatSpreadTeamSide(generationResult.uatSpreadTeamSide) !== getSelectedUatSpreadTeamSide()
+      : false;
+  }
+
+  if (normalizeUatMarketLine(generationResult.uatMarketLine, family.key) !== getSelectedUatMarketLine(family.key)) {
+    return true;
+  }
+
+  if (family.key === "spreads") {
+    return normalizeUatSpreadTeamSide(generationResult.uatSpreadTeamSide) !== getSelectedUatSpreadTeamSide();
+  }
+
+  return false;
+}
+
+function isUatRuntimeActive() {
+  return normalizeRuntimeAppEnvCode(state.runtimeAppEnv || "mainnet") === "uat";
+}
+
+function resetUatComposerSelectionToDefaults() {
+  state.selectedUatMarketFamily = DEFAULT_UAT_MARKET_FAMILY;
+  state.selectedUatMarketLine = DEFAULT_UAT_MARKET_LINE;
+  state.selectedUatSpreadTeamSide = DEFAULT_UAT_SPREAD_TEAM_SIDE;
+  state.outputValidation.uatFamily = null;
+}
+
 export function initApp() {
   cacheElements();
   restoreThemePreference();
@@ -140,6 +328,13 @@ export function initApp() {
   seedDefaults();
   setVerifyEditorOpen(false);
   setGeneratePage(state.currentGeneratePage);
+  renderWorkspaceNav();
+  renderFixtureSourceNav();
+  populateMarketSchemaSelect();
+  populateMarketFamilySelect();
+  populateMarketLineSelect();
+  populateSpreadTeamSelect();
+  renderMarketSchemaPanel();
 
   setCatalogStatus("Loading CSV catalog...", "working");
   setOverviewCard("catalog", {
@@ -154,7 +349,7 @@ export function initApp() {
   });
   setOverviewCard("generate", {
     value: "Ready",
-    note: "Event name to fixture + parent JSON",
+    note: "Event name to fixture + output payloads",
     tone: "idle",
   });
   renderVerifyOutput({
@@ -169,23 +364,39 @@ export function initApp() {
     sections: [],
     counts: null,
   });
-  renderJsonOutputs(null, null);
+  renderJsonOutputs(null);
   clearScheduleSuggestions();
-  setScheduleStatus("Select a league to load upcoming scheduled fixtures, or keep typing manually.", "idle");
+  syncFixtureSourceMode();
   renderDeterministicContext();
   renderGenerateReadiness();
   renderScheduleSearchControls();
+  renderApiAccessPanel();
+  renderRuntimeEnvironmentControl();
   updateJsonMeta("fixture");
   updateJsonMeta("parent");
   syncActionState();
 
+  void hydrateRuntimeEnvironmentControl();
   void loadCatalog();
 }
 
 function cacheElements() {
   const ids = [
     "catalogStatus",
+    "runtimeEnvSelect",
+    "runtimeEnvBadge",
+    "apiAccessPanel",
+    "apiAccessNote",
+    "apiAccessTokenInput",
+    "saveApiAccessTokenBtn",
+    "retryApiAccessBtn",
+    "clearApiAccessTokenBtn",
+    "apiAccessStatus",
     "reloadCatalogBtn",
+    "workspaceNav",
+    "fixtureSourceCard",
+    "fixtureSourceNav",
+    "fixtureSourceNote",
     "catalogOverviewCard",
     "catalogOverviewValue",
     "catalogOverviewNote",
@@ -217,15 +428,39 @@ function cacheElements() {
     "parentJsonMeta",
     "generateEventNameInput",
     "generateEventNameSuggestions",
+    "generatePageTabs",
     "generateBuilderPageBtn",
     "generateFixturesPageBtn",
+    "generateMarketSchemaCard",
+    "generateMarketSchemaSelect",
+    "generateMarketSchemaStatus",
+    "generateMarketSchemaDescription",
+    "generateMarketSchemaEnvironment",
+    "generateMarketSchemaOutputs",
+    "generateMarketSchemaRequired",
+    "generateMarketSchemaOptional",
+    "generateMarketFamilySelect",
+    "generateMarketFamilyHelp",
+    "generateMarketFamilyInactive",
+    "generateMarketFamilyInactiveText",
+    "generateMarketFamilyActivateBtn",
+    "generateMarketLineField",
+    "generateMarketLineSelect",
+    "generateMarketLineHelp",
+    "generateSpreadTeamField",
+    "generateSpreadTeamSelect",
+    "generateSpreadTeamHelp",
     "generateBuilderPage",
     "generateFixturesPage",
     "generateBuilderWeekSelect",
     "generateBuilderRefetchBtn",
+    "generateBuilderPreviewNote",
+    "generateBuilderPreviewActions",
     "generateBuilderFixturePreview",
+    "generateFixturesLiveControls",
     "generateFixtureLeagueTabs",
     "generateFixtureWeekTabs",
+    "generateFixtureSearchField",
     "generateFixtureSearchInput",
     "generateFixtureSearchFiltersBtn",
     "generateFixtureSearchFiltersMenu",
@@ -239,6 +474,7 @@ function cacheElements() {
     "generateFixtureActiveMeta",
     "generateFixtureActiveState",
     "generateFixtureSummary",
+    "generateFixturesSourcePlaceholder",
     "generateFixtureResults",
     "generateScheduleStatus",
     "generateLeagueSelect",
@@ -271,12 +507,34 @@ function cacheElements() {
     "deterministicLeagueState",
     "deterministicLeagueNote",
     "generationStatus",
+    "generatedFixturePanel",
+    "generatedFixtureTitle",
     "generatedFixtureOutput",
+    "generatedParentPanel",
+    "generatedParentTitle",
     "generatedParentOutput",
+    "generatedUatFamilyPanel",
+    "generatedUatFamilyTitle",
+    "generatedUatFamilyOutput",
+    "generatedTypeReferencesPanel",
+    "generatedTypeReferencesTitle",
+    "generatedTypeReferencesOutput",
     "generatedFixtureState",
     "generatedParentState",
+    "generatedUatFamilyState",
+    "generatedTypeReferencesState",
+    "generatedFixtureValidationState",
+    "generatedParentValidationState",
+    "generatedUatFamilyValidationState",
+    "generatedTypeReferencesValidationState",
+    "validateGeneratedFixtureBtn",
+    "validateGeneratedParentBtn",
+    "validateGeneratedUatFamilyBtn",
+    "validateGeneratedTypeReferencesBtn",
     "copyGeneratedFixtureBtn",
     "copyGeneratedParentBtn",
+    "copyGeneratedUatFamilyBtn",
+    "copyGeneratedTypeReferencesBtn",
     "themeToggleBtn",
     "themeToggleIcon",
     "themeToggleLabel",
@@ -293,27 +551,90 @@ function parseScheduleWeekValue(value) {
   return Number.isInteger(parsed) ? parsed : null;
 }
 
+function resolveUiScheduleLeagueCode(league) {
+  return normalizeScheduleLeagueCode(
+    resolveCatalogLeagueScheduleCode(league, { readyLeagueCodes: state.scheduleReadyLeagueCodes })
+  );
+}
+
 function getSupportedScheduleLeagues() {
   return state.leagues
     .map((league) => ({
       ...league,
-      scheduleCode: resolveScheduleLeagueCode(league),
+      scheduleCode: resolveUiScheduleLeagueCode(league),
     }))
     .filter((league) => Boolean(league.scheduleCode));
 }
 
-function getScheduleLeagueDisplay(league) {
+function getScheduleLeagueViewModels() {
+  const supportedLeagues = getSupportedScheduleLeagues();
+  const leagueByScheduleCode = new Map(
+    supportedLeagues.map((league) => [String(league.scheduleCode || "").trim().toLowerCase(), league])
+  );
+
+  return getLeagueScheduleDefinitions().map((definition) => {
+    const boundLeague = leagueByScheduleCode.get(definition.code) || null;
+    return {
+      ...definition,
+      id: String(boundLeague?.id || ""),
+      key: String(boundLeague?.key || definition.code),
+      name: String(boundLeague?.name || definition.label),
+      alternateName: String(boundLeague?.alternateName || ""),
+      scheduleCode: definition.code,
+      isConfiguredInCatalog: Boolean(boundLeague),
+    };
+  }).filter((league) => league.isConfiguredInCatalog && isScheduleLeaguePubliclyReady(league.scheduleCode));
+}
+
+function getScheduleLeagueDisplay(league, { isActive = false } = {}) {
   const code = String(league?.scheduleCode || "").trim().toLowerCase();
-  if (code === "epl") {
-    return { label: "EPL", icon: "⚽" };
+  const definition = getLeagueScheduleDefinition(code);
+  if (definition) {
+    const preferredIconUrl = String(definition.activeIconUrl || definition.inactiveIconUrl || "").trim();
+    return {
+      label: definition.label,
+      icon: definition.icon,
+      // Keep league artwork readable across themes instead of swapping to low-contrast inactive assets.
+      iconUrl: preferredIconUrl,
+    };
   }
-  if (code === "laliga") {
-    return { label: "La Liga", icon: "◢" };
+  return {
+    label: String(league?.key || league?.name || "").trim(),
+    icon: "•",
+    iconUrl: "",
+  };
+}
+
+function getScheduleLeagueLabel(leagueCode) {
+  const code = String(leagueCode || "").trim().toLowerCase();
+  const definition = getLeagueScheduleDefinition(code);
+  return String(definition?.label || code.toUpperCase()).trim();
+}
+
+function normalizeScheduleLeagueCode(value) {
+  const code = String(value || "").trim().toLowerCase();
+  return getLeagueScheduleDefinition(code) ? code : "";
+}
+
+function getSelectedLeagueControlValue() {
+  return String(els.generateLeagueSelect?.value || "").trim();
+}
+
+function getSelectedCatalogLeague() {
+  const selectedLeagueId = getSelectedLeagueControlValue();
+  return state.leagues.find((league) => String(league.id || "") === selectedLeagueId) || null;
+}
+
+function getActiveScheduleLeagueCode() {
+  const overrideCode = normalizeScheduleLeagueCode(state.scheduleLeagueOverrideCode);
+  if (overrideCode && isScheduleLeaguePubliclyReady(overrideCode)) {
+    return overrideCode;
   }
-  if (code === "ucl") {
-    return { label: "UCL", icon: "✦" };
-  }
-  return { label: String(league?.key || league?.name || "").trim(), icon: "•" };
+  const resolvedCode = (
+    normalizeScheduleLeagueCode(getSelectedLeagueControlValue()) ||
+    resolveUiScheduleLeagueCode(getSelectedCatalogLeague())
+  );
+  return isScheduleLeaguePubliclyReady(resolvedCode) ? resolvedCode : "";
 }
 
 function getScheduleWeekOptions(fixtures = state.upcomingScheduleFixtures) {
@@ -351,6 +672,60 @@ function getFixturesForScheduleWeek(weekValue, fixtures = state.upcomingSchedule
   return (fixtures || []).filter((fixture) => parseScheduleWeekValue(fixture?.matchDay) === activeWeek);
 }
 
+function renderCurrentUpcomingFixturesPage(fixtures = state.upcomingScheduleFixtures) {
+  renderUpcomingFixturesPage(fixtures, {
+    selectedWeek: state.fixturesPageScheduleWeek,
+    selectedLabel: state.upcomingScheduleLabel,
+    leagueCode: state.upcomingScheduleLeagueCode,
+  });
+}
+
+function moveSingleSelectFocus(event, itemSelector, onActivate) {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+
+  const currentItem = event.target.closest(itemSelector);
+  if (!currentItem) {
+    return;
+  }
+
+  let step = 0;
+  if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+    step = 1;
+  } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+    step = -1;
+  }
+
+  const container = currentItem.parentElement;
+  if (!container) {
+    return;
+  }
+
+  const items = Array.from(container.querySelectorAll(itemSelector)).filter((item) => !item.hasAttribute("disabled"));
+  if (items.length === 0) {
+    return;
+  }
+
+  let nextIndex = items.indexOf(currentItem);
+  if (step !== 0) {
+    nextIndex = (nextIndex + step + items.length) % items.length;
+  } else if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = items.length - 1;
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+  const nextItem = items[nextIndex];
+  nextItem.focus();
+  if (typeof onActivate === "function" && nextItem !== currentItem) {
+    onActivate(nextItem);
+  }
+}
+
 function setGeneratePage(page, { focusTarget = null } = {}) {
   const nextPage = page === "fixtures" ? "fixtures" : "builder";
   state.currentGeneratePage = nextPage;
@@ -376,6 +751,7 @@ function setGeneratePage(page, { focusTarget = null } = {}) {
     els.generateFixturesPageBtn.setAttribute("tabindex", isFixtures ? "0" : "-1");
   }
 
+  syncWorkspaceFromUi();
   persistInputSnapshot();
 
   if (focusTarget && typeof focusTarget.focus === "function") {
@@ -385,10 +761,398 @@ function setGeneratePage(page, { focusTarget = null } = {}) {
   }
 }
 
+function syncWorkspaceFromUi() {
+  if (state.activeWorkspace === "verify") {
+    renderWorkspaceNav();
+    return;
+  }
+  state.activeWorkspace = state.currentGeneratePage === "fixtures" ? "fixtures" : "composer";
+  renderWorkspaceNav();
+}
+
+function setActiveWorkspace(workspaceKey, { scroll = true } = {}) {
+  const workspace = getAppWorkspace(workspaceKey) || getAppWorkspace("composer");
+  state.activeWorkspace = workspace?.key || "composer";
+
+  if (workspace?.key === "verify") {
+    setVerifyEditorOpen(true);
+  } else if (workspace?.generatePage) {
+    setGeneratePage(workspace.generatePage);
+  }
+
+  renderWorkspaceNav();
+  persistInputSnapshot();
+
+  if (scroll && workspace?.targetId) {
+    const target = document.getElementById(workspace.targetId);
+    if (target?.scrollIntoView) {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+}
+
+function renderWorkspaceNav() {
+  if (!els.workspaceNav) {
+    return;
+  }
+
+  els.workspaceNav.innerHTML = getAppWorkspaces()
+    .map((workspace) => {
+      const isActive = workspace.key === state.activeWorkspace;
+      return (
+        `<button type="button" class="workspace-nav-tab${isActive ? " is-active" : ""}" data-workspace-key="${escapeHtml(workspace.key)}" aria-pressed="${isActive ? "true" : "false"}">` +
+        `<span class="workspace-nav-tab__label">${escapeHtml(workspace.label)}</span>` +
+        `<span class="workspace-nav-tab__note">${escapeHtml(workspace.description)}</span>` +
+        `</button>`
+      );
+    })
+    .join("");
+}
+
+function normalizeFixtureSourceKey(value) {
+  const key = String(value || "").trim().toLowerCase();
+  return getFixtureSource(key)?.key || "";
+}
+
+function getPublicFixtureSources() {
+  return getFixtureSources().filter((source) => source.status === "active");
+}
+
+function normalizePublicFixtureSourceKey(value) {
+  const key = normalizeFixtureSourceKey(value);
+  return getPublicFixtureSources().some((source) => source.key === key) ? key : "";
+}
+
+function getActiveFixtureSource() {
+  const sourceKey = normalizePublicFixtureSourceKey(state.activeFixtureSource) || getDefaultFixtureSourceKey();
+  return getFixtureSource(sourceKey) || getFixtureSource(getDefaultFixtureSourceKey());
+}
+
+function isLiveFixtureSourceActive() {
+  return getActiveFixtureSource()?.key === "live-schedules";
+}
+
+function isScheduleLeaguePubliclyReady(scheduleCode) {
+  const definition = getLeagueScheduleDefinition(scheduleCode);
+  if (!definition) {
+    return false;
+  }
+  if (Array.isArray(state.scheduleReadyLeagueCodes)) {
+    return state.scheduleReadyLeagueCodes.includes(definition.code);
+  }
+  return Boolean(definition.defaultCompetitionId);
+}
+
+function renderFixtureSourceNav() {
+  if (!els.fixtureSourceNav) {
+    return;
+  }
+
+  const publicSources = getPublicFixtureSources();
+  const activeSourceKey = normalizePublicFixtureSourceKey(state.activeFixtureSource) || publicSources[0]?.key || getDefaultFixtureSourceKey();
+  state.activeFixtureSource = activeSourceKey;
+  if (els.fixtureSourceCard) {
+    els.fixtureSourceCard.hidden = publicSources.length <= 1;
+  }
+  if (publicSources.length <= 1) {
+    els.fixtureSourceNav.innerHTML = "";
+    return;
+  }
+
+  els.fixtureSourceNav.innerHTML = publicSources
+    .map((source) => {
+      const isActive = source.key === activeSourceKey;
+      const statusLabel = "Ready now";
+      return (
+        `<button type="button" class="fixture-source-tab${isActive ? " is-active" : ""}" data-source-key="${escapeHtml(source.key)}" aria-pressed="${isActive ? "true" : "false"}">` +
+        `<span class="fixture-source-tab__copy">` +
+        `<span class="fixture-source-tab__label">${escapeHtml(source.label)}</span>` +
+        `<span class="fixture-source-tab__meta">${escapeHtml(statusLabel)}</span>` +
+        `</span>` +
+        `</button>`
+      );
+    })
+    .join("");
+}
+
+function setActiveFixtureSource(sourceKey) {
+  const nextSource = getFixtureSource(normalizePublicFixtureSourceKey(sourceKey) || getDefaultFixtureSourceKey()) ||
+    getFixtureSource(getDefaultFixtureSourceKey());
+  if (!nextSource) {
+    return;
+  }
+  if (!getPublicFixtureSources().some((source) => source.key === nextSource.key)) {
+    return;
+  }
+  const sourceChanged = nextSource.key !== state.activeFixtureSource;
+  state.activeFixtureSource = nextSource.key;
+
+  if (sourceChanged && nextSource.key !== "live-schedules") {
+    clearSelectedScheduleFixtureState();
+    renderScheduleActiveSummary(null, { leagueCode: "" });
+  }
+
+  renderFixtureSourceNav();
+  syncFixtureSourceMode();
+  persistInputSnapshot();
+
+  if (nextSource.key === "live-schedules" && state.catalogLoaded) {
+    void refreshLeagueScheduleSuggestions({ force: false });
+  }
+}
+
+function syncFixtureSourceMode() {
+  const source = getActiveFixtureSource();
+  if (!source) {
+    return;
+  }
+
+  if (els.fixtureSourceNote) {
+    els.fixtureSourceNote.textContent =
+      source.key === "live-schedules"
+        ? "Browse deterministic upcoming fixtures now. Imported CSV is ready to plug in when the Lsports export schema lands."
+        : "Imported CSV mode is reserved for normalized Lsports DB-export fixtures. The live schedule flow stays intact and can be resumed anytime.";
+  }
+
+  if (els.fixtureSourceCard) {
+    els.fixtureSourceCard.hidden = getPublicFixtureSources().length <= 1;
+  }
+
+  if (els.generateBuilderPreviewNote) {
+    els.generateBuilderPreviewNote.textContent =
+      source.key === "live-schedules"
+        ? "Default starts on the next matchweek."
+        : "Imported CSV mode will use normalized fixture rows from future Lsports DB exports.";
+  }
+
+  if (els.generateBuilderPreviewActions) {
+    els.generateBuilderPreviewActions.hidden = source.key !== "live-schedules";
+  }
+
+  if (els.generateFixturesLiveControls) {
+    els.generateFixturesLiveControls.hidden = source.key !== "live-schedules";
+  }
+
+  if (els.generateFixtureSearchField) {
+    els.generateFixtureSearchField.hidden = source.key !== "live-schedules";
+  }
+
+  if (els.refreshScheduleBtn) {
+    els.refreshScheduleBtn.hidden = source.key !== "live-schedules";
+  }
+
+  if (els.generateFixtureWeekTabs) {
+    els.generateFixtureWeekTabs.hidden = source.key !== "live-schedules" || els.generateFixtureWeekTabs.childElementCount === 0;
+  }
+
+  if (source.key !== "live-schedules") {
+    setScheduleFilterMenuOpen(false);
+    setScheduleStatus("Imported CSV mode is reserved for Lsports DB-export ingestion. Live schedule browsing is paused in this mode.", "idle");
+    renderBuilderFixturePreview();
+    renderCurrentUpcomingFixturesPage();
+  } else {
+    setScheduleStatus("Select a league to load upcoming scheduled fixtures, or keep typing manually.", "idle");
+    renderBuilderFixturePreview();
+    renderCurrentUpcomingFixturesPage();
+  }
+
+  syncActionState();
+}
+
+function populateMarketSchemaSelect() {
+  if (!els.generateMarketSchemaSelect) {
+    return;
+  }
+
+  const schemas = getActiveMarketSchemas();
+  const currentKey = getMarketSchema(state.selectedMarketSchemaKey)?.key || getDefaultMarketSchemaKey();
+  els.generateMarketSchemaSelect.innerHTML = schemas
+    .map((schema) => {
+      return `<option value="${escapeHtml(schema.key)}">${escapeHtml(`${schema.label} · ${schema.shortLabel}`)}</option>`;
+    })
+    .join("");
+  const resolvedKey = schemas.some((schema) => schema.key === currentKey)
+    ? currentKey
+    : getDefaultMarketSchemaKey();
+  els.generateMarketSchemaSelect.value = resolvedKey;
+  state.selectedMarketSchemaKey = resolvedKey;
+  els.generateMarketSchemaSelect.disabled = schemas.length <= 1;
+}
+
+function populateMarketFamilySelect() {
+  if (!els.generateMarketFamilySelect) {
+    return;
+  }
+
+  const currentFamily = normalizeUatMarketFamilyKey(state.selectedUatMarketFamily);
+  els.generateMarketFamilySelect.innerHTML = UAT_MARKET_FAMILY_OPTIONS
+    .map((family) => `<option value="${escapeHtmlAttribute(family.key)}">${escapeHtml(`${family.label} · ${family.shortLabel}`)}</option>`)
+    .join("");
+  els.generateMarketFamilySelect.value = currentFamily;
+  state.selectedUatMarketFamily = currentFamily;
+}
+
+function populateMarketLineSelect() {
+  if (!els.generateMarketLineSelect) {
+    return;
+  }
+
+  const options = getAvailableUatMarketLineOptions(state.selectedUatMarketFamily);
+  const currentLine = normalizeUatMarketLine(state.selectedUatMarketLine, state.selectedUatMarketFamily);
+  els.generateMarketLineSelect.innerHTML = options
+    .map((option) => `<option value="${escapeHtmlAttribute(option.key)}">${escapeHtml(option.label)}</option>`)
+    .join("");
+  els.generateMarketLineSelect.value = currentLine;
+  state.selectedUatMarketLine = currentLine;
+}
+
+function populateSpreadTeamSelect() {
+  if (!els.generateSpreadTeamSelect) {
+    return;
+  }
+
+  const options = getCurrentUatSpreadTeamOptions();
+  const currentSide = getSelectedUatSpreadTeamSide();
+  els.generateSpreadTeamSelect.innerHTML = options
+    .map((option) => `<option value="${escapeHtmlAttribute(option.key)}">${escapeHtml(option.label)}</option>`)
+    .join("");
+  els.generateSpreadTeamSelect.value = currentSide;
+  state.selectedUatSpreadTeamSide = currentSide;
+}
+
+function renderMarketSchemaPanel() {
+  const schema = getMarketSchema(state.selectedMarketSchemaKey) || getMarketSchema(getDefaultMarketSchemaKey());
+  if (!schema) {
+    return;
+  }
+
+  const runtimeLabel = String(state.runtimeAppEnvLabel || "Mainnet").trim() || "Mainnet";
+  const runtimeCode = normalizeRuntimeAppEnvCode(state.runtimeAppEnv || "mainnet");
+  const family = getUatMarketFamilyDefinition(state.selectedUatMarketFamily);
+  state.selectedUatMarketLine = normalizeUatMarketLine(state.selectedUatMarketLine, family.key);
+  state.selectedUatSpreadTeamSide = normalizeUatSpreadTeamSide(state.selectedUatSpreadTeamSide);
+  populateMarketLineSelect();
+  populateSpreadTeamSelect();
+  const selectedLine = getSelectedUatMarketLine(family.key);
+  const selectedSpreadTeamLabel = getSelectedUatSpreadTeamLabel();
+  const showLineSelector = runtimeCode === "uat" && supportsUatMarketLine(family.key);
+  const showSpreadTeamSelector = runtimeCode === "uat" && family.key === "spreads";
+  const outputs = runtimeCode === "uat"
+    ? ["Fixture JSON", getUatFamilyOutputLabel(family.key, selectedLine), "Type Reference Payloads (optional)"]
+    : schema.outputs;
+  const optionalFields = runtimeCode === "uat"
+    ? uniqueItems([...(schema.optionalFields || []), "Market family", ...(showLineSelector ? ["Market line"] : []), ...(showSpreadTeamSelector ? ["Spread team"] : [])])
+    : schema.optionalFields;
+  const description = runtimeCode === "uat"
+    ? `${schema.category} · ${family.description}${showLineSelector ? ` Selected line: ${selectedLine}.` : ""}${showSpreadTeamSelector ? ` Selected team: ${selectedSpreadTeamLabel}.` : ""} The selected family drives the primary UAT output panel and its validation rules.`
+    : `${schema.category} · ${schema.description}`;
+
+  if (els.generateMarketSchemaCard) {
+    els.generateMarketSchemaCard.hidden = false;
+  }
+
+  if (els.generateMarketSchemaStatus) {
+    els.generateMarketSchemaStatus.textContent = runtimeCode === "uat" ? `UAT · ${family.label}` : "Mainnet only";
+    els.generateMarketSchemaStatus.dataset.status = schema.status;
+    els.generateMarketSchemaStatus.className = runtimeCode === "uat" ? "mini-badge mini-badge-live" : "mini-badge";
+  }
+  if (els.generateMarketSchemaDescription) {
+    els.generateMarketSchemaDescription.textContent = description;
+  }
+  if (els.generateMarketSchemaEnvironment) {
+    els.generateMarketSchemaEnvironment.textContent = `${runtimeLabel}${runtimeCode === "uat" ? " · family-aware" : ""}`;
+  }
+  if (els.generateMarketSchemaOutputs) {
+    els.generateMarketSchemaOutputs.textContent = outputs.join(" · ");
+  }
+  if (els.generateMarketSchemaRequired) {
+    els.generateMarketSchemaRequired.textContent = schema.requiredFields.join(" · ");
+  }
+  if (els.generateMarketSchemaOptional) {
+    els.generateMarketSchemaOptional.textContent = optionalFields.join(" · ");
+  }
+  if (els.generateMarketFamilySelect) {
+    els.generateMarketFamilySelect.disabled = runtimeCode !== "uat";
+    els.generateMarketFamilySelect.value = family.key;
+  }
+  if (els.generateMarketFamilyInactive) {
+    els.generateMarketFamilyInactive.hidden = runtimeCode === "uat";
+  }
+  if (els.generateMarketFamilyInactiveText) {
+    els.generateMarketFamilyInactiveText.textContent = runtimeCode === "uat"
+      ? ""
+      : `Market family becomes active in UAT. Current environment: ${runtimeLabel}.`;
+  }
+  if (els.generateMarketFamilyActivateBtn) {
+    els.generateMarketFamilyActivateBtn.hidden = runtimeCode === "uat";
+    els.generateMarketFamilyActivateBtn.disabled =
+      runtimeCode === "uat" ||
+      state.isRuntimeEnvSwitching ||
+      state.isCatalogLoading ||
+      state.isVerifying ||
+      state.isGenerating ||
+      state.isScheduleLoading;
+    els.generateMarketFamilyActivateBtn.textContent = state.isRuntimeEnvSwitching ? "Switching..." : "Switch to UAT";
+  }
+  if (els.generateMarketFamilyHelp) {
+    els.generateMarketFamilyHelp.textContent = runtimeCode === "uat"
+      ? `Selected family: ${family.label}.${showLineSelector ? ` Selected line: ${selectedLine}.` : ""}${showSpreadTeamSelector ? ` Selected team: ${selectedSpreadTeamLabel}.` : ""} This drives the primary UAT output panel and validation rules.`
+      : "This selector is read-only on Mainnet. Use the inline action to activate UAT-specific payloads.";
+  }
+  if (els.generateMarketLineField) {
+    els.generateMarketLineField.hidden = !showLineSelector;
+  }
+  if (els.generateMarketLineSelect) {
+    els.generateMarketLineSelect.disabled = !showLineSelector;
+    els.generateMarketLineSelect.value = selectedLine;
+  }
+  if (els.generateMarketLineHelp) {
+    els.generateMarketLineHelp.textContent = showLineSelector
+      ? `Selected line: ${selectedLine}. Regenerate to update the ${family.label.toLowerCase()} family JSON.`
+      : "Market line becomes available for Totals and Spreads in UAT.";
+  }
+  if (els.generateSpreadTeamField) {
+    els.generateSpreadTeamField.hidden = !showSpreadTeamSelector;
+  }
+  if (els.generateSpreadTeamSelect) {
+    els.generateSpreadTeamSelect.disabled = !showSpreadTeamSelector;
+    els.generateSpreadTeamSelect.value = getSelectedUatSpreadTeamSide();
+  }
+  if (els.generateSpreadTeamHelp) {
+    els.generateSpreadTeamHelp.textContent = showSpreadTeamSelector
+      ? `Selected team: ${selectedSpreadTeamLabel}. Regenerate to update the spreads family JSON.`
+      : "Spread team becomes available when Spreads is selected in UAT.";
+  }
+}
+
 function bindEvents() {
   els.reloadCatalogBtn.addEventListener("click", () => {
     uiLog.info("catalog.reload_click");
     void loadCatalog({ force: true });
+  });
+
+  els.apiAccessTokenInput?.addEventListener("input", () => {
+    renderApiAccessPanel();
+  });
+
+  els.apiAccessTokenInput?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    void handleSaveApiAccessTokenAndRetry();
+  });
+
+  els.saveApiAccessTokenBtn?.addEventListener("click", () => {
+    void handleSaveApiAccessTokenAndRetry();
+  });
+
+  els.retryApiAccessBtn?.addEventListener("click", () => {
+    void retryProtectedApiFlow();
+  });
+
+  els.clearApiAccessTokenBtn?.addEventListener("click", () => {
+    handleClearApiAccessToken();
   });
 
   const verifySection = document.getElementById("verifySection");
@@ -397,12 +1161,41 @@ function bindEvents() {
       const isOpen = verifySection.open;
       setVerifyEditorOpen(isOpen);
       if (isOpen) {
+        state.activeWorkspace = "verify";
+      } else if (state.activeWorkspace === "verify") {
+        state.activeWorkspace = state.currentGeneratePage === "fixtures" ? "fixtures" : "composer";
+      }
+      renderWorkspaceNav();
+      persistInputSnapshot();
+      if (isOpen) {
         window.setTimeout(() => {
           els.fixtureInputJson?.focus();
         }, 0);
       }
     });
   }
+
+  els.workspaceNav?.addEventListener("click", (event) => {
+    const tab = event.target instanceof Element ? event.target.closest(".workspace-nav-tab") : null;
+    if (!tab) {
+      return;
+    }
+    const workspaceKey = String(tab.getAttribute("data-workspace-key") || "").trim();
+    if (workspaceKey) {
+      setActiveWorkspace(workspaceKey);
+    }
+  });
+
+  els.fixtureSourceNav?.addEventListener("click", (event) => {
+    const tab = event.target instanceof Element ? event.target.closest(".fixture-source-tab") : null;
+    if (!tab) {
+      return;
+    }
+    const sourceKey = String(tab.getAttribute("data-source-key") || "").trim();
+    if (sourceKey) {
+      setActiveFixtureSource(sourceKey);
+    }
+  });
 
   els.verifyBothBtn.addEventListener("click", () => {
     void handleVerify("both");
@@ -425,20 +1218,27 @@ function bindEvents() {
   });
 
   els.generateLeagueSelect.addEventListener("change", () => {
-    const selectedLeagueId = String(els.generateLeagueSelect.value || "").trim();
-    const selectedLeague = state.leagues.find((league) => String(league.id || "") === selectedLeagueId) || null;
-    const nextScheduleLeagueCode = resolveScheduleLeagueCode(selectedLeague);
-    const currentScheduleLeagueCode = String(state.upcomingScheduleLeagueCode || "").trim().toLowerCase();
+    const selectedValue = getSelectedLeagueControlValue();
+    const selectedLeague = getSelectedCatalogLeague();
+    const nextScheduleLeagueCode =
+      normalizeScheduleLeagueCode(selectedValue) ||
+      resolveUiScheduleLeagueCode(selectedLeague);
+    const currentScheduleLeagueCode = getActiveScheduleLeagueCode();
     const currentSelectedFixture = getCurrentSelectedScheduleFixture();
 
     if (currentSelectedFixture && currentScheduleLeagueCode && nextScheduleLeagueCode !== currentScheduleLeagueCode) {
       clearSelectedScheduleFixtureState({ clearDerivedInputs: true, resetWeeks: true });
     }
 
+    state.scheduleLeagueOverrideCode = nextScheduleLeagueCode;
     persistInputSnapshot();
     renderScheduleLeagueTabs();
     renderDeterministicContext();
-    void refreshLeagueScheduleSuggestions();
+    if (isLiveFixtureSourceActive()) {
+      void refreshLeagueScheduleSuggestions();
+    } else {
+      syncFixtureSourceMode();
+    }
   });
 
   els.generateBuilderPageBtn?.addEventListener("click", () => {
@@ -449,16 +1249,65 @@ function bindEvents() {
     setGeneratePage("fixtures", { focusTarget: els.generateFixtureSearchInput });
   });
 
+  els.generatePageTabs?.addEventListener("keydown", (event) => {
+    moveSingleSelectFocus(event, ".generate-page-tab", (tab) => tab.click());
+  });
+
+  els.generateMarketSchemaSelect?.addEventListener("change", () => {
+    const selectedKey = String(els.generateMarketSchemaSelect.value || "").trim();
+    const schema = getMarketSchema(selectedKey);
+    if (!schema || schema.status !== "active") {
+      els.generateMarketSchemaSelect.value = state.selectedMarketSchemaKey;
+      return;
+    }
+    state.selectedMarketSchemaKey = schema.key;
+    renderMarketSchemaPanel();
+    persistInputSnapshot();
+  });
+
+  els.generateMarketFamilySelect?.addEventListener("change", () => {
+    state.selectedUatMarketFamily = normalizeUatMarketFamilyKey(els.generateMarketFamilySelect.value);
+    state.selectedUatMarketLine = state.selectedUatMarketFamily === "totals"
+      ? DEFAULT_UAT_MARKET_LINE
+      : normalizeUatMarketLine(state.selectedUatMarketLine, state.selectedUatMarketFamily);
+    state.outputValidation.uatFamily = null;
+    renderMarketSchemaPanel();
+    renderJsonOutputs();
+    syncActionState();
+    persistInputSnapshot();
+  });
+
+  els.generateMarketLineSelect?.addEventListener("change", () => {
+    state.selectedUatMarketLine = normalizeUatMarketLine(els.generateMarketLineSelect.value, state.selectedUatMarketFamily);
+    state.outputValidation.uatFamily = null;
+    renderMarketSchemaPanel();
+    renderJsonOutputs();
+    syncActionState();
+    persistInputSnapshot();
+  });
+
+  els.generateSpreadTeamSelect?.addEventListener("change", () => {
+    state.selectedUatSpreadTeamSide = normalizeUatSpreadTeamSide(els.generateSpreadTeamSelect.value);
+    state.outputValidation.uatFamily = null;
+    renderMarketSchemaPanel();
+    renderJsonOutputs();
+    syncActionState();
+    persistInputSnapshot();
+  });
+
   els.generateBuilderWeekSelect?.addEventListener("change", () => {
     const selectedWeek = parseScheduleWeekValue(els.generateBuilderWeekSelect.value);
     state.builderScheduleWeek = selectedWeek;
     state.fixturesPageScheduleWeek = selectedWeek;
     persistInputSnapshot();
     renderBuilderFixturePreview();
-    renderUpcomingFixturesPage();
+    renderCurrentUpcomingFixturesPage();
   });
 
   const handleRefetchFixtures = () => {
+    if (!isLiveFixtureSourceActive()) {
+      return;
+    }
     void refreshLeagueScheduleSuggestions({ force: true });
   };
 
@@ -470,6 +1319,23 @@ function bindEvents() {
     els.generateBuilderRefetchBtn.addEventListener("click", handleRefetchFixtures);
   }
 
+  els.runtimeEnvSelect?.addEventListener("change", () => {
+    const requestedEnv = normalizeRuntimeAppEnvCode(els.runtimeEnvSelect.value);
+    if (!requestedEnv || requestedEnv === state.runtimeAppEnv) {
+      renderRuntimeEnvironmentControl();
+      return;
+    }
+    void handleRuntimeEnvironmentChange(requestedEnv);
+  });
+
+  els.generateMarketFamilyActivateBtn?.addEventListener("click", () => {
+    if (normalizeRuntimeAppEnvCode(state.runtimeAppEnv || "mainnet") === "uat") {
+      renderMarketSchemaPanel();
+      return;
+    }
+    void handleRuntimeEnvironmentChange("uat");
+  });
+
   els.themeToggleBtn?.addEventListener("click", () => {
     const nextTheme = state.theme === "dark" ? "light" : "dark";
     applyTheme(nextTheme);
@@ -478,19 +1344,17 @@ function bindEvents() {
 
   els.generateEventNameInput.addEventListener("change", () => {
     applySelectedScheduleFixture(els.generateEventNameInput.value, { fromManualEntry: true });
+    renderMarketSchemaPanel();
   });
 
   els.generateEventNameInput.addEventListener("input", () => {
     syncScheduleActiveSelection();
+    renderMarketSchemaPanel();
   });
 
   els.generateFixtureSearchInput.addEventListener("input", () => {
     persistInputSnapshot();
-    renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
-      selectedWeek: state.upcomingScheduleWeek,
-      selectedLabel: state.upcomingScheduleLabel,
-      leagueCode: state.upcomingScheduleLeagueCode,
-    });
+    renderCurrentUpcomingFixturesPage();
   });
 
   if (els.generateFixtureSearchFiltersBtn) {
@@ -505,6 +1369,14 @@ function bindEvents() {
   for (const checkbox of getScheduleFilterCheckboxes()) {
     checkbox.addEventListener("change", handleScheduleSearchFilterChange);
   }
+
+  els.generateFixtureLeagueTabs?.addEventListener("keydown", (event) => {
+    moveSingleSelectFocus(event, ".league-nav-tab", (tab) => tab.click());
+  });
+
+  els.generateFixtureWeekTabs?.addEventListener("keydown", (event) => {
+    moveSingleSelectFocus(event, ".fixtures-week-pill", (pill) => pill.click());
+  });
 
   els.generateFixtureSearchInput.addEventListener("keydown", handleScheduleBrowserKeydown);
   els.generateFixtureResults.addEventListener("keydown", handleScheduleBrowserKeydown);
@@ -589,6 +1461,30 @@ function bindEvents() {
     void copyOutputText(els.generatedParentOutput.textContent || "", "Generated parent market JSON copied.");
   });
 
+  els.copyGeneratedUatFamilyBtn?.addEventListener("click", () => {
+    void copyOutputText(els.generatedUatFamilyOutput.textContent || "", "Generated UAT family JSON copied.");
+  });
+
+  els.copyGeneratedTypeReferencesBtn?.addEventListener("click", () => {
+    void copyOutputText(els.generatedTypeReferencesOutput.textContent || "", "Generated type reference payloads copied.");
+  });
+
+  els.validateGeneratedFixtureBtn?.addEventListener("click", () => {
+    validateGeneratedOutputPanel("fixture");
+  });
+
+  els.validateGeneratedParentBtn?.addEventListener("click", () => {
+    validateGeneratedOutputPanel("parent");
+  });
+
+  els.validateGeneratedUatFamilyBtn?.addEventListener("click", () => {
+    validateGeneratedOutputPanel("uatFamily");
+  });
+
+  els.validateGeneratedTypeReferencesBtn?.addEventListener("click", () => {
+    validateGeneratedOutputPanel("typeReferences");
+  });
+
   els.generateEventNameInput.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") {
       return;
@@ -636,8 +1532,25 @@ function bindEvents() {
     const leagueTab = event.target instanceof Element ? event.target.closest(".league-nav-tab") : null;
     if (leagueTab) {
       const leagueId = String(leagueTab.getAttribute("data-league-id") || "").trim();
-      if (leagueId && els.generateLeagueSelect.value !== leagueId) {
-        els.generateLeagueSelect.value = leagueId;
+      const scheduleCode = normalizeScheduleLeagueCode(leagueTab.getAttribute("data-schedule-code"));
+      const currentScheduleLeagueCode = getActiveScheduleLeagueCode();
+      const currentSelectedFixture = getCurrentSelectedScheduleFixture();
+
+      if (currentSelectedFixture && scheduleCode && currentScheduleLeagueCode && scheduleCode !== currentScheduleLeagueCode) {
+        clearSelectedScheduleFixtureState({ clearDerivedInputs: true, resetWeeks: true });
+      }
+
+      const nextSelectValue = leagueId || scheduleCode || "";
+      if (nextSelectValue) {
+        if (els.generateLeagueSelect.value !== nextSelectValue) {
+          els.generateLeagueSelect.value = nextSelectValue;
+        }
+      } else if (els.generateLeagueSelect.value) {
+        els.generateLeagueSelect.value = "";
+      }
+
+      if (scheduleCode) {
+        state.scheduleLeagueOverrideCode = scheduleCode;
         persistInputSnapshot();
         renderScheduleLeagueTabs();
         renderDeterministicContext();
@@ -652,7 +1565,7 @@ function bindEvents() {
       state.fixturesPageScheduleWeek = week;
       state.builderScheduleWeek = week;
       persistInputSnapshot();
-      renderUpcomingFixturesPage();
+      renderCurrentUpcomingFixturesPage();
       renderBuilderFixturePreview();
       return;
     }
@@ -753,11 +1666,20 @@ function persistInputSnapshot() {
       parentJson: state.persistParentInput ? String(els.parentInputJson.value || "") : "",
     },
     generate: {
+      activeWorkspace: String(state.activeWorkspace || "composer"),
+      fixtureSourceKey: String(normalizePublicFixtureSourceKey(state.activeFixtureSource) || getDefaultFixtureSourceKey()),
+      marketSchemaKey: String(state.selectedMarketSchemaKey || getDefaultMarketSchemaKey()),
+      uatMarketFamily: String(state.selectedUatMarketFamily || DEFAULT_UAT_MARKET_FAMILY),
+      uatMarketLine: String(state.selectedUatMarketLine || DEFAULT_UAT_MARKET_LINE),
+      uatSpreadTeamSide: String(state.selectedUatSpreadTeamSide || DEFAULT_UAT_SPREAD_TEAM_SIDE),
       page: String(state.currentGeneratePage || "builder"),
       builderScheduleWeek: Number.isInteger(state.builderScheduleWeek) ? state.builderScheduleWeek : "",
       fixturesPageScheduleWeek: Number.isInteger(state.fixturesPageScheduleWeek) ? state.fixturesPageScheduleWeek : "",
       eventName: String(els.generateEventNameInput.value || ""),
       leagueSelection: String(els.generateLeagueSelect.value || state.pendingRestoredLeagueSelection || ""),
+      scheduleLeagueOverrideCode: String(
+        state.scheduleLeagueOverrideCode || state.pendingRestoredScheduleLeagueOverrideCode || ""
+      ),
       selectedScheduleFixtureId: String(state.selectedScheduleFixtureId || state.pendingRestoredSelectedScheduleFixtureId || ""),
       fixtureSearch: String(els.generateFixtureSearchInput.value || ""),
       fixtureSearchFilters: { ...state.scheduleSearchFilters },
@@ -782,26 +1704,38 @@ function restoreInputSnapshot() {
   const runtime = snapshot.runtime && typeof snapshot.runtime === "object" ? snapshot.runtime : {};
   const verify = snapshot.verify && typeof snapshot.verify === "object" ? snapshot.verify : {};
   const generate = snapshot.generate && typeof snapshot.generate === "object" ? snapshot.generate : {};
+  const restoredScheduleSnapshots = restoreScheduleSnapshots(runtime.scheduleSnapshots);
 
   const restoredReferenceNowIso = normalizeReferenceNowIso(runtime.referenceNowIso);
   const restoredVersion = Number.parseInt(String(runtime.scheduleSnapshotVersion || ""), 10);
   const shouldInvalidateRuntime =
     restoredVersion !== SCHEDULE_SNAPSHOT_SCHEMA_VERSION ||
-    shouldRotateDeterministicReference(restoredReferenceNowIso);
+    (Object.keys(restoredScheduleSnapshots).length > 0 && shouldRotateDeterministicReference(restoredReferenceNowIso));
 
   state.referenceNowIso = shouldInvalidateRuntime ? "" : restoredReferenceNowIso;
-  state.scheduleSnapshots = shouldInvalidateRuntime ? {} : restoreScheduleSnapshots(runtime.scheduleSnapshots);
+  state.scheduleSnapshots = shouldInvalidateRuntime ? {} : restoredScheduleSnapshots;
 
   els.fixtureInputJson.value = asRestoredString(verify.fixtureJson);
   els.parentInputJson.value = asRestoredString(verify.parentJson);
   state.persistFixtureInput = true;
   state.persistParentInput = true;
 
+  state.activeWorkspace = ["composer", "fixtures", "verify"].includes(String(generate.activeWorkspace || "").trim())
+    ? String(generate.activeWorkspace || "").trim()
+    : "composer";
+  state.activeFixtureSource =
+    normalizePublicFixtureSourceKey(generate.fixtureSourceKey) || getDefaultFixtureSourceKey();
+  state.selectedMarketSchemaKey =
+    getMarketSchema(asRestoredString(generate.marketSchemaKey))?.key || getDefaultMarketSchemaKey();
+  state.selectedUatMarketFamily = normalizeUatMarketFamilyKey(generate.uatMarketFamily);
+  state.selectedUatMarketLine = normalizeUatMarketLine(generate.uatMarketLine, generate.uatMarketFamily);
+  state.selectedUatSpreadTeamSide = normalizeUatSpreadTeamSide(generate.uatSpreadTeamSide);
   state.currentGeneratePage = String(generate.page || "") === "fixtures" ? "fixtures" : "builder";
   state.builderScheduleWeek = parseScheduleWeekValue(generate.builderScheduleWeek);
   state.fixturesPageScheduleWeek = parseScheduleWeekValue(generate.fixturesPageScheduleWeek);
   els.generateEventNameInput.value = asRestoredString(generate.eventName);
   state.pendingRestoredLeagueSelection = asRestoredString(generate.leagueSelection);
+  state.pendingRestoredScheduleLeagueOverrideCode = asRestoredString(generate.scheduleLeagueOverrideCode);
   state.pendingRestoredSelectedScheduleFixtureId = asRestoredString(generate.selectedScheduleFixtureId);
   els.generateFixtureSearchInput.value = asRestoredString(generate.fixtureSearch);
   state.scheduleSearchFilters = createScheduleSearchFilters(generate.fixtureSearchFilters);
@@ -828,13 +1762,24 @@ async function loadCatalog({ force = false } = {}) {
   try {
     const payload = await fetchCatalogPayload();
     const normalized = normalizeCatalogPayload(payload);
+    clearProtectedApiAccessRequirement();
     state.leagues = normalized.leagues;
     state.teams = normalized.teams;
     state.catalogLoaded = true;
     state.catalogSourceLabel = String(payload?.source?.label || "CSV files");
+    state.scheduleReadyLeagueCodes = extractScheduleReadyLeagueCodes(payload);
+    state.runtimeAppEnv = normalizeRuntimeAppEnvCode(payload?.source?.environment?.app_env || "mainnet");
+    state.runtimeAppEnvLabel = String(payload?.source?.environment?.app_env_label || (state.runtimeAppEnv === "uat" ? "UAT" : "Mainnet")).trim();
+    renderRuntimeEnvironmentControl();
+    renderMarketSchemaPanel();
+    renderJsonOutputs();
 
     populateLeagueSelect();
-    await refreshLeagueScheduleSuggestions({ force: false });
+    if (isLiveFixtureSourceActive()) {
+      await refreshLeagueScheduleSuggestions({ force: false });
+    } else {
+      syncFixtureSourceMode();
+    }
 
     setCatalogStatus(
       `CSV catalog loaded: ${state.leagues.length} leagues, ${state.teams.length} teams (${state.catalogSourceLabel}).`,
@@ -857,11 +1802,25 @@ async function loadCatalog({ force = false } = {}) {
     state.catalogLoaded = false;
     state.leagues = [];
     state.teams = [];
+    state.scheduleReadyLeagueCodes = null;
+    if (isBearerAuthError(error)) {
+      requireProtectedApiAccess("Catalog access is protected. Paste the API bearer token, then retry.");
+    }
     populateLeagueSelect();
     clearScheduleSuggestions();
-    setScheduleStatus("Schedule suggestions are unavailable until the CSV catalog loads.", "error");
+    setScheduleStatus(
+      isBearerAuthError(error)
+        ? "Schedule suggestions are paused until the API bearer token is supplied."
+        : "Schedule suggestions are unavailable until the CSV catalog loads.",
+      "error"
+    );
 
-    setCatalogStatus(`Failed to load CSV catalog: ${String(error?.message || error)}`, "error");
+    setCatalogStatus(
+      isBearerAuthError(error)
+        ? "Protected API access needs a bearer token before the catalog can load."
+        : `Failed to load CSV catalog: ${String(error?.message || error)}`,
+      "error"
+    );
     setOverviewCard("catalog", {
       value: "Unavailable",
       note: "Catalog load failed",
@@ -876,35 +1835,67 @@ async function loadCatalog({ force = false } = {}) {
 }
 
 function populateLeagueSelect() {
-  const current = String(state.pendingRestoredLeagueSelection || els.generateLeagueSelect.value || "").trim();
+  const current = String(state.pendingRestoredLeagueSelection || getSelectedLeagueControlValue() || "").trim();
   const options = [`<option value="">Auto-detect from teams</option>`];
 
   for (const league of state.leagues) {
     options.push(
-      `<option value="${escapeHtml(league.id)}">${escapeHtml(league.name)} (${escapeHtml(league.key)})</option>`
+      `<option value="${escapeHtml(league.id)}">${escapeHtml(getLeagueSelectOptionLabel(league))}</option>`
     );
   }
 
   els.generateLeagueSelect.innerHTML = options.join("");
-  if (current && state.leagues.some((league) => String(league.id) === current)) {
+  if (current && Array.from(els.generateLeagueSelect.options).some((option) => String(option.value) === current)) {
     els.generateLeagueSelect.value = current;
   }
+  state.scheduleLeagueOverrideCode =
+    normalizeScheduleLeagueCode(state.pendingRestoredScheduleLeagueOverrideCode) ||
+    normalizeScheduleLeagueCode(current) ||
+    resolveUiScheduleLeagueCode(getSelectedCatalogLeague()) ||
+    normalizeScheduleLeagueCode(state.scheduleLeagueOverrideCode);
   state.pendingRestoredLeagueSelection = "";
+  state.pendingRestoredScheduleLeagueOverrideCode = "";
   renderScheduleLeagueTabs();
   renderDeterministicContext();
 }
 
+function getLeagueSelectOptionLabel(league) {
+  const scheduleCode = resolveUiScheduleLeagueCode(league);
+  const definition = getLeagueScheduleDefinition(scheduleCode);
+  const defaultName = String(league?.name || "").trim();
+  const alternateName = String(league?.alternateName || "").trim();
+  const key = String(league?.key || "").trim();
+
+  let displayName = defaultName || key;
+  if (scheduleCode === "fifa-friendlies") {
+    const normalizedAlternate = normalizeForSearch(alternateName);
+    displayName =
+      normalizedAlternate && normalizedAlternate !== "fifa"
+        ? alternateName
+        : String(definition?.label || "").trim() || displayName;
+  }
+
+  return `${displayName} (${key})`.trim();
+}
+
 async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
+  if (!isLiveFixtureSourceActive()) {
+    state.isScheduleLoading = false;
+    setButtonBusy(els.refreshScheduleBtn, false, "Refetch Fixtures");
+    setButtonBusy(els.generateBuilderRefetchBtn, false, "Refetch Fixtures");
+    syncFixtureSourceMode();
+    return;
+  }
+
   const requestId = state.scheduleRequestId + 1;
   state.scheduleRequestId = requestId;
   const selectedLeagueId = String(els.generateLeagueSelect.value || "").trim();
-  const selectedLeague = state.leagues.find((league) => String(league.id || "") === selectedLeagueId) || null;
-  const scheduleLeagueCode = resolveScheduleLeagueCode(selectedLeague);
+  const scheduleLeagueCode = getActiveScheduleLeagueCode();
 
-  if (!selectedLeague || !scheduleLeagueCode) {
+  if (!scheduleLeagueCode) {
     state.isScheduleLoading = false;
     syncActionState();
-    clearScheduleSuggestions();
+    clearScheduleSuggestions({ clearLeagueContext: true });
     if (!selectedLeagueId) {
       setScheduleStatus("Select a league to load upcoming scheduled fixtures, or keep typing manually.", "idle");
     } else {
@@ -963,7 +1954,7 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
   setButtonBusy(els.refreshScheduleBtn, true, force ? "Refetching..." : "Loading...");
   setButtonBusy(els.generateBuilderRefetchBtn, true, force ? "Refetching..." : "Loading...");
   syncActionState();
-  setScheduleStatus(`Loading upcoming ${String(scheduleLeagueCode || "").toUpperCase()} fixtures...`, "working");
+  setScheduleStatus(`Loading upcoming ${getScheduleLeagueLabel(scheduleLeagueCode)} fixtures...`, "working");
   if (!hasWarmCache) {
     els.generateFixtureSummary.textContent = "Loading upcoming fixtures...";
     els.generateFixtureResults.innerHTML = `<div class="schedule-browser-empty">Loading upcoming fixtures...</div>`;
@@ -983,6 +1974,7 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
       refresh: force,
       referenceNowIso: state.referenceNowIso,
     });
+    clearProtectedApiAccessRequirement();
     if (requestId !== state.scheduleRequestId) {
       uiLog.warn("schedule.load_stale_discarded", {
         requestId,
@@ -1026,9 +2018,19 @@ async function refreshLeagueScheduleSuggestions({ force = false } = {}) {
       });
       return;
     }
+    if (isBearerAuthError(error)) {
+      requireProtectedApiAccess(
+        `Upcoming ${getScheduleLeagueLabel(scheduleLeagueCode)} fixtures are behind a protected API. Paste the bearer token, then retry.`
+      );
+    }
     clearScheduleSuggestions();
     els.generateFixtureResults.innerHTML = `<div class="schedule-browser-empty">Could not load upcoming fixtures right now.</div>`;
-    setScheduleStatus(`Could not load upcoming ${String(scheduleLeagueCode || "").toUpperCase()} fixtures: ${String(error?.message || error)}`, "error");
+    setScheduleStatus(
+      isBearerAuthError(error)
+        ? `Protected API access is required to load upcoming ${getScheduleLeagueLabel(scheduleLeagueCode)} fixtures.`
+        : `Could not load upcoming ${getScheduleLeagueLabel(scheduleLeagueCode)} fixtures: ${String(error?.message || error)}`,
+      "error"
+    );
     uiLog.error("schedule.load_failed", {
       requestId,
       league: scheduleLeagueCode,
@@ -1059,7 +2061,7 @@ function renderScheduleSuggestions(fixtures, selectedWeek, selectedLabel, league
 
   els.generateEventNameSuggestions.innerHTML = datalistOptions.join("");
   renderBuilderFixturePreview(fixtures);
-  renderUpcomingFixturesPage(fixtures, { selectedWeek, selectedLabel, leagueCode });
+  renderCurrentUpcomingFixturesPage(fixtures);
   renderScheduleLeagueTabs();
 
   if (!fixtures || fixtures.length === 0) {
@@ -1068,7 +2070,7 @@ function renderScheduleSuggestions(fixtures, selectedWeek, selectedLabel, league
   }
 
   const weekLabel = selectedLabel || (Number.isInteger(selectedWeek) ? `Matchday ${selectedWeek}` : "Upcoming fixtures");
-  setScheduleStatus(`${weekLabel} loaded from ${String(leagueCode || "").toUpperCase()} schedule API. Pick a fixture or type manually.`, "success");
+  setScheduleStatus(`${weekLabel} loaded from ${getScheduleLeagueLabel(leagueCode)} schedule API. Pick a fixture or type manually.`, "success");
 }
 
 function applyScheduleSnapshot(leagueCode, snapshot, { reason = "snapshot" } = {}) {
@@ -1121,13 +2123,16 @@ function applyScheduleSnapshot(leagueCode, snapshot, { reason = "snapshot" } = {
   const weekLabel = state.upcomingScheduleLabel || (state.upcomingScheduleWeek ? `Matchday ${state.upcomingScheduleWeek}` : "Upcoming fixtures");
   setScheduleStatus(
     fixtures.length > 0
-      ? `${weekLabel} loaded from ${String(leagueCode || "").toUpperCase()} schedule API.`
+      ? `${weekLabel} loaded from ${getScheduleLeagueLabel(leagueCode)} schedule API.`
       : buildNoFixturesStatusMessage(leagueCode),
     fixtures.length > 0 ? "success" : "warn"
   );
 }
 
-function clearScheduleSuggestions() {
+function clearScheduleSuggestions({ clearLeagueContext = false } = {}) {
+  if (clearLeagueContext) {
+    state.scheduleLeagueOverrideCode = "";
+  }
   state.upcomingScheduleLeagueCode = "";
   state.upcomingScheduleWeek = null;
   state.upcomingScheduleWeeks = [];
@@ -1174,6 +2179,8 @@ function clearSelectedScheduleFixtureState({ clearDerivedInputs = false, resetWe
     state.builderScheduleWeek = null;
     state.fixturesPageScheduleWeek = null;
   }
+
+  renderMarketSchemaPanel();
 }
 
 function setScheduleStatus(message, tone = "idle") {
@@ -1196,11 +2203,7 @@ function applySelectedScheduleFixture(rawEventName, { fromManualEntry = false, s
     if (!selection) {
       state.selectedScheduleFixtureId = "";
     }
-    renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
-      selectedWeek: state.upcomingScheduleWeek,
-      selectedLabel: state.upcomingScheduleLabel,
-      leagueCode: state.upcomingScheduleLeagueCode,
-    });
+    renderCurrentUpcomingFixturesPage();
     renderBuilderFixturePreview(state.upcomingScheduleFixtures);
     return null;
   }
@@ -1209,32 +2212,38 @@ function applySelectedScheduleFixture(rawEventName, { fromManualEntry = false, s
   if (!fixture) {
     if (fromManualEntry) {
       state.selectedScheduleFixtureId = "";
-      renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
-        selectedWeek: state.upcomingScheduleWeek,
-        selectedLabel: state.upcomingScheduleLabel,
-        leagueCode: state.upcomingScheduleLeagueCode,
-      });
+      renderCurrentUpcomingFixturesPage();
       renderBuilderFixturePreview(state.upcomingScheduleFixtures);
     }
     return null;
   }
 
+  const previousFixtureId = String(state.selectedScheduleFixtureId || "").trim();
+  const nextMatchDayValue = resolveAppliedMatchDayValue({
+    existingMatchDayValue: els.generateMatchDayInput.value,
+    fixtureMatchDay: fixture.matchDay,
+  });
+  const nextFixtureId = getScheduleFixtureIdentity(fixture);
+  const shouldResetUatFamilySelection =
+    isUatRuntimeActive() &&
+    Boolean(nextFixtureId) &&
+    nextFixtureId !== previousFixtureId;
+
   els.generateEventNameInput.value = fixture.eventName;
   els.generateFixtureDateInput.value = String(fixture.fixtureDate || "");
   els.generateKickoffTimeInput.value = String(fixture.kickoffTimeUtc || "");
-  els.generateMatchDayInput.value = String(fixture.matchDay || "");
-  state.selectedScheduleFixtureId = getScheduleFixtureIdentity(fixture);
-  state.scheduleCursorFixtureId = getScheduleFixtureIdentity(fixture);
+  els.generateMatchDayInput.value = nextMatchDayValue;
+  state.selectedScheduleFixtureId = nextFixtureId;
+  state.scheduleCursorFixtureId = nextFixtureId;
+  if (shouldResetUatFamilySelection) {
+    resetUatComposerSelectionToDefaults();
+  }
   const fixtureWeek = parseScheduleWeekValue(fixture.matchDay);
   if (Number.isInteger(fixtureWeek)) {
     state.builderScheduleWeek = fixtureWeek;
     state.fixturesPageScheduleWeek = fixtureWeek;
   }
-  renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
-    selectedWeek: state.upcomingScheduleWeek,
-    selectedLabel: state.upcomingScheduleLabel,
-    leagueCode: state.upcomingScheduleLeagueCode,
-  });
+  renderCurrentUpcomingFixturesPage();
   renderBuilderFixturePreview(state.upcomingScheduleFixtures);
   persistInputSnapshot();
   if (!preservePage) {
@@ -1244,6 +2253,10 @@ function applySelectedScheduleFixture(rawEventName, { fromManualEntry = false, s
   if (!silent) {
     showToast("Fixture schedule applied to Event Setup.", "success");
   }
+
+  renderMarketSchemaPanel();
+  renderJsonOutputs();
+  syncActionState();
 
   return fixture;
 }
@@ -1333,10 +2346,14 @@ function getScheduleSearchPlaceholder() {
 }
 
 function renderScheduleSearchControls() {
+  const source = getActiveFixtureSource();
   const activeKeys = getActiveScheduleSearchFilterKeys();
   const count = activeKeys.length || Object.keys(DEFAULT_SCHEDULE_SEARCH_FILTERS).length;
   const searchDisabled =
-    state.isScheduleLoading || state.isCatalogLoading || state.upcomingScheduleFixtures.length === 0;
+    source?.key !== "live-schedules" ||
+    state.isScheduleLoading ||
+    state.isCatalogLoading ||
+    state.upcomingScheduleFixtures.length === 0;
 
   if (searchDisabled && state.isScheduleFilterMenuOpen) {
     state.isScheduleFilterMenuOpen = false;
@@ -1419,35 +2436,49 @@ function handleScheduleSearchFilterChange(event) {
   state.scheduleSearchFilters = nextFilters;
   persistInputSnapshot();
   renderScheduleSearchControls();
-  renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
-    selectedWeek: state.upcomingScheduleWeek,
-    selectedLabel: state.upcomingScheduleLabel,
-    leagueCode: state.upcomingScheduleLeagueCode,
-  });
+  renderCurrentUpcomingFixturesPage();
 }
 
 function renderBuilderFixturePreview(fixtures = state.upcomingScheduleFixtures) {
+  const source = getActiveFixtureSource();
+  if (source?.key !== "live-schedules") {
+    if (els.generateBuilderWeekSelect) {
+      els.generateBuilderWeekSelect.innerHTML = `<option value="">Imported CSV ready soon</option>`;
+      els.generateBuilderWeekSelect.value = "";
+      els.generateBuilderWeekSelect.disabled = true;
+    }
+    if (els.generateBuilderFixturePreview) {
+      els.generateBuilderFixturePreview.innerHTML =
+        `<div class="schedule-browser-empty">Imported CSV mode is ready for the upcoming Lsports DB-export adapter. Once the fixture CSV schema is available, normalized imported fixtures will appear here.</div>`;
+    }
+    return;
+  }
+
   const allFixtures = Array.isArray(fixtures) ? fixtures : [];
   const weekOptions = getScheduleWeekOptions(allFixtures);
   const activeWeek = resolveActiveScheduleWeek(state.builderScheduleWeek, allFixtures);
   state.builderScheduleWeek = activeWeek;
+  const roundOnlyLabel = String(state.upcomingScheduleLabel || "Current round").trim();
+  const hasRoundOnlyFixtures = allFixtures.length > 0 && weekOptions.length === 0;
 
   if (els.generateBuilderWeekSelect) {
     const optionsHtml = weekOptions.length
       ? weekOptions
           .map((option) => `<option value="${escapeHtml(String(option.value))}">${escapeHtml(`${option.label} · ${option.count} fixture${option.count === 1 ? "" : "s"}`)}</option>`)
           .join("")
+      : hasRoundOnlyFixtures
+        ? `<option value="">${escapeHtml(`${roundOnlyLabel} · ${allFixtures.length} fixture${allFixtures.length === 1 ? "" : "s"}`)}</option>`
       : `<option value="">No upcoming weeks</option>`;
     els.generateBuilderWeekSelect.innerHTML = optionsHtml;
     els.generateBuilderWeekSelect.value = Number.isInteger(activeWeek) ? String(activeWeek) : "";
-    els.generateBuilderWeekSelect.disabled = weekOptions.length === 0 || state.isScheduleLoading || state.isCatalogLoading;
+    els.generateBuilderWeekSelect.disabled = (!weekOptions.length && !hasRoundOnlyFixtures) || state.isScheduleLoading || state.isCatalogLoading;
   }
 
   if (!els.generateBuilderFixturePreview) {
     return;
   }
 
-  if (!allFixtures.length || !Number.isInteger(activeWeek)) {
+  if (!allFixtures.length) {
     const emptyMessage = state.upcomingScheduleLeagueCode
       ? buildNoFixturesBodyMessage(state.upcomingScheduleLeagueCode)
       : "Select a supported league to preview the next 6 upcoming matchweeks.";
@@ -1455,17 +2486,19 @@ function renderBuilderFixturePreview(fixtures = state.upcomingScheduleFixtures) 
     return;
   }
 
-  const visibleFixtures = getFixturesForScheduleWeek(activeWeek, allFixtures);
+  const visibleFixtures = Number.isInteger(activeWeek) ? getFixturesForScheduleWeek(activeWeek, allFixtures) : allFixtures;
   els.generateBuilderFixturePreview.innerHTML = visibleFixtures
     .map((fixture) => {
       const fixtureId = getScheduleFixtureIdentity(fixture);
       const eventName = String(fixture?.eventName || "").trim();
+      const gameId = String(fixture?.gameId || fixture?.game_id || "").trim();
       const isSelected = fixtureId && fixtureId === state.selectedScheduleFixtureId;
       const sides = splitScheduleEventName(eventName);
       return (
         `<button type="button" class="builder-fixture-row${isSelected ? " is-selected" : ""}" data-event-name="${escapeHtml(eventName)}" data-fixture-id="${escapeHtml(fixtureId)}">` +
         `<span class="builder-fixture-copy">` +
         renderFixtureTeamsMarkup(sides, { compact: true }) +
+        (gameId ? `<span class="schedule-fixture-id builder-fixture-id">Game ID ${escapeHtml(gameId)}</span>` : ``) +
         `<span class="builder-fixture-footer">` +
         `<span class="builder-fixture-meta">${escapeHtml(buildScheduleFixtureMetaLine(fixture))}</span>` +
         `<span class="builder-fixture-cta">${isSelected ? "Applied" : "Apply"}</span>` +
@@ -1547,7 +2580,7 @@ function buildNoFixturesStatusMessage(leagueCode) {
     return "UCL has no upcoming fixtures from SportsData right now.";
   }
   if (code) {
-    return `No upcoming ${String(code).toUpperCase()} fixtures are available from SportsData right now.`;
+    return `No upcoming ${getScheduleLeagueLabel(code)} fixtures are available from SportsData right now.`;
   }
   return "No upcoming fixtures are available from SportsData right now.";
 }
@@ -1558,7 +2591,7 @@ function buildNoFixturesBodyMessage(leagueCode) {
     return "UCL has no upcoming fixtures from SportsData right now. Try Refetch Fixtures later.";
   }
   if (code) {
-    return `No upcoming ${String(code).toUpperCase()} fixtures are available from SportsData right now. Try Refetch Fixtures later.`;
+    return `No upcoming ${getScheduleLeagueLabel(code)} fixtures are available from SportsData right now. Try Refetch Fixtures later.`;
   }
   return "No upcoming fixtures are available from SportsData right now.";
 }
@@ -1568,16 +2601,32 @@ function renderScheduleLeagueTabs() {
     return;
   }
 
-  const supportedLeagues = getSupportedScheduleLeagues();
-  const currentLeagueId = String(els.generateLeagueSelect?.value || "").trim();
+  if (!isLiveFixtureSourceActive()) {
+    els.generateFixtureLeagueTabs.innerHTML = "";
+    return;
+  }
+
+  const supportedLeagues = getScheduleLeagueViewModels();
+  const activeScheduleLeagueCode = getActiveScheduleLeagueCode();
+  const hasActiveLeague = supportedLeagues.some(
+    (league) => activeScheduleLeagueCode === String(league.scheduleCode || "").trim().toLowerCase()
+  );
   els.generateFixtureLeagueTabs.innerHTML = supportedLeagues
-    .map((league) => {
-      const isActive = currentLeagueId === String(league.id);
-      const display = getScheduleLeagueDisplay(league);
+    .map((league, index) => {
+      const isActive = activeScheduleLeagueCode === String(league.scheduleCode || "").trim().toLowerCase();
+      const display = getScheduleLeagueDisplay(league, { isActive });
+      const iconMarkup = display.iconUrl
+        ? `<img class="league-nav-tab__icon-image" src="${escapeHtml(display.iconUrl)}" alt="" loading="lazy" decoding="async" />`
+        : escapeHtml(display.icon);
+      const title = league.isConfiguredInCatalog
+        ? `Browse ${display.label} fixtures`
+        : `Browse ${display.label} fixtures. Catalog-backed generation becomes available once the league CSV rows are loaded.`;
+      const isFocusable = isActive || (!hasActiveLeague && index === 0);
       return (
-        `<button type="button" class="league-nav-tab${isActive ? " is-active" : ""}" ` +
-        `data-league-id="${escapeHtml(String(league.id))}" data-schedule-code="${escapeHtml(String(league.scheduleCode || ""))}" aria-pressed="${isActive ? "true" : "false"}">` +
-        `<span class="league-nav-tab__icon" aria-hidden="true">${escapeHtml(display.icon)}</span>` +
+        `<button type="button" class="league-nav-tab${isActive ? " is-active" : ""}" title="${escapeHtmlAttribute(title)}" ` +
+        `data-league-id="${escapeHtml(String(league.id))}" data-schedule-code="${escapeHtml(String(league.scheduleCode || ""))}" ` +
+        `role="radio" aria-checked="${isActive ? "true" : "false"}" tabindex="${isFocusable ? "0" : "-1"}">` +
+        `<span class="league-nav-tab__icon" aria-hidden="true">${iconMarkup}</span>` +
         `<span class="league-nav-tab__label">${escapeHtml(display.label)}</span>` +
         `</button>`
       );
@@ -1585,19 +2634,78 @@ function renderScheduleLeagueTabs() {
     .join("");
 }
 
+function renderFixtureWeekTabs(fixtures, selectedWeek) {
+  if (!els.generateFixtureWeekTabs) {
+    return null;
+  }
+
+  const weekOptions = getScheduleWeekOptions(fixtures);
+  if (!weekOptions.length) {
+    state.fixturesPageScheduleWeek = null;
+    els.generateFixtureWeekTabs.innerHTML = "";
+    els.generateFixtureWeekTabs.hidden = true;
+    return null;
+  }
+
+  const activeWeek = resolveActiveScheduleWeek(selectedWeek, fixtures);
+  state.fixturesPageScheduleWeek = activeWeek;
+  els.generateFixtureWeekTabs.innerHTML = weekOptions
+    .map((option) => {
+      const isActive = option.value === activeWeek;
+      const title = `${option.label} · ${option.count} fixture${option.count === 1 ? "" : "s"}`;
+      return (
+        `<button type="button" class="fixtures-week-pill${isActive ? " is-active" : ""}" title="${escapeHtmlAttribute(title)}" ` +
+        `data-week="${escapeHtml(String(option.value))}" role="radio" aria-checked="${isActive ? "true" : "false"}" tabindex="${isActive ? "0" : "-1"}">` +
+        `${escapeHtml(option.label)}` +
+        `</button>`
+      );
+    })
+    .join("");
+  els.generateFixtureWeekTabs.hidden = weekOptions.length <= 1;
+  return activeWeek;
+}
+
 function renderUpcomingFixturesPage(fixtures, { selectedWeek = null, selectedLabel = "", leagueCode = "" } = {}) {
+  const source = getActiveFixtureSource();
+  if (source?.key !== "live-schedules") {
+    if (els.generateFixturesSourcePlaceholder) {
+      els.generateFixturesSourcePlaceholder.hidden = false;
+      els.generateFixturesSourcePlaceholder.innerHTML =
+        `<div class="schedule-browser-empty">Imported CSV mode will become the Lsports workspace. We have the source lane ready; once you provide the DB-export CSV shape, this view will group imported fixtures here using the same composer flow.</div>`;
+    }
+    els.generateFixtureSummary.textContent = "Imported CSV workspace is standing by for normalized fixture imports.";
+    els.generateFixtureResults.innerHTML = "";
+    if (els.generateFixtureWeekTabs) {
+      els.generateFixtureWeekTabs.innerHTML = "";
+      els.generateFixtureWeekTabs.hidden = true;
+    }
+    renderScheduleActiveSummary(null, { leagueCode: "" });
+    return;
+  }
+
+  if (els.generateFixturesSourcePlaceholder) {
+    els.generateFixturesSourcePlaceholder.hidden = true;
+    els.generateFixturesSourcePlaceholder.innerHTML = "";
+  }
+
   const allFixtures = Array.isArray(fixtures) ? fixtures : [];
   const weekOptions = getScheduleWeekOptions(allFixtures);
+  const activeWeek = renderFixtureWeekTabs(allFixtures, selectedWeek);
   const filter = normalizeForSearch(els.generateFixtureSearchInput.value || "");
   const filteredFixtures = !filter ? allFixtures : allFixtures.filter((fixture) => fixtureMatchesScheduleSearch(fixture, filter));
-  const groupedFixtures = groupFixturesByScheduleWeek(filteredFixtures);
+  const visibleFixtures = Number.isInteger(activeWeek)
+    ? filteredFixtures.filter((fixture) => parseScheduleWeekValue(fixture?.matchDay) === activeWeek)
+    : filteredFixtures;
+  const groupedFixtures = groupFixturesByScheduleWeek(visibleFixtures);
   const selectedFixture = getCurrentSelectedScheduleFixture(allFixtures);
 
   const summaryParts = [];
   if (leagueCode) {
-    summaryParts.push(String(leagueCode).toUpperCase());
+    summaryParts.push(getScheduleLeagueLabel(leagueCode));
   }
-  if (selectedLabel) {
+  if (Number.isInteger(activeWeek)) {
+    summaryParts.push(`Matchday ${activeWeek}`);
+  } else if (selectedLabel) {
     summaryParts.push(selectedLabel);
   }
   if (allFixtures.length > 0) {
@@ -1608,15 +2716,11 @@ function renderUpcomingFixturesPage(fixtures, { selectedWeek = null, selectedLab
   if (weekOptions.length > 1) {
     summaryParts.push(`${weekOptions.length} matchweeks loaded`);
   }
-  if (filter) {
-    summaryParts.push(`${filteredFixtures.length} match${filteredFixtures.length === 1 ? "" : "es"} shown`);
+  if (filter || Number.isInteger(activeWeek)) {
+    summaryParts.push(`${visibleFixtures.length} match${visibleFixtures.length === 1 ? "" : "es"} shown`);
   }
   els.generateFixtureSummary.textContent = summaryParts.join(" · ");
-  if (els.generateFixtureWeekTabs) {
-    els.generateFixtureWeekTabs.innerHTML = "";
-    els.generateFixtureWeekTabs.hidden = true;
-  }
-  syncScheduleCursor(filteredFixtures, selectedFixture);
+  syncScheduleCursor(visibleFixtures, selectedFixture);
   renderScheduleActiveSummary(selectedFixture, { leagueCode, selectedLabel });
 
   if (!allFixtures.length) {
@@ -1624,7 +2728,7 @@ function renderUpcomingFixturesPage(fixtures, { selectedWeek = null, selectedLab
     return;
   }
 
-  if (!filteredFixtures.length) {
+  if (!visibleFixtures.length) {
     els.generateFixtureResults.innerHTML = `<div class="schedule-browser-empty">No fixtures match the current filter.</div>`;
     return;
   }
@@ -1643,7 +2747,7 @@ function renderUpcomingFixturesPage(fixtures, { selectedWeek = null, selectedLab
       const sides = splitScheduleEventName(eventName);
       return (
         `<button type="button" id="${escapeHtml(optionId)}" class="schedule-fixture-btn${isSelected ? " is-selected" : ""}${isCursor ? " is-cursor" : ""}" ` +
-        `data-event-name="${escapeHtml(eventName)}" data-fixture-id="${escapeHtml(fixtureId)}" role="option" aria-selected="${isSelected ? "true" : "false"}" aria-pressed="${isSelected ? "true" : "false"}">` +
+        `data-event-name="${escapeHtml(eventName)}" data-fixture-id="${escapeHtml(fixtureId)}" data-game-id="${escapeHtml(gameId)}">` +
         `<span class="schedule-fixture-copy">` +
         `<span class="schedule-fixture-topline">` +
         `<span class="schedule-fixture-week">Matchday ${escapeHtml(String(parseScheduleWeekValue(fixture?.matchDay) ?? fixture?.matchDay ?? ""))}</span>` +
@@ -1669,15 +2773,6 @@ function renderUpcomingFixturesPage(fixtures, { selectedWeek = null, selectedLab
     })
     .join("");
 
-  const cursorFixture = filteredFixtures.find((fixture) => getScheduleFixtureIdentity(fixture) === state.scheduleCursorFixtureId);
-  const cursorId = cursorFixture
-    ? `schedule-option-${getScheduleFixtureIdentity(cursorFixture) || normalizeForSearch(cursorFixture.eventName).replace(/[^a-z0-9]+/g, "-")}`
-    : "";
-  if (cursorId) {
-    els.generateFixtureResults.setAttribute("aria-activedescendant", cursorId);
-  } else {
-    els.generateFixtureResults.removeAttribute("aria-activedescendant");
-  }
 }
 
 function syncScheduleCursor(fixtures, selectedFixture = null) {
@@ -1708,12 +2803,12 @@ function renderScheduleActiveSummary(fixture, { leagueCode = "", selectedLabel =
 
   const metaParts = [];
   if (leagueCode) {
-    metaParts.push(String(leagueCode).toUpperCase());
+    metaParts.push(getScheduleLeagueLabel(leagueCode));
   }
-  if (selectedLabel) {
-    metaParts.push(selectedLabel);
-  } else if (Number.isInteger(fixture.matchDay)) {
+  if (Number.isInteger(fixture.matchDay)) {
     metaParts.push(`Matchday ${fixture.matchDay}`);
+  } else if (selectedLabel) {
+    metaParts.push(selectedLabel);
   }
   metaParts.push(`${fixture.fixtureDate} · ${fixture.kickoffTimeUtc} UTC`);
 
@@ -1726,15 +2821,15 @@ function renderScheduleActiveSummary(fixture, { leagueCode = "", selectedLabel =
 }
 
 function syncScheduleActiveSelection() {
-  renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
-    selectedWeek: state.upcomingScheduleWeek,
-    selectedLabel: state.upcomingScheduleLabel,
-    leagueCode: state.upcomingScheduleLeagueCode,
-  });
+  renderCurrentUpcomingFixturesPage();
   renderBuilderFixturePreview(state.upcomingScheduleFixtures);
 }
 
 function handleScheduleBrowserKeydown(event) {
+  const focusedButton = event.target instanceof Element
+    ? event.target.closest(".schedule-fixture-btn")
+    : null;
+  const focusedFixtureId = String(focusedButton?.getAttribute("data-fixture-id") || "").trim();
   const fixtures = getVisibleScheduleFixtures();
   if (!fixtures.length) {
     return;
@@ -1742,36 +2837,40 @@ function handleScheduleBrowserKeydown(event) {
 
   if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End") {
     event.preventDefault();
-    moveScheduleCursor(event.key, fixtures);
+    moveScheduleCursor(event.key, fixtures, focusedFixtureId);
     return;
   }
 
   if (event.key === "Enter") {
-    const cursorFixtureId = String(state.scheduleCursorFixtureId || "").trim();
-    if (!cursorFixtureId) {
+    const fixtureIdToApply = focusedFixtureId || String(state.scheduleCursorFixtureId || "").trim();
+    if (!fixtureIdToApply) {
       return;
     }
     event.preventDefault();
-    applySelectedScheduleFixture(cursorFixtureId);
+    state.scheduleCursorFixtureId = fixtureIdToApply;
+    applySelectedScheduleFixture(fixtureIdToApply);
   }
 }
 
 function getVisibleScheduleFixtures() {
   const allFixtures = Array.isArray(state.upcomingScheduleFixtures) ? state.upcomingScheduleFixtures : [];
+  const selectedWeek = resolveActiveScheduleWeek(state.fixturesPageScheduleWeek, allFixtures);
+  const weekFixtures = Number.isInteger(selectedWeek) ? getFixturesForScheduleWeek(selectedWeek, allFixtures) : allFixtures;
   const filter = normalizeForSearch(els.generateFixtureSearchInput.value || "");
   if (!filter) {
-    return allFixtures;
+    return weekFixtures;
   }
-  return allFixtures.filter((fixture) => fixtureMatchesScheduleSearch(fixture, filter));
+  return weekFixtures.filter((fixture) => fixtureMatchesScheduleSearch(fixture, filter));
 }
 
-function moveScheduleCursor(key, fixtures) {
+function moveScheduleCursor(key, fixtures, focusedFixtureId = "") {
   const list = Array.isArray(fixtures) ? fixtures : [];
   if (!list.length) {
     return;
   }
 
-  const currentIndex = list.findIndex((fixture) => getScheduleFixtureIdentity(fixture) === state.scheduleCursorFixtureId);
+  const currentFixtureId = String(focusedFixtureId || state.scheduleCursorFixtureId || "").trim();
+  const currentIndex = list.findIndex((fixture) => getScheduleFixtureIdentity(fixture) === currentFixtureId);
   let nextIndex = currentIndex >= 0 ? currentIndex : 0;
 
   if (key === "ArrowDown") {
@@ -1785,15 +2884,11 @@ function moveScheduleCursor(key, fixtures) {
   }
 
   state.scheduleCursorFixtureId = getScheduleFixtureIdentity(list[nextIndex]) || "";
-  renderUpcomingFixturesPage(state.upcomingScheduleFixtures, {
-    selectedWeek: state.upcomingScheduleWeek,
-    selectedLabel: state.upcomingScheduleLabel,
-    leagueCode: state.upcomingScheduleLeagueCode,
-  });
-  scrollScheduleCursorIntoView();
+  renderCurrentUpcomingFixturesPage();
+  focusScheduleCursorButton();
 }
 
-function scrollScheduleCursorIntoView() {
+function focusScheduleCursorButton() {
   const cursorFixtureId = String(state.scheduleCursorFixtureId || "").trim();
   if (!cursorFixtureId) {
     return;
@@ -1801,6 +2896,9 @@ function scrollScheduleCursorIntoView() {
 
   const buttons = Array.from(els.generateFixtureResults.querySelectorAll(".schedule-fixture-btn"));
   const button = buttons.find((candidate) => String(candidate.getAttribute("data-fixture-id") || "") === cursorFixtureId);
+  if (button && typeof button.focus === "function") {
+    button.focus({ preventScroll: true });
+  }
   if (button && typeof button.scrollIntoView === "function") {
     button.scrollIntoView({ block: "nearest" });
   }
@@ -2013,7 +3111,7 @@ async function handleGenerate({ preserveGeneratePage = state.currentGeneratePage
   syncActionState();
   setOverviewCard("generate", {
     value: "Generating",
-    note: "Building fixture + parent market JSON",
+    note: isUatRuntimeActive() ? "Building UAT fixture + family payloads" : "Building fixture + parent market JSON",
     tone: "working",
   });
   setButtonBusy(els.generateBtn, true, "Generating...");
@@ -2045,7 +3143,10 @@ async function handleGenerate({ preserveGeneratePage = state.currentGeneratePage
         matchWeek: els.generateMatchWeekInput.value,
         location: els.generateLocationInput.value,
         venue: els.generateVenueInput.value,
+        uatMarketLine: state.selectedUatMarketLine,
+        uatSpreadTeamSide: state.selectedUatSpreadTeamSide,
         now: referenceNow,
+        outputProfile: state.runtimeAppEnv,
         selectedScheduleFixture: getCurrentSelectedScheduleFixture(),
       },
       {
@@ -2067,7 +3168,11 @@ async function handleGenerate({ preserveGeneratePage = state.currentGeneratePage
 
     renderGenerationStatus({
       summary: result.ok
-        ? "Generation completed and strict verification passed."
+        ? (
+            isUatRuntimeActive()
+              ? "Generation completed. UAT outputs are ready for panel-level validation."
+              : "Generation completed and strict verification passed."
+          )
         : `Generation failed with ${result.errors.length} error(s).`,
       tone: result.ok ? (result.warnings.length > 0 ? "warn" : "success") : "error",
       sections,
@@ -2078,9 +3183,11 @@ async function handleGenerate({ preserveGeneratePage = state.currentGeneratePage
       },
     });
 
-    renderJsonOutputs(result.fixtureJson, result.parentPayload);
+    state.lastGenerationResult = result;
+    state.outputValidation = deriveAutoOutputValidation(result);
+    renderJsonOutputs(result);
 
-    if (result.ok && result.fixtureJson && result.parentPayload) {
+    if (!isUatRuntimeActive() && result.ok && result.fixtureJson && result.parentPayload) {
       els.fixtureInputJson.value = JSON.stringify(result.fixtureJson, null, 2);
       els.parentInputJson.value = JSON.stringify(result.parentPayload, null, 2);
       state.persistFixtureInput = false;
@@ -2089,6 +3196,10 @@ async function handleGenerate({ preserveGeneratePage = state.currentGeneratePage
       updateJsonMeta("parent");
       persistInputSnapshot();
       scheduleAutoVerify({ immediate: true });
+    } else if (isUatRuntimeActive() && result.ok && result.fixtureJson) {
+      state.persistFixtureInput = true;
+      state.persistParentInput = true;
+      persistInputSnapshot();
     }
 
     uiLog.info("generate.complete", {
@@ -2098,7 +3209,7 @@ async function handleGenerate({ preserveGeneratePage = state.currentGeneratePage
     });
   } finally {
     state.isGenerating = false;
-    setButtonBusy(els.generateBtn, false, "Generate Fixture + Parent JSON");
+    setButtonBusy(els.generateBtn, false, "Generate Outputs");
     syncActionState();
   }
 }
@@ -2204,20 +3315,152 @@ function buildResultHtml(summary, sections, counts) {
   return out.join("\n");
 }
 
-function renderJsonOutputs(fixtureJson, parentPayload) {
+function getOutputPanelElements(outputKey) {
+  switch (outputKey) {
+    case "fixture":
+      return {
+        panel: els.generatedFixturePanel,
+        title: els.generatedFixtureTitle,
+        output: els.generatedFixtureOutput,
+        stateBadge: els.generatedFixtureState,
+        validationBadge: els.generatedFixtureValidationState,
+      };
+    case "parent":
+      return {
+        panel: els.generatedParentPanel,
+        title: els.generatedParentTitle,
+        output: els.generatedParentOutput,
+        stateBadge: els.generatedParentState,
+        validationBadge: els.generatedParentValidationState,
+      };
+    case "uatFamily":
+      return {
+        panel: els.generatedUatFamilyPanel,
+        title: els.generatedUatFamilyTitle,
+        output: els.generatedUatFamilyOutput,
+        stateBadge: els.generatedUatFamilyState,
+        validationBadge: els.generatedUatFamilyValidationState,
+      };
+    case "typeReferences":
+      return {
+        panel: els.generatedTypeReferencesPanel,
+        title: els.generatedTypeReferencesTitle,
+        output: els.generatedTypeReferencesOutput,
+        stateBadge: els.generatedTypeReferencesState,
+        validationBadge: els.generatedTypeReferencesValidationState,
+      };
+    default:
+      return {
+        panel: null,
+        title: null,
+        output: null,
+        stateBadge: null,
+        validationBadge: null,
+      };
+  }
+}
+
+function getCurrentOutputPayload(outputKey, generationResult = state.lastGenerationResult) {
+  if (!generationResult || typeof generationResult !== "object") {
+    return null;
+  }
+
+  if (outputKey === "fixture") {
+    return generationResult.fixtureJson || null;
+  }
+  if (outputKey === "parent") {
+    return generationResult.parentPayload || null;
+  }
+  if (outputKey === "uatFamily") {
+    const family = getUatMarketFamilyDefinition(state.selectedUatMarketFamily);
+    if (isSelectionSpecificUatFamilyOutputStale(generationResult)) {
+      return null;
+    }
+    return generationResult.uatParentPayloads?.[family.key] || null;
+  }
+  if (outputKey === "typeReferences") {
+    return generationResult.typeReferencePayloads || null;
+  }
+  return null;
+}
+
+function renderJsonOutputs(generationResult = state.lastGenerationResult) {
+  state.lastGenerationResult = generationResult || null;
+
+  const runtimeCode = normalizeRuntimeAppEnvCode(state.runtimeAppEnv || "mainnet");
+  const family = getUatMarketFamilyDefinition(state.selectedUatMarketFamily);
+  const selectedLine = getSelectedUatMarketLine();
+  const hasTypeReferenceId = Boolean(String(els.generateTypeRefInput?.value || "").trim());
+  const lineSpecificFamilyOutputStale = isSelectionSpecificUatFamilyOutputStale(generationResult);
+
+  renderOutputPanel("fixture", {
+    visible: true,
+    title: runtimeCode === "uat" ? "Fixture JSON · UAT" : "Fixture JSON",
+    payload: getCurrentOutputPayload("fixture", generationResult),
+    emptyMessage: runtimeCode === "uat"
+      ? "Generated UAT fixture JSON appears here after a successful run."
+      : "Generated fixture JSON appears here after a successful run.",
+  });
+
+  renderOutputPanel("parent", {
+    visible: runtimeCode !== "uat",
+    title: "Parent Market JSON",
+    payload: getCurrentOutputPayload("parent", generationResult),
+    emptyMessage: "Generated parent market JSON appears here after a successful run.",
+  });
+
+  renderOutputPanel("uatFamily", {
+    visible: runtimeCode === "uat",
+    title: getUatFamilyOutputLabel(family.key, selectedLine),
+    payload: getCurrentOutputPayload("uatFamily", generationResult),
+    emptyMessage: lineSpecificFamilyOutputStale
+      ? `Generate outputs again to build ${getUatFamilyOutputLabel(family.key, selectedLine)}.`
+      : `${family.label} family payload appears here after a successful UAT run.`,
+    emptyStateLabel: lineSpecificFamilyOutputStale ? "Refresh" : "Waiting",
+  });
+
+  renderOutputPanel("typeReferences", {
+    visible: runtimeCode === "uat",
+    title: "Type Reference Payloads",
+    payload: getCurrentOutputPayload("typeReferences", generationResult),
+    emptyMessage: hasTypeReferenceId
+      ? "Generated type reference payloads appear here after a successful UAT run."
+      : "Add a type reference ID to generate UAT type reference payloads.",
+    emptyStateLabel: hasTypeReferenceId ? "Waiting" : "Optional",
+  });
+
+  renderOutputValidationBadges();
+  renderGenerateReadiness();
+}
+
+function renderOutputPanel(outputKey, { visible, title, payload, emptyMessage, emptyStateLabel = "Waiting" }) {
+  const refs = getOutputPanelElements(outputKey);
+  if (refs.panel) {
+    refs.panel.hidden = !visible;
+  }
+  if (refs.title) {
+    refs.title.textContent = String(title || "");
+  }
+
+  if (!refs.output) {
+    return;
+  }
+
+  const effectivePayload = visible ? payload : null;
+
   renderJsonOutputBlock(
-    els.generatedFixtureOutput,
-    fixtureJson ? JSON.stringify(fixtureJson, null, 2) : "",
-    "Generated fixture JSON appears here after a successful run."
-  );
-  renderJsonOutputBlock(
-    els.generatedParentOutput,
-    parentPayload ? JSON.stringify(parentPayload, null, 2) : "",
-    "Generated parent market JSON appears here after a successful run."
+    refs.output,
+    effectivePayload ? JSON.stringify(effectivePayload, null, 2) : "",
+    emptyMessage,
+    {
+      outputKey,
+      visible,
+      emptyStateLabel,
+    }
   );
 }
 
-function renderJsonOutputBlock(element, content, emptyMessage) {
+function renderJsonOutputBlock(element, content, emptyMessage, { outputKey = "", visible = true, emptyStateLabel = "Waiting" } = {}) {
   const text = String(content || "").trim();
   const isEmpty = !text;
   element.textContent = isEmpty ? emptyMessage : text;
@@ -2229,24 +3472,196 @@ function renderJsonOutputBlock(element, content, emptyMessage) {
     block.dataset.tone = isEmpty ? "idle" : "active";
   }
 
-  updateOutputStateBadge(element.id, !isEmpty);
-  if (element === els.generatedFixtureOutput || element === els.generatedParentOutput) {
-    renderGenerateReadiness();
-  }
+  updateOutputStateBadge(outputKey, {
+    visible,
+    ready: !isEmpty,
+    emptyStateLabel,
+    readyStateLabel: "Ready to copy",
+  });
 }
 
-function updateOutputStateBadge(outputId, ready) {
-  const badgeByOutputId = {
-    generatedFixtureOutput: els.generatedFixtureState,
-    generatedParentOutput: els.generatedParentState,
-  };
-  const badge = badgeByOutputId[outputId];
+function updateOutputStateBadge(outputKey, { visible = true, ready = false, emptyStateLabel = "Waiting", readyStateLabel = "Ready to copy" } = {}) {
+  const badge = getOutputPanelElements(outputKey).stateBadge;
   if (!badge) {
     return;
   }
 
-  badge.textContent = ready ? "Ready to copy" : "Waiting";
+  badge.hidden = !visible;
+  badge.textContent = ready ? readyStateLabel : emptyStateLabel;
   badge.dataset.tone = ready ? "ready" : "idle";
+}
+
+function setOutputValidationBadge(outputKey, validation, { visible = true, optional = false } = {}) {
+  const badge = getOutputPanelElements(outputKey).validationBadge;
+  if (!badge) {
+    return;
+  }
+
+  badge.hidden = !visible;
+  if (!visible) {
+    return;
+  }
+
+  if (optional && !validation) {
+    badge.textContent = "Optional";
+    badge.dataset.tone = "idle";
+    return;
+  }
+
+  if (!validation) {
+    badge.textContent = "Not checked";
+    badge.dataset.tone = "idle";
+    return;
+  }
+
+  if (validation.ok) {
+    const warningCount = Number(validation.warnings?.length || 0);
+    badge.textContent = warningCount > 0 ? "Review" : "Valid";
+    badge.dataset.tone = warningCount > 0 ? "warn" : "success";
+    return;
+  }
+
+  badge.textContent = "Invalid";
+  badge.dataset.tone = "error";
+}
+
+function renderOutputValidationBadges() {
+  const runtimeCode = normalizeRuntimeAppEnvCode(state.runtimeAppEnv || "mainnet");
+  const hasTypeReferenceId = Boolean(String(els.generateTypeRefInput?.value || "").trim());
+
+  setOutputValidationBadge("fixture", state.outputValidation.fixture, { visible: true });
+  setOutputValidationBadge("parent", state.outputValidation.parent, { visible: runtimeCode !== "uat" });
+  setOutputValidationBadge("uatFamily", state.outputValidation.uatFamily, { visible: runtimeCode === "uat" });
+  setOutputValidationBadge("typeReferences", state.outputValidation.typeReferences, {
+    visible: runtimeCode === "uat",
+    optional: !hasTypeReferenceId,
+  });
+}
+
+function getOutputDisplayLabel(outputKey) {
+  if (outputKey === "fixture") {
+    return "Fixture JSON";
+  }
+  if (outputKey === "parent") {
+    return "Parent Market JSON";
+  }
+  if (outputKey === "typeReferences") {
+    return "Type Reference Payloads";
+  }
+  if (outputKey === "uatFamily") {
+    return getUatFamilyOutputLabel();
+  }
+  return "Output";
+}
+
+function buildOutputValidationResult({ ok, errors = [], warnings = [], info = [] }) {
+  return {
+    ok: Boolean(ok),
+    errors: Array.isArray(errors) ? errors : [],
+    warnings: Array.isArray(warnings) ? warnings : [],
+    info: Array.isArray(info) ? info : [],
+  };
+}
+
+function runGeneratedOutputValidation(outputKey, generationResult = state.lastGenerationResult) {
+  const payload = getCurrentOutputPayload(outputKey, generationResult);
+  if (!payload) {
+    return buildOutputValidationResult({
+      ok: false,
+      errors: [`${getOutputDisplayLabel(outputKey)} has not been generated yet.`],
+    });
+  }
+
+  if (outputKey === "fixture") {
+    const result = verifyFixtureJsonStrict(payload, {
+      leagues: state.leagues,
+      teams: state.teams,
+    }, {
+      selectedScheduleFixture: getCurrentSelectedScheduleFixture(),
+    });
+    return buildOutputValidationResult(result);
+  }
+
+  if (outputKey === "parent") {
+    const result = verifyParentMarketJsonStrict(
+      payload,
+      {
+        leagues: state.leagues,
+        teams: state.teams,
+      },
+      {
+        fixture: getCurrentOutputPayload("fixture", generationResult),
+        fixtureResolved: generationResult?.fixtureCheck || null,
+        now: getReferenceNowDate(),
+        selectedScheduleFixture: getCurrentSelectedScheduleFixture(),
+      }
+    );
+    return buildOutputValidationResult(result);
+  }
+
+  if (outputKey === "uatFamily") {
+    const family = getUatMarketFamilyDefinition(state.selectedUatMarketFamily);
+    const errors = validateUatParentMarketFamilyPayload(payload, { family: family.key });
+    return buildOutputValidationResult({
+      ok: errors.length === 0,
+      errors,
+      info: errors.length === 0 ? [`${family.label} family payload passed UAT structural validation.`] : [],
+    });
+  }
+
+  if (outputKey === "typeReferences") {
+    const errors = validateUatTypeReferencePayloads(payload);
+    return buildOutputValidationResult({
+      ok: errors.length === 0,
+      errors,
+      info: errors.length === 0 ? ["Type reference payloads passed UAT structural validation."] : [],
+    });
+  }
+
+  return buildOutputValidationResult({
+    ok: false,
+    errors: [`Unsupported output key "${outputKey}".`],
+  });
+}
+
+function deriveAutoOutputValidation(result) {
+  const validation = createInitialOutputValidationState();
+  if (!result || typeof result !== "object") {
+    return validation;
+  }
+
+  if (result.fixtureJson) {
+    validation.fixture = buildOutputValidationResult(result.fixtureCheck || runGeneratedOutputValidation("fixture", result));
+  }
+
+  if (isUatRuntimeActive()) {
+    const uatFamilyPayload = getCurrentOutputPayload("uatFamily", result);
+    if (uatFamilyPayload) {
+      validation.uatFamily = runGeneratedOutputValidation("uatFamily", result);
+    }
+    if (result.typeReferencePayloads) {
+      validation.typeReferences = runGeneratedOutputValidation("typeReferences", result);
+    }
+  } else if (result.parentPayload) {
+    validation.parent = buildOutputValidationResult(result.parentCheck || runGeneratedOutputValidation("parent", result));
+  }
+
+  return validation;
+}
+
+function validateGeneratedOutputPanel(outputKey) {
+  const validation = runGeneratedOutputValidation(outputKey);
+  state.outputValidation[outputKey] = validation;
+  renderOutputValidationBadges();
+
+  if (validation.ok) {
+    showToast(`${getOutputDisplayLabel(outputKey)} validation passed.`, validation.warnings.length > 0 ? "info" : "success");
+  } else {
+    showToast(
+      `${getOutputDisplayLabel(outputKey)} validation found ${validation.errors.length} error(s).`,
+      "error"
+    );
+  }
 }
 
 function resultToneClass(tone) {
@@ -2337,6 +3752,89 @@ function setCatalogStatus(message, tone = "idle") {
   } else {
     els.catalogStatus.classList.add("status-idle");
   }
+}
+
+function requireProtectedApiAccess(message) {
+  state.apiAccessRequired = true;
+  state.apiAccessMessage =
+    String(message || "").trim() ||
+    "This dashboard needs an API bearer token to reach protected catalog and schedule routes.";
+  renderApiAccessPanel();
+  if (!loadApiBearerToken() && els.apiAccessPanel && !els.apiAccessPanel.hidden && els.apiAccessTokenInput) {
+    window.setTimeout(() => {
+      els.apiAccessTokenInput?.focus();
+      els.apiAccessTokenInput?.select();
+    }, 0);
+  }
+}
+
+function clearProtectedApiAccessRequirement() {
+  if (!state.apiAccessRequired && !state.apiAccessMessage) {
+    return;
+  }
+  state.apiAccessRequired = false;
+  state.apiAccessMessage = "";
+  renderApiAccessPanel();
+}
+
+function renderApiAccessPanel() {
+  if (!els.apiAccessPanel) {
+    return;
+  }
+  // Keep saved-token recovery working quietly, but keep the bearer panel out of the current UI.
+  els.apiAccessPanel.hidden = true;
+}
+
+async function handleSaveApiAccessTokenAndRetry() {
+  const token = String(els.apiAccessTokenInput?.value || "").trim();
+  if (!token) {
+    showToast("Paste the API bearer token first.", "error");
+    els.apiAccessTokenInput?.focus();
+    return;
+  }
+
+  const result = saveApiBearerToken(token);
+  if (!result.ok) {
+    showToast("Could not save the API bearer token in this browser.", "error");
+    return;
+  }
+
+  if (els.apiAccessTokenInput) {
+    els.apiAccessTokenInput.value = "";
+  }
+  renderApiAccessPanel();
+  showToast("API bearer token saved.", "success");
+  await retryProtectedApiFlow();
+}
+
+function handleClearApiAccessToken() {
+  clearApiBearerToken();
+  if (els.apiAccessTokenInput) {
+    els.apiAccessTokenInput.value = "";
+  }
+  renderApiAccessPanel();
+  showToast("Saved API bearer token cleared.", "success");
+}
+
+async function retryProtectedApiFlow() {
+  const savedToken = loadApiBearerToken();
+  if (!savedToken) {
+    showToast("Save a bearer token first, then retry.", "error");
+    els.apiAccessTokenInput?.focus();
+    return;
+  }
+
+  if (!state.catalogLoaded) {
+    await loadCatalog({ force: true });
+    return;
+  }
+
+  if (isLiveFixtureSourceActive() && getActiveScheduleLeagueCode()) {
+    await refreshLeagueScheduleSuggestions({ force: true });
+    return;
+  }
+
+  await loadCatalog({ force: true });
 }
 
 async function copyOutputText(value, successMessage = "Copied to clipboard.") {
@@ -2491,6 +3989,157 @@ function asRestoredString(value) {
   return typeof value === "string" ? value : "";
 }
 
+function normalizeRuntimeAppEnvCode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized || normalized === "local" || normalized === "mainnet") {
+    return "mainnet";
+  }
+  if (normalized === "uat") {
+    return "uat";
+  }
+  return normalized;
+}
+
+function normalizeRuntimeEnvironmentOptions(payload) {
+  const raw = Array.isArray(payload?.environments) ? payload.environments : [];
+  const options = raw
+    .map((environment) => ({
+      code: normalizeRuntimeAppEnvCode(environment?.code),
+      label: String(environment?.label || "").trim() || String(environment?.code || "").trim(),
+      available: environment?.available !== false,
+    }))
+    .filter((environment) => Boolean(environment.code));
+
+  if (options.length > 0) {
+    return options;
+  }
+  return DEFAULT_RUNTIME_ENV_OPTIONS.map((environment) => ({ ...environment }));
+}
+
+function applyRuntimeEnvironmentPayload(payload) {
+  const active = payload?.active_env || null;
+  const activeCode = normalizeRuntimeAppEnvCode(active?.code || state.runtimeAppEnv || "mainnet");
+  state.runtimeAppEnv = activeCode;
+  state.runtimeAppEnvLabel = String(active?.label || (activeCode === "uat" ? "UAT" : "Mainnet")).trim();
+  state.runtimeEnvOptions = normalizeRuntimeEnvironmentOptions(payload);
+  renderRuntimeEnvironmentControl();
+  renderMarketSchemaPanel();
+  renderJsonOutputs();
+}
+
+async function hydrateRuntimeEnvironmentControl() {
+  try {
+    const payload = await fetchRuntimeEnvironmentPayload();
+    clearProtectedApiAccessRequirement();
+    applyRuntimeEnvironmentPayload(payload);
+  } catch (error) {
+    if (isBearerAuthError(error)) {
+      requireProtectedApiAccess(
+        "Protected API access is required to inspect or switch runtime environments."
+      );
+    }
+    state.runtimeEnvOptions = DEFAULT_RUNTIME_ENV_OPTIONS.map((environment) => ({ ...environment }));
+    if (!state.runtimeAppEnv) {
+      state.runtimeAppEnv = "mainnet";
+      state.runtimeAppEnvLabel = "Mainnet";
+    }
+    renderRuntimeEnvironmentControl();
+  }
+}
+
+function renderRuntimeEnvironmentControl() {
+  if (!els.runtimeEnvSelect) {
+    return;
+  }
+
+  const options = Array.isArray(state.runtimeEnvOptions) && state.runtimeEnvOptions.length > 0
+    ? state.runtimeEnvOptions
+    : DEFAULT_RUNTIME_ENV_OPTIONS;
+  const activeCode = normalizeRuntimeAppEnvCode(state.runtimeAppEnv || "mainnet");
+
+  els.runtimeEnvSelect.innerHTML = options
+    .map((environment) => {
+      const code = normalizeRuntimeAppEnvCode(environment?.code);
+      const label = String(environment?.label || code).trim();
+      const isSelected = code === activeCode;
+      const isAvailable = environment?.available !== false;
+      return `<option value="${escapeHtmlAttribute(code)}"${isSelected ? " selected" : ""}${isAvailable ? "" : " disabled"}>${escapeHtml(label)}</option>`;
+    })
+    .join("");
+  els.runtimeEnvSelect.value = activeCode;
+  els.runtimeEnvSelect.disabled =
+    state.isRuntimeEnvSwitching || state.isCatalogLoading || state.isVerifying || state.isGenerating || state.isScheduleLoading;
+  els.runtimeEnvSelect.setAttribute("aria-label", `Active environment: ${state.runtimeAppEnvLabel || "Mainnet"}`);
+  if (els.runtimeEnvBadge) {
+    els.runtimeEnvBadge.textContent = state.runtimeAppEnvLabel || "Mainnet";
+    els.runtimeEnvBadge.dataset.env = activeCode;
+  }
+}
+
+function resetRuntimeStateAfterEnvironmentSwitch() {
+  clearAutoVerifySchedule();
+  state.scheduleSnapshots = {};
+  state.referenceNowIso = new Date().toISOString();
+  state.pendingRestoredSelectedScheduleFixtureId = "";
+  state.lastGenerationResult = null;
+  state.outputValidation = createInitialOutputValidationState();
+  clearScheduleSuggestions({ clearLeagueContext: false });
+  renderGenerationStatus({
+    summary: "Waiting for input.",
+    tone: "neutral",
+    sections: [],
+    counts: null,
+  });
+  renderJsonOutputs(null);
+  state.lastVerifyReportText = "";
+  renderVerifyOutput({
+    summary: "No verification run yet.",
+    tone: "neutral",
+    sections: [],
+    counts: null,
+  });
+  persistInputSnapshot();
+}
+
+async function handleRuntimeEnvironmentChange(requestedEnv) {
+  const nextEnv = normalizeRuntimeAppEnvCode(requestedEnv);
+  if (!nextEnv || state.isRuntimeEnvSwitching) {
+    return;
+  }
+
+  state.isRuntimeEnvSwitching = true;
+  renderRuntimeEnvironmentControl();
+  renderMarketSchemaPanel();
+  syncActionState();
+
+  try {
+    const payload = await updateRuntimeEnvironment(nextEnv);
+    clearProtectedApiAccessRequirement();
+    applyRuntimeEnvironmentPayload(payload);
+    resetRuntimeStateAfterEnvironmentSwitch();
+    await loadCatalog({ force: true });
+    showToast(
+      state.catalogLoaded
+        ? `Switched to ${state.runtimeAppEnvLabel}.`
+        : `Switched to ${state.runtimeAppEnvLabel}, but the catalog needs attention.`,
+      state.catalogLoaded ? "success" : "error"
+    );
+  } catch (error) {
+    renderRuntimeEnvironmentControl();
+    if (isBearerAuthError(error)) {
+      requireProtectedApiAccess(
+        "Protected API access is required to switch runtime environments."
+      );
+    }
+    showToast(`Could not switch environment: ${String(error?.message || error)}`, "error");
+  } finally {
+    state.isRuntimeEnvSwitching = false;
+    renderRuntimeEnvironmentControl();
+    renderMarketSchemaPanel();
+    syncActionState();
+  }
+}
+
 function ensureDeterministicRuntime() {
   if (!state.referenceNowIso) {
     state.referenceNowIso = new Date().toISOString();
@@ -2572,7 +4221,7 @@ function renderDeterministicContext() {
 
   const selectedLeagueId = String(els.generateLeagueSelect?.value || "").trim();
   const selectedLeague = state.leagues.find((league) => String(league.id || "") === selectedLeagueId) || null;
-  const scheduleLeagueCode = resolveScheduleLeagueCode(selectedLeague);
+  const scheduleLeagueCode = resolveUiScheduleLeagueCode(selectedLeague);
   const snapshot = scheduleLeagueCode ? state.scheduleSnapshots[scheduleLeagueCode] : null;
 
   els.deterministicLeagueState.textContent = selectedLeague
@@ -2608,7 +4257,7 @@ function renderGenerateReadiness() {
 
   const selectedLeagueId = String(els.generateLeagueSelect?.value || "").trim();
   const selectedLeague = state.leagues.find((league) => String(league.id || "") === selectedLeagueId) || null;
-  const scheduleLeagueCode = resolveScheduleLeagueCode(selectedLeague);
+  const scheduleLeagueCode = resolveUiScheduleLeagueCode(selectedLeague);
   const snapshot = scheduleLeagueCode ? state.scheduleSnapshots[scheduleLeagueCode] : null;
 
   if (!selectedLeague) {
@@ -2695,11 +4344,19 @@ function renderGenerateReadiness() {
 
   const fixtureReady = els.generatedFixtureOutput?.dataset.empty === "false";
   const parentReady = els.generatedParentOutput?.dataset.empty === "false";
+  const uatFamilyReady = els.generatedUatFamilyOutput?.dataset.empty === "false";
+  const typeReferencesReady = els.generatedTypeReferencesOutput?.dataset.empty === "false";
   const typeRef = String(els.generateTypeRefInput?.value || "").trim();
-  if (fixtureReady && parentReady) {
+  if (!isUatRuntimeActive() && fixtureReady && parentReady) {
     setPulseCard("Output", {
       value: "Payloads ready to copy",
       note: `${typeRef ? "Type reference locked." : "Type reference optional."} Generated payloads are also pushed into Verify automatically.`,
+      tone: "success",
+    });
+  } else if (isUatRuntimeActive() && fixtureReady && uatFamilyReady && (!typeRef || typeReferencesReady)) {
+    setPulseCard("Output", {
+      value: "UAT outputs ready",
+      note: `${getUatFamilyOutputLabel()} is ready.${typeRef ? " Type reference payloads are also ready." : " Add a type reference ID when you need the extra UAT payloads."}`,
       tone: "success",
     });
   } else if (state.isGenerating) {
@@ -2711,7 +4368,9 @@ function renderGenerateReadiness() {
   } else {
     setPulseCard("Output", {
       value: "Not generated yet",
-      note: "Run generation to create CSV-verified fixture and parent market payloads.",
+      note: isUatRuntimeActive()
+        ? "Run generation to create UAT fixture, family, and optional type-reference payloads."
+        : "Run generation to create CSV-verified fixture and parent market payloads.",
       tone: "idle",
     });
   }
@@ -2801,11 +4460,26 @@ function syncActionState() {
   const canCopyReport = !busy && Boolean(String(state.lastVerifyReportText || "").trim());
   const hasGeneratedFixture = els.generatedFixtureOutput?.dataset.empty !== "true";
   const hasGeneratedParent = els.generatedParentOutput?.dataset.empty !== "true";
-  const selectedLeagueId = String(els.generateLeagueSelect?.value || "").trim();
-  const selectedLeague = state.leagues.find((league) => String(league.id || "") === selectedLeagueId) || null;
-  const hasScheduleSource = Boolean(selectedLeague && resolveScheduleLeagueCode(selectedLeague));
+  const hasGeneratedUatFamily = els.generatedUatFamilyOutput?.dataset.empty !== "true";
+  const hasGeneratedTypeReferences = els.generatedTypeReferencesOutput?.dataset.empty !== "true";
+  const hasScheduleSource = isLiveFixtureSourceActive() && Boolean(getActiveScheduleLeagueCode());
 
   els.reloadCatalogBtn.disabled = state.isCatalogLoading || state.isVerifying || state.isGenerating;
+  if (els.runtimeEnvSelect) {
+    els.runtimeEnvSelect.disabled =
+      state.isRuntimeEnvSwitching || state.isCatalogLoading || state.isVerifying || state.isGenerating || state.isScheduleLoading;
+  }
+  if (els.generateMarketFamilyActivateBtn) {
+    const runtimeCode = normalizeRuntimeAppEnvCode(state.runtimeAppEnv || "mainnet");
+    els.generateMarketFamilyActivateBtn.disabled =
+      runtimeCode === "uat" ||
+      state.isRuntimeEnvSwitching ||
+      state.isCatalogLoading ||
+      state.isVerifying ||
+      state.isGenerating ||
+      state.isScheduleLoading;
+    els.generateMarketFamilyActivateBtn.textContent = state.isRuntimeEnvSwitching ? "Switching..." : "Switch to UAT";
+  }
   els.verifyBothBtn.disabled = !canRun;
   els.verifyFixtureBtn.disabled = !canRun;
   els.verifyParentBtn.disabled = !canRun;
@@ -2819,14 +4493,38 @@ function syncActionState() {
       state.isCatalogLoading || state.isVerifying || state.isGenerating || state.isScheduleLoading || !hasScheduleSource;
   }
   if (els.generateBuilderWeekSelect) {
-    const hasWeekOptions = Array.from(els.generateBuilderWeekSelect.options || []).some((option) => Boolean(String(option.value || "").trim()));
-    els.generateBuilderWeekSelect.disabled = !hasWeekOptions || state.isScheduleLoading || state.isCatalogLoading;
+    const hasSelectableWeekOptions = Array.from(els.generateBuilderWeekSelect.options || []).some((option) => Boolean(String(option.value || "").trim()));
+    const hasRoundOnlyBuilderFixtures =
+      !hasSelectableWeekOptions &&
+      Array.isArray(state.upcomingScheduleFixtures) &&
+      state.upcomingScheduleFixtures.length > 0;
+    els.generateBuilderWeekSelect.disabled =
+      (!hasSelectableWeekOptions && !hasRoundOnlyBuilderFixtures) || state.isScheduleLoading || state.isCatalogLoading;
   }
   els.copyVerifyReportBtn.disabled = !canCopyReport;
   els.copyGeneratedFixtureBtn.disabled = busy || !hasGeneratedFixture;
   els.copyGeneratedParentBtn.disabled = busy || !hasGeneratedParent;
+  if (els.copyGeneratedUatFamilyBtn) {
+    els.copyGeneratedUatFamilyBtn.disabled = busy || !hasGeneratedUatFamily;
+  }
+  if (els.copyGeneratedTypeReferencesBtn) {
+    els.copyGeneratedTypeReferencesBtn.disabled = busy || !hasGeneratedTypeReferences;
+  }
+  if (els.validateGeneratedFixtureBtn) {
+    els.validateGeneratedFixtureBtn.disabled = busy || !hasGeneratedFixture;
+  }
+  if (els.validateGeneratedParentBtn) {
+    els.validateGeneratedParentBtn.disabled = busy || !hasGeneratedParent;
+  }
+  if (els.validateGeneratedUatFamilyBtn) {
+    els.validateGeneratedUatFamilyBtn.disabled = busy || !hasGeneratedUatFamily;
+  }
+  if (els.validateGeneratedTypeReferencesBtn) {
+    els.validateGeneratedTypeReferencesBtn.disabled = busy || !hasGeneratedTypeReferences;
+  }
   els.copyGenerationStatusBtn.disabled = busy;
   renderScheduleSearchControls();
+  renderApiAccessPanel();
 }
 
 function setButtonBusy(button, busy, busyLabel) {
@@ -2851,7 +4549,7 @@ function applyTheme(theme) {
   document.documentElement.style.colorScheme = nextTheme;
   const themeMeta = document.querySelector('meta[name="theme-color"]');
   if (themeMeta) {
-    themeMeta.setAttribute("content", nextTheme === "dark" ? "#0f1724" : "#f4f9fc");
+    themeMeta.setAttribute("content", nextTheme === "dark" ? "#243140" : "#f4f9fc");
   }
   if (els.themeToggleBtn) {
     els.themeToggleBtn.setAttribute("aria-pressed", String(nextTheme === "dark"));

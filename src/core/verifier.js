@@ -3,11 +3,22 @@ import {
   DEFAULT_FIXTURE_THEME,
   DEFAULT_DRAW_THEME,
   DRAW_LOGO_URL,
+  DEFAULT_MARKETS_OPEN_LEAD_HOURS,
 } from "../shared/constants.js";
 import { buildParentMarketPayload } from "./markets.js";
 import { collectFixtureBundleFromInference, findExactTeamForLeague } from "./parser.js";
+import {
+  buildUatFixtureAlternateName,
+  buildUatParentPayloads,
+  buildUatTypeReferencePayloads,
+  formatUatFixtureName,
+  formatUatFixtureTitle,
+} from "./uatFormats.js";
 import { validateFixtureJson, validateParentMarketPayload } from "./validation.js";
 import { generateCodeFromName, isValidUuid, normalizeForSearch } from "../shared/util.js";
+import { resolveLeagueScheduleCode } from "../shared/leagueRegistry.js";
+
+const OUTPUT_PROFILE_UAT = "uat";
 
 export function parseJsonInput(rawValue, label) {
   const raw = String(rawValue || "").trim();
@@ -39,11 +50,12 @@ export function parseJsonInput(rawValue, label) {
 }
 
 export function verifyFixtureJsonStrict(fixture, catalog, { selectedScheduleFixture = null } = {}) {
-  const errors = validateFixtureJson(fixture);
+  const normalizedFixture = normalizeFixtureForVerification(fixture);
+  const errors = validateFixtureJson(normalizedFixture);
   const warnings = [];
   const info = [];
 
-  if (!fixture || typeof fixture !== "object") {
+  if (!normalizedFixture || typeof normalizedFixture !== "object") {
     return {
       ok: false,
       errors,
@@ -53,9 +65,9 @@ export function verifyFixtureJsonStrict(fixture, catalog, { selectedScheduleFixt
     };
   }
 
-  const leagueId = String(fixture.league_id || "").trim();
-  const homeTeamId = String(fixture.home_team_id || "").trim();
-  const awayTeamId = String(fixture.away_team_id || "").trim();
+  const leagueId = String(normalizedFixture.league_id || "").trim();
+  const homeTeamId = String(normalizedFixture.home_team_id || "").trim();
+  const awayTeamId = String(normalizedFixture.away_team_id || "").trim();
 
   const league = findLeagueById(catalog?.leagues || [], leagueId);
   if (!league) {
@@ -82,23 +94,23 @@ export function verifyFixtureJsonStrict(fixture, catalog, { selectedScheduleFixt
 
   if (homeTeam && awayTeam) {
     const expectedName = `${homeTeam.name} vs ${awayTeam.name}`;
-    if (normalizeForSearch(fixture.name) !== normalizeForSearch(expectedName)) {
+    if (normalizeForSearch(normalizedFixture.name) !== normalizeForSearch(expectedName)) {
       errors.push(`fixture.name must match CSV teams: expected \"${expectedName}\".`);
     }
   }
 
-  if (fixture.match_week != null && fixture.match_week !== "") {
-    const week = Number(fixture.match_week);
-    if (!Number.isInteger(week) || week < 1) {
-      errors.push("match_week must be null/empty or a positive integer.");
+  if (normalizedFixture.match_week != null && normalizedFixture.match_week !== "") {
+    const week = Number(normalizedFixture.match_week);
+    if (!Number.isInteger(week) || week < 0) {
+      errors.push("match_week must be null/empty or a non-negative integer.");
     }
   }
 
-  if (String(fixture.logo_url || "").trim() && String(fixture.logo_url || "").trim() !== FIXTURE_LOGO_URL) {
+  if (String(normalizedFixture.logo_url || "").trim() && String(normalizedFixture.logo_url || "").trim() !== FIXTURE_LOGO_URL) {
     warnings.push(`logo_url differs from default fixture logo (${FIXTURE_LOGO_URL}).`);
   }
 
-  if (String(fixture.theme_color || "").trim() && String(fixture.theme_color || "").trim().toUpperCase() !== DEFAULT_FIXTURE_THEME) {
+  if (String(normalizedFixture.theme_color || "").trim() && String(normalizedFixture.theme_color || "").trim().toUpperCase() !== DEFAULT_FIXTURE_THEME) {
     warnings.push(`theme_color differs from default fixture theme (${DEFAULT_FIXTURE_THEME}).`);
   }
 
@@ -118,7 +130,9 @@ export function verifyFixtureJsonStrict(fixture, catalog, { selectedScheduleFixt
       league,
       homeTeam,
       awayTeam,
-      matchDay: fixture?.match_day,
+      fixtureDate: normalizedFixture.fixture_date,
+      kickoffTimeUtc: normalizedFixture.kickoff_time_utc,
+      matchDay: normalizedFixture?.match_day,
     },
     catalog
   );
@@ -140,6 +154,7 @@ export function verifyFixtureJsonStrict(fixture, catalog, { selectedScheduleFixt
 }
 
 export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtureResolved, now, selectedScheduleFixture = null } = {}) {
+  const normalizedFixture = normalizeFixtureForVerification(fixture);
   const errors = validateParentMarketPayload(payload);
   const warnings = [];
   const info = [];
@@ -174,7 +189,7 @@ export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtur
     }
   }
 
-  const fixtureCheck = fixtureResolved || (fixture ? verifyFixtureJsonStrict(fixture, catalog, { selectedScheduleFixture }) : null);
+  const fixtureCheck = fixtureResolved || (normalizedFixture ? verifyFixtureJsonStrict(normalizedFixture, catalog, { selectedScheduleFixture }) : null);
   const homeTeam = fixtureCheck?.resolved?.homeTeam || inferHomeTeamFromMarkets(markets, catalog?.teams || []);
   const awayTeam = fixtureCheck?.resolved?.awayTeam || inferAwayTeamFromMarkets(markets, catalog?.teams || [], homeTeam?.id || null);
 
@@ -204,11 +219,11 @@ export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtur
     }
   }
 
-  if (fixture && parent) {
-    if (normalizeForSearch(parent.title) !== normalizeForSearch(fixture.name)) {
+  if (normalizedFixture && parent) {
+    if (normalizeForSearch(parent.title) !== normalizeForSearch(normalizedFixture.name)) {
       errors.push("parent_market.title must match fixture.name.");
     }
-    if (String(parent.league_id || "") !== String(fixture.league_id || "")) {
+    if (String(parent.league_id || "") !== String(normalizedFixture.league_id || "")) {
       errors.push("parent_market.league_id must match fixture.league_id.");
     }
   }
@@ -292,7 +307,7 @@ export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtur
           awayTeam,
           fixtureDate: closeDate.toISOString().slice(0, 10),
           kickoffTimeUtc: closeDate.toISOString().slice(11, 16),
-          matchDay: fixture?.match_day,
+          matchDay: normalizedFixture?.match_day,
         },
         catalog
       );
@@ -302,7 +317,7 @@ export function verifyParentMarketJsonStrict(payload, catalog, { fixture, fixtur
 
       const fixtureDateIso = deriveFixtureDateIsoForExpectedParent(parent, markets, closeDate, warnings);
       const kickoffTimeUtc = closeDate.toISOString().slice(11, 16);
-      const fixtureTemplate = fixture || {
+      const fixtureTemplate = normalizedFixture || {
         name: `${homeTeam.name} vs ${awayTeam.name}`,
         league_id: league.id,
         home_team_id: homeTeam.id,
@@ -426,7 +441,10 @@ export function generateFromEventInput(input, catalog) {
   const location = String(input?.location || "");
   const venue = String(input?.venue || "");
   const typeReferenceId = String(input?.typeReferenceId || "").trim();
-  const current = input?.now instanceof Date ? input.now : null;
+  const uatMarketLine = String(input?.uatMarketLine || "").trim();
+  const uatSpreadTeamSide = String(input?.uatSpreadTeamSide || "").trim();
+  const current = input?.now instanceof Date ? input.now : new Date();
+  const outputProfile = String(input?.outputProfile || "").trim().toLowerCase();
   const selectedScheduleFixture =
     input?.selectedScheduleFixture && typeof input.selectedScheduleFixture === "object"
       ? input.selectedScheduleFixture
@@ -445,6 +463,26 @@ export function generateFromEventInput(input, catalog) {
     errors.push("Kickoff Time (UTC) is required in HH:MM format.");
   }
 
+  let effectiveFixtureDate = fixtureDate;
+  let effectiveKickoffTimeUtc = kickoffTimeUtc;
+  let effectiveSelectedScheduleFixture = selectedScheduleFixture;
+  const kickoffDateTime =
+    fixtureDate && kickoffTimeUtc && /^\d{4}-\d{2}-\d{2}$/.test(fixtureDate) && /^\d{2}:\d{2}$/.test(kickoffTimeUtc)
+      ? parseUtcDateTimeInput(fixtureDate, kickoffTimeUtc)
+      : null;
+  if (current && kickoffDateTime && kickoffDateTime.getTime() <= current.getTime()) {
+    const adjustedKickoff = new Date(
+      current.getTime() + (DEFAULT_MARKETS_OPEN_LEAD_HOURS * 60 + 1) * 60 * 1000
+    );
+    effectiveFixtureDate = adjustedKickoff.toISOString().slice(0, 10);
+    effectiveKickoffTimeUtc = adjustedKickoff.toISOString().slice(11, 16);
+    effectiveSelectedScheduleFixture = null;
+    warnings.push(
+      `Kickoff was hardcoded to ${effectiveFixtureDate} ${effectiveKickoffTimeUtc} UTC because the selected/manual kickoff was behind current UTC (${current.toISOString()}).`
+    );
+    info.push("Selected schedule timing consistency was skipped after the hardcoded future kickoff adjustment.");
+  }
+
   const matchDay = Number.parseInt(matchDayRaw, 10);
   if (!Number.isInteger(matchDay) || matchDay < 1) {
     errors.push("Match Day is required and must be a positive integer.");
@@ -453,8 +491,8 @@ export function generateFromEventInput(input, catalog) {
   let matchWeek = null;
   if (matchWeekRaw) {
     const parsedWeek = Number.parseInt(matchWeekRaw, 10);
-    if (!Number.isInteger(parsedWeek) || parsedWeek < 1) {
-      errors.push("Match Week must be empty or a positive integer.");
+    if (!Number.isInteger(parsedWeek) || parsedWeek < 0) {
+      errors.push("Match Week must be empty or a non-negative integer.");
     } else {
       matchWeek = parsedWeek;
     }
@@ -465,7 +503,8 @@ export function generateFromEventInput(input, catalog) {
   }
 
   const selectedLeague = resolveLeagueSelection(catalog?.leagues || [], leagueSelection);
-  if (leagueSelection && !selectedLeague) {
+  const requestedScheduleLeagueCode = resolveLeagueScheduleCode(leagueSelection);
+  if (leagueSelection && !selectedLeague && !requestedScheduleLeagueCode) {
     errors.push(`Selected league \"${leagueSelection}\" is not present in leagues.csv.`);
   }
 
@@ -477,6 +516,7 @@ export function generateFromEventInput(input, catalog) {
       info,
       fixtureJson: null,
       parentPayload: null,
+      typeReferencePayloads: null,
     };
   }
 
@@ -505,6 +545,17 @@ export function generateFromEventInput(input, catalog) {
       }
       league = inferredPair.league;
       info.push(`Auto-detected league from teams: ${league.name} (${league.key}).`);
+    }
+  }
+
+  if (league && requestedScheduleLeagueCode) {
+    const resolvedLeagueScheduleCode = resolveLeagueScheduleCode(
+      league.key || league.alternateName || league.name || ""
+    );
+    if (resolvedLeagueScheduleCode && resolvedLeagueScheduleCode !== requestedScheduleLeagueCode) {
+      errors.push(
+      `Selected schedule league \"${leagueSelection}\" does not match the resolved CSV league \"${league.name}\".`
+      );
     }
   }
 
@@ -545,6 +596,7 @@ export function generateFromEventInput(input, catalog) {
       info,
       fixtureJson: null,
       parentPayload: null,
+      typeReferencePayloads: null,
     };
   }
 
@@ -555,12 +607,12 @@ export function generateFromEventInput(input, catalog) {
 
   const scheduleFixtureCheck = verifySelectedScheduleFixtureConsistency(
     {
-      selectedScheduleFixture,
+      selectedScheduleFixture: effectiveSelectedScheduleFixture,
       league,
       homeTeam: homeTeam.team,
       awayTeam: awayTeam.team,
-      fixtureDate,
-      kickoffTimeUtc,
+      fixtureDate: effectiveFixtureDate,
+      kickoffTimeUtc: effectiveKickoffTimeUtc,
       matchDay,
     },
     catalog
@@ -577,6 +629,7 @@ export function generateFromEventInput(input, catalog) {
       info,
       fixtureJson: null,
       parentPayload: null,
+      typeReferencePayloads: null,
     };
   }
 
@@ -587,8 +640,8 @@ export function generateFromEventInput(input, catalog) {
     awayTeamName: awayTeam.team.name,
     homeTeamMeta: homeTeam.team,
     awayTeamMeta: awayTeam.team,
-    fixtureDate,
-    kickoffTimeUtc,
+    fixtureDate: effectiveFixtureDate,
+    kickoffTimeUtc: effectiveKickoffTimeUtc,
     matchDay,
     matchWeek,
     location,
@@ -608,6 +661,7 @@ export function generateFromEventInput(input, catalog) {
       info,
       fixtureJson: null,
       parentPayload: null,
+      typeReferencePayloads: null,
     };
   }
 
@@ -622,15 +676,47 @@ export function generateFromEventInput(input, catalog) {
       info,
       fixtureJson: bundle.fixtureJson,
       parentPayload: null,
+      typeReferencePayloads: null,
     };
   }
 
-  const fixtureCheck = verifyFixtureJsonStrict(bundle.fixtureJson, catalog, { selectedScheduleFixture });
+  const outputFixtureJson = formatFixtureOutput(bundle.fixtureJson, {
+    outputProfile,
+    fixtureDate: effectiveFixtureDate,
+    kickoffTimeUtc: effectiveKickoffTimeUtc,
+    homeTeam: bundle.meta.homeTeam,
+    awayTeam: bundle.meta.awayTeam,
+  });
+  const uatParentPayloads = buildUatParentPayloads({
+    fixtureJson: outputFixtureJson,
+    league: bundle.meta.league,
+    homeTeam: bundle.meta.homeTeam,
+    awayTeam: bundle.meta.awayTeam,
+    fixtureDateIso: effectiveFixtureDate,
+    kickoffTimeUtc: effectiveKickoffTimeUtc,
+    openIso: bundle.meta.openIso,
+    createdAtIso: current.toISOString(),
+    typeReferenceId,
+    outputProfile,
+    marketLine: uatMarketLine,
+    spreadTeamSide: uatSpreadTeamSide,
+  });
+  const typeReferencePayloads = buildUatTypeReferencePayloads({
+    fixtureName: outputFixtureJson?.name,
+    fixtureDateIso: effectiveFixtureDate,
+    typeReferenceId,
+    outputProfile,
+  });
+
+  const fixtureScheduleContext = effectiveSelectedScheduleFixture;
+  const fixtureCheck = verifyFixtureJsonStrict(outputFixtureJson, catalog, {
+    selectedScheduleFixture: fixtureScheduleContext,
+  });
   const parentCheck = verifyParentMarketJsonStrict(parentPayload, catalog, {
-    fixture: bundle.fixtureJson,
+    fixture: outputFixtureJson,
     fixtureResolved: fixtureCheck,
     now: current,
-    selectedScheduleFixture,
+    selectedScheduleFixture: fixtureScheduleContext,
   });
 
   errors.push(...fixtureCheck.errors, ...parentCheck.errors);
@@ -649,11 +735,87 @@ export function generateFromEventInput(input, catalog) {
     errors,
     warnings,
     info,
-    fixtureJson: bundle.fixtureJson,
+    fixtureJson: outputFixtureJson,
     parentPayload,
+    uatParentPayloads,
+    uatMarketLine,
+    uatSpreadTeamSide,
+    typeReferencePayloads,
     fixtureCheck,
     parentCheck,
   };
+}
+
+function formatFixtureOutput(
+  fixtureJson,
+  { outputProfile = "", fixtureDate = "", kickoffTimeUtc = "", homeTeam = null, awayTeam = null } = {}
+) {
+  if (!fixtureJson || typeof fixtureJson !== "object") {
+    return fixtureJson;
+  }
+
+  if (outputProfile !== OUTPUT_PROFILE_UAT) {
+    return fixtureJson;
+  }
+
+  const kickoffIso = parseUtcDateTimeInput(fixtureDate, kickoffTimeUtc)?.toISOString() || null;
+
+  return {
+    name: formatUatFixtureName(String(fixtureJson.name || "").trim()),
+    alternate_name: buildUatFixtureAlternateName(homeTeam, awayTeam),
+    league_id: String(fixtureJson.league_id || "").trim() || null,
+    home_team_id: String(fixtureJson.home_team_id || "").trim() || null,
+    away_team_id: String(fixtureJson.away_team_id || "").trim() || null,
+    format: fixtureJson.format ?? null,
+    logo_url: String(fixtureJson.logo_url || "").trim() || FIXTURE_LOGO_URL,
+    theme_color: String(fixtureJson.theme_color || "").trim() || DEFAULT_FIXTURE_THEME,
+    match_day: Number.isInteger(fixtureJson.match_day) ? fixtureJson.match_day : null,
+    match_week: Number.isInteger(fixtureJson.match_week) ? fixtureJson.match_week : 0,
+    location: String(fixtureJson.location || ""),
+    venue: String(fixtureJson.venue || ""),
+    game_start_time: kickoffIso,
+  };
+}
+
+function normalizeFixtureForVerification(fixture) {
+  if (!fixture || typeof fixture !== "object") {
+    return fixture;
+  }
+
+  const gameStartTime = String(fixture.game_start_time || "").trim();
+  const parsedKickoff = gameStartTime ? new Date(gameStartTime) : null;
+  const fixtureDate = parsedKickoff && !Number.isNaN(parsedKickoff.getTime()) ? parsedKickoff.toISOString().slice(0, 10) : "";
+  const kickoffTimeUtc = parsedKickoff && !Number.isNaN(parsedKickoff.getTime()) ? parsedKickoff.toISOString().slice(11, 16) : "";
+
+  return {
+    ...fixture,
+    name: String(fixture.name || "").trim(),
+    league_id: String(fixture.league_id || "").trim(),
+    home_team_id: String(fixture.home_team_id || "").trim(),
+    away_team_id: String(fixture.away_team_id || "").trim(),
+    format: fixture.format ?? null,
+    logo_url: String(fixture.logo_url || "").trim() || FIXTURE_LOGO_URL,
+    theme_color: String(fixture.theme_color || "").trim() || DEFAULT_FIXTURE_THEME,
+    match_day: Number.isInteger(fixture.match_day) ? fixture.match_day : parsePositiveIntegerValue(fixture.match_day),
+    match_week: parseNonNegativeIntegerValue(fixture.match_week),
+    location: String(fixture.location || ""),
+    venue: String(fixture.venue || ""),
+    fixture_date: fixtureDate,
+    kickoff_time_utc: kickoffTimeUtc,
+  };
+}
+
+function parsePositiveIntegerValue(value) {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseNonNegativeIntegerValue(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 export function generateVaultPayloadFromInput(input, catalog) {
@@ -944,7 +1106,29 @@ function resolveLeagueSelection(leagues, selection) {
   return (
     (leagues || []).find((league) => normalizeForSearch(league?.key) === normalized) ||
     (leagues || []).find((league) => normalizeForSearch(league?.name) === normalized) ||
+    (leagues || []).find((league) => normalizeForSearch(league?.alternateName) === normalized) ||
+    (leagues || []).find((league) => Array.isArray(league?.aliases) && league.aliases.some((alias) => normalizeForSearch(alias) === normalized)) ||
+    resolveLeagueSelectionByScheduleCode(leagues, value) ||
     null
+  );
+}
+
+function resolveLeagueSelectionByScheduleCode(leagues, selection) {
+  const scheduleCode = resolveLeagueScheduleCode(selection);
+  if (!scheduleCode) {
+    return null;
+  }
+
+  return (
+    (leagues || []).find((league) => {
+      const candidates = [
+        league?.key,
+        league?.name,
+        league?.alternateName,
+        ...(Array.isArray(league?.aliases) ? league.aliases : []),
+      ];
+      return candidates.some((candidate) => resolveLeagueScheduleCode(candidate) === scheduleCode);
+    }) || null
   );
 }
 
@@ -987,6 +1171,19 @@ function parseIsoDate(value) {
     return null;
   }
   const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed;
+}
+
+function parseUtcDateTimeInput(dateYmd, timeHm) {
+  const dateText = String(dateYmd || "").trim();
+  const timeText = String(timeHm || "").trim();
+  if (!dateText || !timeText) {
+    return null;
+  }
+  const parsed = new Date(`${dateText}T${timeText}:00.000Z`);
   if (Number.isNaN(parsed.getTime())) {
     return null;
   }
@@ -1732,13 +1929,27 @@ function buildEventTeamLookupVariants(rawName) {
   variants.add(compact);
 
   const strippedAffixes = compact
-    .replace(/^\s*(?:afc|fc|cf|sc)\s+/i, "")
-    .replace(/\s+(?:afc|fc|cf|sc)\s*$/i, "")
+    .replace(/^\s*(?:afc|fc|cf|sc|sk|sl|rc|rcd|ca|cd|sd|ud|fk|kv|club|deportivo)\s+/i, "")
+    .replace(/\s+(?:afc|fc|cf|sc|sk|sl|rc|rcd|ca|cd|sd|ud|fk|kv)\s*$/i, "")
     .replace(/\s+/g, " ")
     .trim();
 
   if (strippedAffixes) {
     variants.add(strippedAffixes);
+  }
+
+  const normalizedCompact = normalizeForSearch(compact);
+  const scheduleNameOverrides = new Map([
+    ["club atletico de madrid", "Atletico de Madrid"],
+    ["rayo vallecano de madrid", "Rayo Vallecano"],
+    ["rc celta de vigo", "Celta Vigo"],
+    ["deportivo alaves", "Alaves"],
+    ["ca osasuna", "Osasuna"],
+    ["rcd mallorca", "Mallorca"],
+  ]);
+  const mappedVariant = scheduleNameOverrides.get(normalizedCompact);
+  if (mappedVariant) {
+    variants.add(mappedVariant);
   }
 
   return Array.from(variants).filter(Boolean);

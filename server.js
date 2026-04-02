@@ -5,17 +5,52 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { selectUpcomingSportsDataWeek } from "./src/data/schedules.js";
+import {
+  createCatalogSourceMetadata,
+  createCatalogSourcePayload,
+  mergeCatalogRowCollections,
+} from "./src/backend/catalogSourceContract.js";
+import { normalizeLeagueStartWindows } from "./src/backend/catalogTimeWindows.js";
+import { getBackendFixtureSourceAdapter } from "./src/backend/fixtureSources/index.js";
+import {
+  buildSportsDataRuntimeConfig,
+  createSportsDataScheduleSupportMetadata,
+} from "./src/backend/fixtureSources/sportsdata.js";
+import {
+  createCmsRuntimeConfig,
+  publishCmsBundle,
+  resolveCmsPublishBundle,
+} from "./src/backend/cmsPublisher.js";
+import { resolveLeagueScheduleCode } from "./src/shared/leagueRegistry.js";
 
-loadDotEnv(path.resolve(process.cwd(), ".env"));
+const STARTUP_ENV = { ...process.env };
+const ROOT_DIR = path.resolve(process.cwd());
+for (const envFile of resolveDotEnvFiles(ROOT_DIR, process.env)) {
+  loadDotEnv(envFile);
+}
+const RUNTIME_ENV_PROFILES = createRuntimeEnvironmentProfiles(ROOT_DIR, STARTUP_ENV);
+let activeRuntimeEnvCode = resolveRuntimeEnvironmentCode(process.env);
+if (!RUNTIME_ENV_PROFILES[activeRuntimeEnvCode]) {
+  activeRuntimeEnvCode = "mainnet";
+}
 
 const PORT = parsePositiveIntegerEnv(process.env.PORT, 2020, { min: 1 });
-const ROOT_DIR = path.resolve(process.cwd());
+const PUBLIC_DIR = path.join(ROOT_DIR, "public");
+const CATALOG_DIR = path.join(ROOT_DIR, "catalog");
 const DEFAULT_DOWNLOADS_LEAGUES_CSV_PATH = path.join(os.homedir(), "Downloads", "leagues.csv");
 const DEFAULT_DOWNLOADS_TEAMS_CSV_PATH = path.join(os.homedir(), "Downloads", "teams.csv");
-const DEFAULT_LOCAL_LEAGUES_CSV_PATH = path.join(ROOT_DIR, "Info-source", "leagues.csv");
-const DEFAULT_LOCAL_TEAMS_CSV_PATH = path.join(ROOT_DIR, "Info-source", "teams.csv");
+const DEFAULT_DOWNLOADS_FIFA_TEAMS_CSV_PATH = path.join(os.homedir(), "Downloads", "fifa_teams.csv");
+const DEFAULT_LOCAL_LEAGUES_CSV_CANDIDATES = [
+  path.join(CATALOG_DIR, "leagues-main.csv"),
+  path.join(CATALOG_DIR, "leagues.csv"),
+];
+const DEFAULT_LOCAL_TEAMS_CSV_CANDIDATES = [
+  path.join(CATALOG_DIR, "teams-main.csv"),
+  path.join(CATALOG_DIR, "teams.csv"),
+];
 const ALLOW_DOWNLOADS_CSV_FALLBACK = String(process.env.ALLOW_DOWNLOADS_CSV_FALLBACK || "").trim() === "1";
+const EXTRA_LEAGUES_CSV_PATHS = parseCsvPathListEnv(process.env.EXTRA_LEAGUES_CSV_PATHS || "");
+const EXTRA_TEAMS_CSV_PATHS = parseCsvPathListEnv(process.env.EXTRA_TEAMS_CSV_PATHS || "");
 const TRUST_PROXY = String(process.env.TRUST_PROXY || "").trim() === "1";
 const API_BEARER_TOKEN = String(process.env.API_BEARER_TOKEN || "").trim();
 const APP_BASIC_AUTH_USER = String(process.env.APP_BASIC_AUTH_USER || "").trim();
@@ -27,9 +62,6 @@ const SCHEDULE_FETCH_TIMEOUT_MS = parsePositiveIntegerEnv(process.env.SCHEDULE_F
 const SPORTSDATA_API_KEY = String(process.env.SPORTSDATA_API_KEY || "").trim();
 const SPORTSDATA_SCHEDULE_BASE_URL = String(process.env.SPORTSDATA_SCHEDULE_BASE_URL || "https://api.sportsdata.io/v4/soccer/scores/json/Schedule").trim();
 const SPORTSDATA_SCHEDULE_SEASON = parsePositiveIntegerEnv(process.env.SPORTSDATA_SCHEDULE_SEASON, 2026, { min: 2000 });
-const SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH = String(process.env.SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH || "").trim();
-const SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH = String(process.env.SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH || "").trim();
-const SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH = String(process.env.SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH || "").trim();
 const SCHEDULE_NOW_ISO = String(process.env.SCHEDULE_NOW_ISO || "").trim();
 
 validateRuntimeConfig();
@@ -127,6 +159,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/runtime/environment") {
+      await handleRuntimeEnvironmentRequest(req, res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/cms/publish") {
+      await handleCmsPublishRequest(req, res);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/catalog/meta") {
       await handleCatalogMetaRequest(res);
       return;
@@ -181,6 +223,185 @@ function loadDotEnv(filePath) {
   }
 }
 
+function readDotEnvValues(filePath) {
+  if (!existsSync(filePath)) {
+    return {};
+  }
+
+  let raw;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch {
+    return {};
+  }
+
+  return parseDotEnvText(raw);
+}
+
+function parseDotEnvText(raw) {
+  const out = {};
+  const lines = String(raw || "").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, eq).trim();
+    if (!key) {
+      continue;
+    }
+    let value = trimmed.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+export function resolveDotEnvFiles(rootDir, env = process.env) {
+  const resolvedRoot = path.resolve(rootDir || process.cwd());
+  const files = [];
+  const explicitEnvFile = String(env?.ENV_FILE || "").trim();
+  const appEnv = String(env?.APP_ENV || "").trim().toLowerCase();
+
+  if (explicitEnvFile) {
+    files.push(
+      path.isAbsolute(explicitEnvFile)
+        ? explicitEnvFile
+        : path.resolve(resolvedRoot, explicitEnvFile)
+    );
+  } else if (appEnv) {
+    files.push(path.resolve(resolvedRoot, `.env.${appEnv}`));
+  }
+
+  files.push(path.resolve(resolvedRoot, ".env"));
+
+  return Array.from(new Set(files));
+}
+
+export function resolveRuntimeEnvironment(env = process.env) {
+  const appEnv = resolveRuntimeEnvironmentCode(env);
+  return {
+    appEnv,
+    appEnvLabel: formatRuntimeEnvironmentLabel(appEnv),
+    envFile: String(env?.ENV_FILE || "").trim(),
+  };
+}
+
+function resolveRuntimeEnvironmentCode(env = process.env) {
+  const raw = String(env?.APP_ENV || "").trim().toLowerCase();
+  if (!raw || raw === "local" || raw === "mainnet") {
+    return "mainnet";
+  }
+  if (raw === "uat") {
+    return "uat";
+  }
+  return raw;
+}
+
+function formatRuntimeEnvironmentLabel(appEnv) {
+  if (appEnv === "uat") {
+    return "UAT";
+  }
+  if (appEnv === "mainnet") {
+    return "Mainnet";
+  }
+  return String(appEnv || "Mainnet")
+    .trim()
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function createRuntimeEnvironmentProfiles(rootDir, startupEnv = {}) {
+  const resolvedRoot = path.resolve(rootDir || process.cwd());
+  const mainnetEnvFile = path.resolve(resolvedRoot, ".env");
+  const uatEnvFile = path.resolve(resolvedRoot, ".env.uat");
+  const sanitizedStartupEnv = sanitizeRuntimeStartupEnv(startupEnv);
+  const mainnetFileValues = readDotEnvValues(mainnetEnvFile);
+  const uatFileValues = readDotEnvValues(uatEnvFile);
+
+  return {
+    mainnet: {
+      code: "mainnet",
+      label: "Mainnet",
+      envFile: mainnetEnvFile,
+      available: true,
+      env: {
+        ...mainnetFileValues,
+        ...sanitizedStartupEnv,
+        APP_ENV: "mainnet",
+        ENV_FILE: mainnetEnvFile,
+      },
+    },
+    uat: {
+      code: "uat",
+      label: "UAT",
+      envFile: uatEnvFile,
+      available: true,
+      env: {
+        ...mainnetFileValues,
+        ...uatFileValues,
+        ...sanitizedStartupEnv,
+        APP_ENV: "uat",
+        ENV_FILE: uatEnvFile,
+      },
+    },
+  };
+}
+
+function sanitizeRuntimeStartupEnv(startupEnv = {}) {
+  const next = { ...(startupEnv && typeof startupEnv === "object" ? startupEnv : {}) };
+  delete next.APP_ENV;
+  delete next.ENV_FILE;
+  return next;
+}
+
+function getRuntimeEnvironmentProfile(code = activeRuntimeEnvCode) {
+  const normalized = resolveRuntimeEnvironmentCode({ APP_ENV: code });
+  return RUNTIME_ENV_PROFILES[normalized] || RUNTIME_ENV_PROFILES.mainnet;
+}
+
+function getActiveRuntimeEnvironmentProfile() {
+  return getRuntimeEnvironmentProfile(activeRuntimeEnvCode);
+}
+
+function getActiveRuntimeEnvVars() {
+  return getActiveRuntimeEnvironmentProfile().env;
+}
+
+function createRuntimeEnvironmentPayload() {
+  const activeProfile = getActiveRuntimeEnvironmentProfile();
+  return {
+    active_env: {
+      code: activeProfile.code,
+      label: activeProfile.label,
+    },
+    environments: Object.values(RUNTIME_ENV_PROFILES).map((profile) => ({
+      code: profile.code,
+      label: profile.label,
+      available: Boolean(profile.available),
+      env_file: path.basename(profile.envFile),
+      cms_enabled: createCmsRuntimeConfig(profile.env).enabled,
+    })),
+  };
+}
+
+function setActiveRuntimeEnvironment(nextCode) {
+  const profile = getRuntimeEnvironmentProfile(nextCode);
+  activeRuntimeEnvCode = profile.code;
+  catalogCache = null;
+  scheduleCache.clear();
+  return createRuntimeEnvironmentPayload();
+}
+
 function parsePositiveIntegerEnv(rawValue, fallback, { min = 1 } = {}) {
   const text = String(rawValue ?? "").trim();
   if (!text) {
@@ -191,6 +412,41 @@ function parsePositiveIntegerEnv(rawValue, fallback, { min = 1 } = {}) {
     return fallback;
   }
   return parsed;
+}
+
+function parseCsvPathListEnv(rawValue) {
+  return String(rawValue || "")
+    .split(/[\n,]+/)
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function resolveScheduleFetchTimeoutMs(runtimeEnv = getActiveRuntimeEnvVars()) {
+  return parsePositiveIntegerEnv(
+    runtimeEnv?.SCHEDULE_FETCH_TIMEOUT_MS,
+    SCHEDULE_FETCH_TIMEOUT_MS,
+    { min: 1_000 }
+  );
+}
+
+function resolveScheduleCacheTtlMs(runtimeEnv = getActiveRuntimeEnvVars()) {
+  return parsePositiveIntegerEnv(
+    runtimeEnv?.SCHEDULE_CACHE_TTL_MS,
+    SCHEDULE_CACHE_TTL_MS,
+    { min: 1_000 }
+  );
+}
+
+function resolveSportsDataScheduleBaseUrl(runtimeEnv = getActiveRuntimeEnvVars()) {
+  return String(runtimeEnv?.SPORTSDATA_SCHEDULE_BASE_URL || SPORTSDATA_SCHEDULE_BASE_URL || "").trim();
+}
+
+function resolveSportsDataScheduleSeason(runtimeEnv = getActiveRuntimeEnvVars()) {
+  return parsePositiveIntegerEnv(
+    runtimeEnv?.SPORTSDATA_SCHEDULE_SEASON,
+    SPORTSDATA_SCHEDULE_SEASON,
+    { min: 2000 }
+  );
 }
 
 function validateRuntimeConfig() {
@@ -236,6 +492,26 @@ if (IS_MAIN) {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
+async function readJsonRequestBody(req, { maxBytes = 64 * 1024 } = {}) {
+  const chunks = [];
+  let total = 0;
+
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk || ""));
+    total += buffer.length;
+    if (total > maxBytes) {
+      throw new Error(`Request body exceeded ${maxBytes} bytes.`);
+    }
+    chunks.push(buffer);
+  }
+
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) {
+    return {};
+  }
+  return JSON.parse(raw);
+}
+
 async function handleCatalogRequest(res) {
   try {
     const payload = await getCatalogPayloadCached();
@@ -248,6 +524,105 @@ async function handleCatalogRequest(res) {
       source: sourceMeta,
     });
   }
+}
+
+async function handleRuntimeEnvironmentRequest(req, res) {
+  if (req.method === "GET") {
+    sendJson(res, 200, createRuntimeEnvironmentPayload());
+    return;
+  }
+
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "Method not allowed", detail: "Use GET or POST." }, { Allow: "GET, POST" });
+    return;
+  }
+
+  let payload;
+  try {
+    payload = await readJsonRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, { error: "Invalid JSON body", detail: String(error?.message || error) });
+    return;
+  }
+
+  const requestedEnv = resolveRuntimeEnvironmentCode({ APP_ENV: payload?.app_env });
+  if (!RUNTIME_ENV_PROFILES[requestedEnv]) {
+    sendJson(res, 400, {
+      error: "Unsupported environment",
+      detail: 'Pass {"app_env":"mainnet"} or {"app_env":"uat"}.',
+    });
+    return;
+  }
+
+  const result = setActiveRuntimeEnvironment(requestedEnv);
+  sendJson(res, 200, {
+    ...result,
+    switched: true,
+  });
+}
+
+async function handleCmsPublishRequest(req, res) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "Method not allowed", detail: "Use POST." }, { Allow: "POST" });
+    return;
+  }
+
+  let payload;
+  try {
+    payload = await readJsonRequestBody(req, { maxBytes: 512 * 1024 });
+  } catch (error) {
+    sendJson(res, 400, { error: "Invalid JSON body", detail: String(error?.message || error) });
+    return;
+  }
+
+  const activeProfile = getActiveRuntimeEnvironmentProfile();
+  const cmsConfig = createCmsRuntimeConfig(activeProfile.env);
+  if (!cmsConfig.enabled) {
+    sendJson(res, 503, {
+      error: "CMS publishing is not configured",
+      detail: `Set COMP_SERVICE_INTERNAL_HOST for the active ${activeProfile.label} environment.`,
+      environment: {
+        code: activeProfile.code,
+        label: activeProfile.label,
+      },
+    });
+    return;
+  }
+
+  const bundle = resolveCmsPublishBundle(payload);
+  if (!bundle.fixturePayload || !bundle.typeReferencePayload || !bundle.parentMarketPayload) {
+    sendJson(res, 400, {
+      error: "Missing CMS payloads",
+      detail:
+        "Provide fixture_payload, type_reference_payload, and parent_market_payload directly, or pass fixture_json plus type_reference_payloads and uat_parent_payloads with parent_market_family.",
+    });
+    return;
+  }
+
+  const result = await publishCmsBundle({
+    config: cmsConfig,
+    fixturePayload: bundle.fixturePayload,
+    typeReferencePayload: bundle.typeReferencePayload,
+    parentMarketPayload: bundle.parentMarketPayload,
+  });
+
+  const responsePayload = {
+    ok: result.ok,
+    failed_step: result.failedStep,
+    requested_family: bundle.requestedFamily || null,
+    environment: {
+      code: activeProfile.code,
+      label: activeProfile.label,
+    },
+    steps: result.steps,
+  };
+
+  if (!result.ok) {
+    sendJson(res, 502, responsePayload);
+    return;
+  }
+
+  sendJson(res, 200, responsePayload);
 }
 
 async function handleReadyRequest(res) {
@@ -276,6 +651,7 @@ async function handleCatalogMetaRequest(res) {
       counts: payload.counts,
       loaded_at: payload.loaded_at,
       cache: payload.cache || null,
+      schedule_support: payload.schedule_support || null,
     });
   } catch (error) {
     const sourceMeta = await getCatalogSourceMetaSafe();
@@ -294,7 +670,8 @@ async function handleUpcomingScheduleRequest(requestUrl, res) {
   if (!leagueCode) {
     sendJson(res, 400, {
       error: "Unsupported league",
-      detail: "Pass ?league=epl, ?league=ucl, or ?league=laliga for the wired schedule provider.",
+      detail:
+        "Pass ?league=epl, ?league=ucl, ?league=laliga, ?league=fifa-worldcup, or ?league=fifa-friendlies for the wired schedule provider.",
     });
     return;
   }
@@ -338,22 +715,24 @@ async function getUpcomingSchedulePayload(leagueCode, { refresh = false, now = n
     return cacheRecord.payload;
   }
 
-  const rawRows = await fetchRawScheduleRows(leagueCode);
-  const selection = selectUpcomingSportsDataWeek(rawRows, { now: resolvedNow });
-  const payload = {
-    league: String(leagueCode || "").trim().toLowerCase(),
-    source: "sportsdata",
-    fetched_at: new Date().toISOString(),
-    reference_now: referenceNowIso,
-    selected_week: selection.selectedWeek,
-    selected_weeks: Array.isArray(selection.selectedWeeks) ? selection.selectedWeeks : [],
-    selected_label: selection.selectedLabel,
-    selection_mode: selection.selectionMode,
-    fixtures: selection.fixtures,
-  };
+  const sportsDataAdapter = getBackendFixtureSourceAdapter("sportsdata");
+  const rawRows = await sportsDataAdapter.fetchRawRows({
+    leagueCode,
+    env: getActiveRuntimeEnvVars(),
+    rootDir: ROOT_DIR,
+    timeoutMs: resolveScheduleFetchTimeoutMs(),
+    baseUrl: resolveSportsDataScheduleBaseUrl(),
+    season: resolveSportsDataScheduleSeason(),
+  });
+  const payload = sportsDataAdapter.createFixtureWindowPayload({
+    leagueCode,
+    rawRows,
+    now: resolvedNow,
+    fetchedAt: new Date().toISOString(),
+  });
 
   scheduleCache.set(cacheKey, {
-    expiresAt: Date.now() + SCHEDULE_CACHE_TTL_MS,
+    expiresAt: Date.now() + resolveScheduleCacheTtlMs(),
     payload,
   });
 
@@ -361,108 +740,34 @@ async function getUpcomingSchedulePayload(leagueCode, { refresh = false, now = n
 }
 
 async function fetchRawScheduleRows(leagueCode) {
-  const scheduleConfig = getSportsDataScheduleConfig(leagueCode);
-  if (!scheduleConfig) {
-    throw new Error(`Schedule provider is not configured for league "${leagueCode}".`);
-  }
-
-  if (scheduleConfig.fixturePath) {
-    const raw = await fs.readFile(path.resolve(ROOT_DIR, scheduleConfig.fixturePath), "utf8");
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      throw new Error(`${scheduleConfig.fixtureEnvName} must point to a JSON array.`);
-    }
-    return parsed;
-  }
-
-  if (!SPORTSDATA_API_KEY) {
-    throw new Error("SPORTSDATA_API_KEY is not configured on the server.");
-  }
-
-  const requestUrl = buildSportsDataScheduleUrl(scheduleConfig.competitionId);
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), SCHEDULE_FETCH_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(requestUrl, {
-      signal: controller.signal,
-      headers: {
-        Accept: "application/json",
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`SportsData returned ${response.status}.`);
-    }
-
-    const parsed = await response.json();
-    if (!Array.isArray(parsed)) {
-      throw new Error("SportsData schedule response must be a JSON array.");
-    }
-    return parsed;
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error(`SportsData request timed out after ${SCHEDULE_FETCH_TIMEOUT_MS}ms.`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  const sportsDataAdapter = getBackendFixtureSourceAdapter("sportsdata");
+  return sportsDataAdapter.fetchRawRows({
+    leagueCode,
+    env: getActiveRuntimeEnvVars(),
+    rootDir: ROOT_DIR,
+    timeoutMs: resolveScheduleFetchTimeoutMs(),
+    baseUrl: resolveSportsDataScheduleBaseUrl(),
+    season: resolveSportsDataScheduleSeason(),
+  });
 }
 
 function normalizeScheduleLeagueCode(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (!normalized) {
-    return "";
-  }
-  if (normalized === "epl" || normalized === "english-premier-league" || normalized === "english premier league") {
-    return "epl";
-  }
-  if (normalized === "ucl" || normalized === "uefa-champions-league" || normalized === "uefa champions league" || normalized === "champions league") {
-    return "ucl";
-  }
-  if (normalized === "laliga" || normalized === "la-liga" || normalized === "la liga") {
-    return "laliga";
-  }
-  return "";
+  return resolveLeagueScheduleCode(value);
 }
 
 function getSportsDataScheduleConfig(leagueCode) {
-  if (leagueCode === "epl") {
-    return {
-      competitionId: 1,
-      fixturePath: SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH,
-      fixtureEnvName: "SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH",
-    };
-  }
-  if (leagueCode === "ucl") {
-    return {
-      competitionId: 3,
-      fixturePath: SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH,
-      fixtureEnvName: "SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH",
-    };
-  }
-  if (leagueCode === "laliga") {
-    return {
-      competitionId: 4,
-      fixturePath: SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH,
-      fixtureEnvName: "SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH",
-    };
-  }
-  return null;
-}
-
-function buildSportsDataScheduleUrl(competitionId) {
-  const base = SPORTSDATA_SCHEDULE_BASE_URL.replace(/\/+$/, "");
-  const url = new URL(`${base}/${competitionId}/${SPORTSDATA_SCHEDULE_SEASON}`);
-  url.searchParams.set("key", SPORTSDATA_API_KEY);
-  return url.toString();
+  return buildSportsDataRuntimeConfig({
+    leagueCode,
+    env: getActiveRuntimeEnvVars(),
+    baseUrl: resolveSportsDataScheduleBaseUrl(),
+    season: resolveSportsDataScheduleSeason(),
+  });
 }
 
 function resolveScheduleNow() {
-  if (SCHEDULE_NOW_ISO) {
-    const parsed = new Date(SCHEDULE_NOW_ISO);
+  const scheduleNowIso = String(getActiveRuntimeEnvVars()?.SCHEDULE_NOW_ISO || SCHEDULE_NOW_ISO || "").trim();
+  if (scheduleNowIso) {
+    const parsed = new Date(scheduleNowIso);
     if (!Number.isNaN(parsed.getTime())) {
       return parsed;
     }
@@ -479,10 +784,32 @@ async function serveStaticFile(urlPathname, res) {
   const vendorPath = resolveVendorAssetPath(pathname);
   let safePath = vendorPath;
   if (!safePath) {
-    safePath = path.resolve(ROOT_DIR, `.${pathname}`);
-    const relativePath = path.relative(ROOT_DIR, safePath);
-    if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-      sendText(res, 403, "Forbidden");
+    const candidates = [];
+
+    const publicPath = resolveSafeStaticPath(PUBLIC_DIR, pathname);
+    if (publicPath) {
+      candidates.push(publicPath);
+    }
+
+    if (pathname.startsWith("/src/")) {
+      const sourcePath = resolveSafeStaticPath(ROOT_DIR, pathname);
+      if (sourcePath) {
+        candidates.push(sourcePath);
+      }
+    }
+
+    for (const candidate of candidates) {
+      try {
+        await fs.stat(candidate);
+        safePath = candidate;
+        break;
+      } catch {
+        // Try the next candidate.
+      }
+    }
+
+    if (!safePath) {
+      sendText(res, 404, "Not Found");
       return;
     }
   }
@@ -522,6 +849,15 @@ async function serveStaticFile(urlPathname, res) {
   const fileBuffer = await fs.readFile(safePath);
   res.writeHead(200, buildResponseHeaders(contentType, fileBuffer.length, {}, { cacheControl: resolveStaticCacheControl(ext) }));
   res.end(fileBuffer);
+}
+
+function resolveSafeStaticPath(baseDir, pathname) {
+  const safePath = path.resolve(baseDir, `.${pathname}`);
+  const relativePath = path.relative(baseDir, safePath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return null;
+  }
+  return safePath;
 }
 
 function resolveVendorAssetPath(pathname) {
@@ -630,9 +966,6 @@ function resolveClientIp(req, { trustProxy = TRUST_PROXY } = {}) {
 }
 
 function isAuthorizedApiRequest(req) {
-  if (isBasicAuthEnabled() && hasValidBasicAuth(req)) {
-    return true;
-  }
   if (!API_BEARER_TOKEN) {
     return !isBasicAuthEnabled() || hasValidBasicAuth(req);
   }
@@ -695,43 +1028,120 @@ function trimOldRateCounters(now = Date.now()) {
 }
 
 async function resolveCatalogPaths() {
-  const envLeagues = String(process.env.LEAGUES_CSV_PATH || "").trim();
-  const envTeams = String(process.env.TEAMS_CSV_PATH || "").trim();
+  const runtimeEnv = getActiveRuntimeEnvVars();
+  const envLeagues = String(runtimeEnv.LEAGUES_CSV_PATH || "").trim();
+  const envTeams = String(runtimeEnv.TEAMS_CSV_PATH || "").trim();
   if (envLeagues || envTeams) {
     if (!envLeagues || !envTeams) {
       throw new Error("Set both LEAGUES_CSV_PATH and TEAMS_CSV_PATH when using env CSV overrides.");
     }
-    return { leagues: envLeagues, teams: envTeams, sourceKind: "env" };
+    const primary = { leagues: envLeagues, teams: envTeams, sourceKind: "env" };
+    const supplemental = await resolveSupplementalCatalogPaths(primary, runtimeEnv);
+    return { ...primary, ...supplemental };
   }
 
-  const localPaths = {
-    leagues: DEFAULT_LOCAL_LEAGUES_CSV_PATH,
-    teams: DEFAULT_LOCAL_TEAMS_CSV_PATH,
-    sourceKind: "workspace-info-source",
-  };
-  if (await pathsExist(localPaths.leagues, localPaths.teams)) {
-    return localPaths;
+  const localPaths = await resolvePreferredLocalCatalogPaths();
+  if (localPaths) {
+    const supplemental = await resolveSupplementalCatalogPaths(localPaths, runtimeEnv);
+    return { ...localPaths, ...supplemental };
   }
 
-  if (ALLOW_DOWNLOADS_CSV_FALLBACK) {
+  const allowDownloadsCsvFallback =
+    String(runtimeEnv.ALLOW_DOWNLOADS_CSV_FALLBACK || ALLOW_DOWNLOADS_CSV_FALLBACK || "").trim() === "1";
+  if (allowDownloadsCsvFallback) {
     const downloadPaths = {
       leagues: DEFAULT_DOWNLOADS_LEAGUES_CSV_PATH,
       teams: DEFAULT_DOWNLOADS_TEAMS_CSV_PATH,
       sourceKind: "downloads",
     };
     if (await pathsExist(downloadPaths.leagues, downloadPaths.teams)) {
-      return downloadPaths;
+      const supplemental = await resolveSupplementalCatalogPaths(downloadPaths, runtimeEnv);
+      return { ...downloadPaths, ...supplemental };
     }
   }
 
   throw new Error(
-    `Could not locate leagues.csv and teams.csv (checked env and Info-source/).` +
+    `Could not locate a valid leagues/teams CSV pair (checked env and catalog/).` +
       `${
-        ALLOW_DOWNLOADS_CSV_FALLBACK
+        allowDownloadsCsvFallback
           ? " Downloads fallback was enabled but files were not found."
           : " Set ALLOW_DOWNLOADS_CSV_FALLBACK=1 to also check ~/Downloads."
       }`
   );
+}
+
+async function resolvePreferredLocalCatalogPaths() {
+  const leagues = await pickFirstExistingPath(DEFAULT_LOCAL_LEAGUES_CSV_CANDIDATES);
+  const teams = await pickFirstExistingPath(DEFAULT_LOCAL_TEAMS_CSV_CANDIDATES);
+  if (!leagues || !teams) {
+    return null;
+  }
+  return {
+    leagues,
+    teams,
+    sourceKind: "workspace-catalog",
+  };
+}
+
+async function pickFirstExistingPath(candidates = []) {
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    if (await pathsExist(candidate)) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+async function resolveSupplementalCatalogPaths(primaryPaths, runtimeEnv = getActiveRuntimeEnvVars()) {
+  const requestedExtraLeagues = dedupePaths(
+    parseCsvPathListEnv(runtimeEnv.EXTRA_LEAGUES_CSV_PATHS || EXTRA_LEAGUES_CSV_PATHS.join(","))
+  );
+  const requestedExtraTeams = dedupePaths(
+    parseCsvPathListEnv(runtimeEnv.EXTRA_TEAMS_CSV_PATHS || EXTRA_TEAMS_CSV_PATHS.join(","))
+  );
+
+  const extraLeagues = [];
+  for (const filePath of requestedExtraLeagues) {
+    if (!filePath || path.resolve(filePath) === path.resolve(primaryPaths.leagues)) {
+      continue;
+    }
+    if (await pathsExist(filePath)) {
+      extraLeagues.push(filePath);
+    }
+  }
+
+  const extraTeams = [];
+  for (const filePath of requestedExtraTeams) {
+    if (!filePath || path.resolve(filePath) === path.resolve(primaryPaths.teams)) {
+      continue;
+    }
+    if (await pathsExist(filePath)) {
+      extraTeams.push(filePath);
+    }
+  }
+
+  return { extraLeagues, extraTeams };
+}
+
+function dedupePaths(pathsToCheck) {
+  const seen = new Set();
+  const out = [];
+  for (const candidate of pathsToCheck) {
+    const normalized = String(candidate || "").trim();
+    if (!normalized) {
+      continue;
+    }
+    const resolved = path.resolve(normalized);
+    if (seen.has(resolved)) {
+      continue;
+    }
+    seen.add(resolved);
+    out.push(normalized);
+  }
+  return out;
 }
 
 async function pathsExist(...pathsToCheck) {
@@ -744,9 +1154,16 @@ async function pathsExist(...pathsToCheck) {
 }
 
 async function getCatalogPayloadCached() {
+  const runtimeProfile = getActiveRuntimeEnvironmentProfile();
+  const runtimeEnv = runtimeProfile.env;
   const paths = await resolveCatalogPaths();
-  const [leagueStat, teamStat] = await Promise.all([fs.stat(paths.leagues), fs.stat(paths.teams)]);
-  const cacheKey = `${paths.leagues}:${leagueStat.mtimeMs}|${paths.teams}:${teamStat.mtimeMs}`;
+  const leagueFiles = [paths.leagues, ...(Array.isArray(paths.extraLeagues) ? paths.extraLeagues : [])];
+  const teamFiles = [paths.teams, ...(Array.isArray(paths.extraTeams) ? paths.extraTeams : [])];
+  const allFiles = [...leagueFiles, ...teamFiles];
+  const allStats = await Promise.all(allFiles.map((filePath) => fs.stat(filePath)));
+  const cacheKey = [runtimeProfile.code, ...allFiles
+    .map((filePath, index) => `${filePath}:${allStats[index]?.mtimeMs || 0}`)
+  ].join("|");
   if (catalogCache && catalogCache.key === cacheKey) {
     return {
       ...catalogCache.payload,
@@ -754,30 +1171,36 @@ async function getCatalogPayloadCached() {
     };
   }
 
-  const [leaguesCsv, teamsCsv] = await Promise.all([
-    fs.readFile(paths.leagues, "utf8"),
-    fs.readFile(paths.teams, "utf8"),
+  const [leagueCsvs, teamCsvs] = await Promise.all([
+    Promise.all(leagueFiles.map((filePath) => fs.readFile(filePath, "utf8"))),
+    Promise.all(teamFiles.map((filePath) => fs.readFile(filePath, "utf8"))),
   ]);
 
-  const leagues = parseSemicolonCsv(leaguesCsv);
-  const teams = parseSemicolonCsv(teamsCsv);
-  const payload = {
-    source: {
-      kind: "csv-files",
-      label: describeCatalogSourceLabel(paths.sourceKind),
-      source_kind: paths.sourceKind,
-      leagues_file: path.basename(paths.leagues),
-      teams_file: path.basename(paths.teams),
-    },
-    counts: {
-      leagues: leagues.length,
-      teams: teams.length,
-    },
-    loaded_at: new Date().toISOString(),
+  const leagues = mergeCatalogRows(
+    leagueCsvs.map((csv) => parseSemicolonCsv(csv)),
+    ["league_id", "id"]
+  );
+  const normalizedLeagues = normalizeLeagueStartWindows(leagues, { now: new Date() });
+  const teams = mergeCatalogRows(
+    teamCsvs.map((csv) => parseSemicolonCsv(csv)),
+    ["team_id", "id"]
+  );
+  const payload = createCatalogSourcePayload({
+    source: createCatalogSourceMetadata({
+      label: describeCatalogSourceLabel(paths),
+      sourceKind: paths.sourceKind,
+      leaguesFile: path.basename(paths.leagues),
+      teamsFile: path.basename(paths.teams),
+      supplementalLeaguesFiles: leagueFiles.slice(1).map((filePath) => path.basename(filePath)),
+      supplementalTeamsFiles: teamFiles.slice(1).map((filePath) => path.basename(filePath)),
+      environment: resolveRuntimeEnvironment(runtimeEnv),
+    }),
+    loadedAt: new Date().toISOString(),
     cache: { hit: false, key: cacheKey },
-    leagues,
+    scheduleSupport: createSportsDataScheduleSupportMetadata({ env: runtimeEnv }),
+    leagues: normalizedLeagues,
     teams,
-  };
+  });
 
   catalogCache = {
     key: cacheKey,
@@ -788,20 +1211,32 @@ async function getCatalogPayloadCached() {
 }
 
 function describeCatalogSourceLabel(sourceKind) {
-  if (sourceKind === "env") return "CSV files (env override)";
-  if (sourceKind === "workspace-info-source") return "Workspace Info-source CSV files";
-  return "Downloads CSV files";
+  const baseKind = typeof sourceKind === "string" ? sourceKind : String(sourceKind?.sourceKind || "");
+  const hasSupplemental =
+    Array.isArray(sourceKind?.extraLeagues) && sourceKind.extraLeagues.length > 0 ||
+    Array.isArray(sourceKind?.extraTeams) && sourceKind.extraTeams.length > 0;
+  let label = "Downloads CSV files";
+  if (baseKind === "env") {
+    label = "CSV files (env override)";
+  } else if (baseKind === "workspace-catalog") {
+    label = "Workspace catalog CSV files";
+  }
+  return hasSupplemental ? `${label} + supplemental CSV files` : label;
 }
 
 async function getCatalogSourceMetaSafe() {
   try {
+    const runtimeEnv = getActiveRuntimeEnvVars();
     const paths = await resolveCatalogPaths();
     return {
       kind: "csv-files",
-      label: describeCatalogSourceLabel(paths.sourceKind),
+      label: describeCatalogSourceLabel(paths),
       source_kind: paths.sourceKind,
       leagues_file: path.basename(paths.leagues),
       teams_file: path.basename(paths.teams),
+      supplemental_leagues_files: (paths.extraLeagues || []).map((filePath) => path.basename(filePath)),
+      supplemental_teams_files: (paths.extraTeams || []).map((filePath) => path.basename(filePath)),
+      environment: resolveRuntimeEnvironment(runtimeEnv),
     };
   } catch {
     return { kind: "csv-files", label: "Unavailable" };
@@ -923,6 +1358,10 @@ function parseSemicolonCsv(input) {
   }
 
   return data;
+}
+
+function mergeCatalogRows(rowCollections, idKeys) {
+  return mergeCatalogRowCollections(rowCollections, idKeys);
 }
 
 function stripBom(value) {

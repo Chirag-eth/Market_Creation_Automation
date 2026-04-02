@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { validateFixtureJson, validateParentMarketPayload } from "../src/core/validation.js";
+import {
+  validateFixtureJson,
+  validateParentMarketPayload,
+  validateUatParentMarketFamilyPayload,
+  validateUatTypeReferencePayloads,
+} from "../src/core/validation.js";
 
 test("validateFixtureJson requires CSV IDs", () => {
   const errors = validateFixtureJson({
@@ -44,4 +49,59 @@ test("validateParentMarketPayload requires parent datetime fields", () => {
   assert.ok(errors.some((err) => err.includes("parent_market.markets_close_time is required")));
   assert.ok(errors.some((err) => err.includes("parent_market.payout_time is required")));
   assert.ok(errors.some((err) => err.includes("parent_market.time_remaining is required")));
+});
+
+test("validateUatTypeReferencePayloads accepts fixture + generic payloads", () => {
+  const errors = validateUatTypeReferencePayloads({
+    fixture: {
+      type_value: "fixture",
+      type_value_id: "8b09bc68-077c-4c07-9673-df79f1e24453",
+      canonical_name: "hungary-vs-greece-2099-03-31",
+    },
+    generic: {
+      type_value: "generic",
+      type_value_id: "8b09bc68-077c-4c07-9673-df79f1e24453",
+      canonical_name: "hungary-vs-greece-2099",
+    },
+  });
+
+  assert.deepEqual(errors, []);
+});
+
+test("validateUatParentMarketFamilyPayload accepts a UAT market-family payload", () => {
+  const errors = validateUatParentMarketFamilyPayload(
+    {
+      parent_market: {
+        league_id: "b6e39e21-8fdf-44ee-9fd0-abe8578854a6",
+        type_reference_id: "8b09bc68-077c-4c07-9673-df79f1e24453",
+        title: "Hungary Vs Greece",
+        parent_market_family: "moneyline",
+        market_line: "0",
+        rules: "Rules",
+        markets_open_time: "2099-03-31T17:00:00Z",
+      },
+      markets: [
+        {
+          name: "Hungary",
+          market_code: "HUN",
+          rules: "Rules",
+          team_id: "fd30f168-fbd9-4956-8dd8-9f763d9fae88",
+        },
+        {
+          name: "Greece",
+          market_code: "GRE",
+          rules: "Rules",
+          team_id: "98571e85-7646-499c-b6bd-6cb55fbefbf7",
+        },
+        {
+          name: "Draw",
+          market_code: "DRAW",
+          rules: "Rules",
+        },
+      ],
+    },
+    { family: "moneyline" }
+  );
+
+  assert.deepEqual(errors, []);
 });
