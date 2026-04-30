@@ -2111,8 +2111,13 @@ async function handleScheduleLeaguesRequest(res) {
   try {
     let catalogLeagues = [];
     if (pool) {
-      const catalogPayload = await getCatalogPayloadCached();
-      catalogLeagues = normalizeLeagueRows(catalogPayload.leagues || []);
+      try {
+        const dbCatalog = await queryCatalogRowsFromDb(pool);
+        catalogLeagues = dbCatalog.leagues || [];
+      } catch {
+        const catalogPayload = await getCatalogPayloadCached();
+        catalogLeagues = normalizeLeagueRows(catalogPayload.leagues || []);
+      }
     }
     support = await createScheduleSupportMetadata({
       env,
