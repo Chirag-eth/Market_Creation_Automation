@@ -770,6 +770,55 @@ textarea {
   border-radius: 20px;
 }
 
+.generate-json-outputs-host {
+  display: grid;
+  gap: 14px;
+}
+
+.uat-builder-schedule-panel,
+.uat-db-read-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.uat-builder-schedule-results {
+  display: grid;
+  gap: 10px;
+  min-height: 320px;
+  max-height: 720px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.uat-builder-schedule-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.uat-db-read-summary,
+.uat-db-read-details {
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(171, 189, 214, 0.3);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow-soft);
+}
+
+.uat-db-read-summary {
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.uat-db-read-details {
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
 #generationStatus {
   background:
     radial-gradient(440px 160px at 100% 0%, rgba(18, 112, 208, 0.08), transparent 74%),
@@ -2720,6 +2769,8 @@ html[data-theme="dark"] .subsurface,
 html[data-theme="dark"] .workspace-nav-tab,
 html[data-theme="dark"] .fixture-source-card,
 html[data-theme="dark"] .builder-preview,
+html[data-theme="dark"] .uat-builder-schedule-panel,
+html[data-theme="dark"] .uat-db-read-panel,
 html[data-theme="dark"] .composer-schema-card,
 html[data-theme="dark"] .optional-fields-panel,
 html[data-theme="dark"] .schedule-metadata-panel,
@@ -2730,6 +2781,12 @@ html[data-theme="dark"] .generate-page-switch {
     radial-gradient(520px 180px at 100% 0%, rgba(45, 133, 237, 0.07), transparent 74%),
     linear-gradient(180deg, rgba(21, 30, 42, 0.98), rgba(16, 24, 35, 0.96));
   box-shadow: 0 18px 36px rgba(0, 0, 0, 0.24);
+}
+
+html[data-theme="dark"] .uat-db-read-summary,
+html[data-theme="dark"] .uat-db-read-details {
+  border-color: rgba(86, 107, 138, 0.28);
+  background: rgba(244, 247, 252, 0.96);
 }
 
 html[data-theme="dark"] .hero-head {

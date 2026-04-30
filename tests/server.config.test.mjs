@@ -28,7 +28,9 @@ test("resolveDotEnvFiles prefers APP_ENV-specific files before the base .env", (
 
   assert.deepEqual(resolveDotEnvFiles(rootDir, { APP_ENV: "uat" }), [
     path.join(rootDir, ".env.uat"),
+    path.join(rootDir, ".env.uat.local"),
     path.join(rootDir, ".env"),
+    path.join(rootDir, ".env.local"),
   ]);
 });
 
@@ -37,7 +39,9 @@ test("resolveDotEnvFiles prefers an explicit ENV_FILE before the base .env", () 
 
   assert.deepEqual(resolveDotEnvFiles(rootDir, { ENV_FILE: "config/.env.uat" }), [
     path.join(rootDir, "config", ".env.uat"),
+    path.join(rootDir, "config", ".env.uat.local"),
     path.join(rootDir, ".env"),
+    path.join(rootDir, ".env.local"),
   ]);
 });
 

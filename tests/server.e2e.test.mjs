@@ -458,6 +458,8 @@ test("server e2e: schedule endpoint validates request params and surfaces provid
       SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH: "",
       SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH: "",
       SPORTSDATA_API_KEY: "",
+      POLYMARKET_SCHEDULE_ENABLED: "0",
+      LSPORTS_SCHEDULE_CSV_PATH: `${WORKSPACE}/tests/fixtures/does-not-exist.csv`,
       SCHEDULE_NOW_ISO: "2026-03-18T14:00:00Z",
     },
   });
@@ -473,13 +475,13 @@ test("server e2e: schedule endpoint validates request params and surfaces provid
 
   const authHeaders = { Authorization: `Bearer ${bearer}` };
 
-  const unsupportedLeague = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=seriea`, {
+  const unsupportedLeague = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=unknown-league`, {
     headers: authHeaders,
   });
   assert.equal(unsupportedLeague.status, 400);
   assert.match(
     String((await unsupportedLeague.json())?.detail || ""),
-    /\?league=epl, \?league=ucl, \?league=laliga, \?league=fifa-worldcup, or \?league=fifa-friendlies/i
+    /\?league=epl, \?league=ucl, \?league=laliga, \?league=seriea, \?league=bundesliga, \?league=ligue1, \?league=europa, \?league=fifa-worldcup, or \?league=fifa-friendlies/i
   );
 
   const invalidNow = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=epl&now=not-a-date`, {

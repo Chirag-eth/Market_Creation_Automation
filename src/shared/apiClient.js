@@ -45,18 +45,29 @@ export async function fetchApiJson(url, { headers = {}, ...options } = {}) {
   });
 
   let payload = null;
+  let responseText = "";
   try {
     payload = await response.json();
   } catch {
-    payload = null;
+    try {
+      responseText = await response.text();
+    } catch {
+      responseText = "";
+    }
   }
 
   if (!response.ok) {
     const error = new Error(
-      String(payload?.detail || payload?.error || `Request failed with status ${response.status}.`)
+      String(
+        payload?.detail ||
+          payload?.error ||
+          responseText ||
+          `Request failed with status ${response.status}.`
+      )
     );
     error.status = response.status;
     error.payload = payload;
+    error.responseText = responseText;
     error.requiresBearerToken =
       response.status === 401 &&
       /Bearer\b/i.test(String(response.headers.get("www-authenticate") || ""));

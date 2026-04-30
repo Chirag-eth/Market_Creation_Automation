@@ -1,4 +1,8 @@
+import { existsSync, readFileSync } from "node:fs";
+
 import { createNormalizedFixtureRecord } from "../normalizedFixtureContract.js";
+import { resolveLeagueScheduleCode } from "../../shared/leagueRegistry.js";
+import { normalizeLsportsDbRows, createLsportsDbFixtureWindowPayload } from "./lsportsDb.js";
 
 export const LSPORTS_CSV_FIXTURE_SOURCE_KEY = "lsports_csv";
 
@@ -91,4 +95,55 @@ export function normalizeLsportsCsvRow(row, { columnMap = DEFAULT_LSPORTS_CSV_CO
 
 function readMappedValue(row, columnName) {
   return String(row?.[columnName] || "").trim();
+}
+
+// ── Lsports schedule CSV (DB export, semicolon-delimited) ───────────────────
+
+export function readLsportsCsvLeagueCodes({ csvFilePath = "" } = {}) {
+  const filePath = String(csvFilePath || "").trim();
+  if (!filePath || !existsSync(filePath)) return [];
+  try {
+    const rows = parseSemicolonCsv(readFileSync(filePath, "utf8"));
+    const codes = new Set();
+    for (const row of rows) {
+      const code = resolveLeagueScheduleCode(String(row?.league_name || "").trim());
+      if (code) codes.add(code);
+    }
+    return Array.from(codes);
+  } catch {
+    return [];
+  }
+}
+
+export function fetchLsportsCsvFixturesForLeague({
+  csvFilePath = "",
+  leagueCode = "",
+  now = new Date(),
+} = {}) {
+  const filePath = String(csvFilePath || "").trim();
+  if (!filePath || !existsSync(filePath)) return null;
+
+  const rows = parseSemicolonCsv(readFileSync(filePath, "utf8"));
+  const leagueRows = rows.filter(
+    (row) => resolveLeagueScheduleCode(String(row?.league_name || "").trim()) === leagueCode
+  );
+
+  return createLsportsDbFixtureWindowPayload({
+    leagueCode,
+    rawRows: leagueRows,
+    now,
+    fetchedAt: new Date().toISOString(),
+  });
+}
+
+function parseSemicolonCsv(raw) {
+  const lines = String(raw || "").split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(";").map((h) => h.trim().replace(/^﻿/, ""));
+  return lines.slice(1).map((line) => {
+    const values = line.split(";");
+    const row = {};
+    headers.forEach((h, i) => { row[h] = values[i] ?? ""; });
+    return row;
+  });
 }

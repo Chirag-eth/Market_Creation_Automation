@@ -414,7 +414,7 @@ test("generateFromEventInput emits UAT type reference payloads when a type refer
     fixture: {
       type_value: "fixture",
       type_value_id: "1be3abef-9230-4f38-b371-42aad85f7c8c",
-      canonical_name: "hungary-vs-greece-2099-03-31",
+      canonical_name: "fifa-friendlies-hungary-vs-greece-2099-03-31",
     },
     generic: {
       type_value: "generic",
@@ -480,6 +480,7 @@ test("generateFromEventInput emits UAT parent-market family payloads when reques
   assert.equal(result.uatParentPayloads.moneyline.parent_market.title, "Hungary vs Greece");
   assert.equal(result.uatParentPayloads.moneyline.parent_market.market_line, "0");
   assert.equal(result.uatParentPayloads.moneyline.parent_market.is_cross_matching_enabled, true);
+  assert.equal(result.uatParentPayloads.moneyline.parent_market.order_delay_enabled, true);
   assert.ok(!("contract_type" in result.uatParentPayloads.moneyline.parent_market));
   assert.equal(
     result.uatParentPayloads.moneyline.parent_market.rules,
@@ -506,6 +507,7 @@ test("generateFromEventInput emits UAT parent-market family payloads when reques
   assert.equal(result.uatParentPayloads.spreads.parent_market.parent_market_family, "spreads");
   assert.equal(result.uatParentPayloads.spreads.parent_market.title, "Greece Over 2.5 Goals");
   assert.equal(result.uatParentPayloads.spreads.parent_market.market_line, "-2.5");
+  assert.equal(result.uatParentPayloads.spreads.parent_market.order_delay_enabled, true);
   assert.ok(!("is_cross_matching_enabled" in result.uatParentPayloads.spreads.parent_market));
   assert.ok(!("contract_type" in result.uatParentPayloads.spreads.parent_market));
   assert.equal(
@@ -524,6 +526,7 @@ test("generateFromEventInput emits UAT parent-market family payloads when reques
   assert.equal(result.uatParentPayloads.totals.parent_market.parent_market_family, "totals");
   assert.equal(result.uatParentPayloads.totals.parent_market.title, "Total Over 2.5 Goals");
   assert.equal(result.uatParentPayloads.totals.parent_market.market_line, "2.5");
+  assert.equal(result.uatParentPayloads.totals.parent_market.order_delay_enabled, true);
   assert.equal(
     result.uatParentPayloads.totals.parent_market.rules,
     'This Totals (2.5) market resolves based on the official result of Hungary vs Greece scheduled on March 31, 2099 at 5 PM UTC after 90 minutes of regular play plus stoppage time. It either resolves to "Long" ($1) or "Short" ($0). If the match is postponed, the market remains open until the match has been completed. If the match is canceled entirely with no make-up game, Draw in moneyline resolves to "Long" ($1) and all the other markets resolve to "Short" ($0). This market was created on March 1, 2099 at 12 AM UTC.'
@@ -535,9 +538,10 @@ test("generateFromEventInput emits UAT parent-market family payloads when reques
   assert.equal(result.uatParentPayloads.totals.markets[0].market_code, "Over 2.5");
   assert.equal(
     result.uatParentPayloads.totals.markets[0].rules,
-    'In the upcoming FIFA Friendlies game between Hungary and Greece, scheduled for March 31 at 1:00 PM ET: This market will resolve to "Over" if Hungary and Greece combine to score 3 or more goals in this game. If the combined total is less than 3, this market will resolve to "Under". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on fifa.com. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. This market was created on March 1, 2099 at 12 AM UTC.'
+    'In the upcoming FIFA Friendlies game between Hungary and Greece, scheduled for March 31 at 1:00 PM ET: This market will resolve to "Long" if Hungary and Greece combine to score 3 or more goals in this game. If the combined total is less than 3, this market will resolve to "Short". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on fifa.com. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. This market was created on March 1, 2099 at 12 AM UTC.'
   );
   assert.equal(result.uatParentPayloads.btts.parent_market.parent_market_family, "btts");
+  assert.equal(result.uatParentPayloads.btts.parent_market.order_delay_enabled, true);
   assert.ok(!("is_cross_matching_enabled" in result.uatParentPayloads.btts.parent_market));
   assert.ok(!("contract_type" in result.uatParentPayloads.btts.parent_market));
   assert.equal(

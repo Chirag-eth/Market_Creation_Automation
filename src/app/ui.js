@@ -126,6 +126,7 @@ const state = {
   selectedUatMarketLine: DEFAULT_UAT_MARKET_LINE,
   selectedUatSpreadTeamSide: DEFAULT_UAT_SPREAD_TEAM_SIDE,
   builderScheduleWeek: null,
+  builderSchedulePage: 1,
   fixturesPageScheduleWeek: null,
   lastGenerationResult: null,
   outputValidation: createInitialOutputValidationState(),
@@ -160,6 +161,7 @@ const SAMPLE_PARENT_JSON = {
     payout_time: "2099-03-15T14:00:00Z",
     status: "active",
     is_cross_matching_enabled: true,
+    order_delay_enabled: true,
     time_remaining: "2099-03-15T14:00:00Z",
   },
   markets: [
@@ -335,6 +337,7 @@ export function initApp() {
   populateMarketLineSelect();
   populateSpreadTeamSelect();
   renderMarketSchemaPanel();
+  renderGenerateWorkspaceLayout();
 
   setCatalogStatus("Loading CSV catalog...", "working");
   setOverviewCard("catalog", {
@@ -431,6 +434,7 @@ function cacheElements() {
     "generatePageTabs",
     "generateBuilderPageBtn",
     "generateFixturesPageBtn",
+    "generateJsonPageBtn",
     "generateMarketSchemaCard",
     "generateMarketSchemaSelect",
     "generateMarketSchemaStatus",
@@ -452,11 +456,27 @@ function cacheElements() {
     "generateSpreadTeamHelp",
     "generateBuilderPage",
     "generateFixturesPage",
+    "generateJsonPage",
+    "generateWorkspace",
+    "generateBuilderPreviewPanel",
+    "generateSideColumn",
+    "generateSideOutputsHost",
+    "generateOutputsStack",
+    "generateJsonOutputsHost",
     "generateBuilderWeekSelect",
     "generateBuilderRefetchBtn",
     "generateBuilderPreviewNote",
     "generateBuilderPreviewActions",
     "generateBuilderFixturePreview",
+    "uatBuilderSchedulePanel",
+    "uatBuilderScheduleState",
+    "uatBuilderScheduleResults",
+    "uatBuilderSchedulePrevBtn",
+    "uatBuilderSchedulePageLabel",
+    "uatBuilderScheduleNextBtn",
+    "uatDbReadPanel",
+    "uatDbReadSummary",
+    "uatDbReadDetails",
     "generateFixturesLiveControls",
     "generateFixtureLeagueTabs",
     "generateFixtureWeekTabs",
@@ -727,7 +747,10 @@ function moveSingleSelectFocus(event, itemSelector, onActivate) {
 }
 
 function setGeneratePage(page, { focusTarget = null } = {}) {
-  const nextPage = page === "fixtures" ? "fixtures" : "builder";
+  const isUat = isUatRuntimeActive();
+  const nextPage = page === "fixtures"
+    ? "fixtures"
+    : (isUat && page === "json" ? "json" : "builder");
   state.currentGeneratePage = nextPage;
 
   if (els.generateBuilderPage) {
@@ -735,6 +758,9 @@ function setGeneratePage(page, { focusTarget = null } = {}) {
   }
   if (els.generateFixturesPage) {
     els.generateFixturesPage.hidden = nextPage !== "fixtures";
+  }
+  if (els.generateJsonPage) {
+    els.generateJsonPage.hidden = nextPage !== "json";
   }
 
   if (els.generateBuilderPageBtn) {
@@ -750,6 +776,14 @@ function setGeneratePage(page, { focusTarget = null } = {}) {
     els.generateFixturesPageBtn.setAttribute("aria-selected", String(isFixtures));
     els.generateFixturesPageBtn.setAttribute("tabindex", isFixtures ? "0" : "-1");
   }
+  if (els.generateJsonPageBtn) {
+    const isJson = nextPage === "json";
+    els.generateJsonPageBtn.classList.toggle("is-active", isJson);
+    els.generateJsonPageBtn.setAttribute("aria-selected", String(isJson));
+    els.generateJsonPageBtn.setAttribute("tabindex", isJson ? "0" : "-1");
+  }
+
+  renderGenerateWorkspaceLayout();
 
   syncWorkspaceFromUi();
   persistInputSnapshot();
@@ -758,6 +792,55 @@ function setGeneratePage(page, { focusTarget = null } = {}) {
     window.setTimeout(() => {
       focusTarget.focus();
     }, 0);
+  }
+}
+
+function renderGenerateWorkspaceLayout() {
+  const isUat = isUatRuntimeActive();
+  if (!isUat && state.currentGeneratePage === "json") {
+    state.currentGeneratePage = "builder";
+  }
+  const isBuilderPage = state.currentGeneratePage === "builder";
+  const isJsonPage = isUat && state.currentGeneratePage === "json";
+
+  if (els.generateJsonPageBtn) {
+    els.generateJsonPageBtn.hidden = !isUat;
+  }
+  if (els.generateJsonPage) {
+    els.generateJsonPage.hidden = !isJsonPage;
+  }
+  if (els.generateBuilderPreviewPanel) {
+    els.generateBuilderPreviewPanel.hidden = isUat;
+  }
+  if (els.uatBuilderSchedulePanel) {
+    els.uatBuilderSchedulePanel.hidden = !isUat || !isBuilderPage;
+  }
+  if (els.uatDbReadPanel) {
+    els.uatDbReadPanel.hidden = !isUat || !isBuilderPage;
+  }
+  if (els.generateSideOutputsHost) {
+    els.generateSideOutputsHost.hidden = isUat ? !isJsonPage : false;
+  }
+  if (els.generationStatus) {
+    els.generationStatus.hidden = isUat ? !isJsonPage : true;
+  }
+  if (els.generateSideColumn) {
+    els.generateSideColumn.hidden = false;
+  }
+
+  if (isUat && els.generateOutputsStack && els.generateJsonOutputsHost) {
+    if (els.generateOutputsStack.parentElement !== els.generateJsonOutputsHost) {
+      els.generateJsonOutputsHost.appendChild(els.generateOutputsStack);
+    }
+  } else if (els.generateOutputsStack && els.generateSideOutputsHost) {
+    if (els.generateOutputsStack.parentElement !== els.generateSideOutputsHost) {
+      els.generateSideOutputsHost.appendChild(els.generateOutputsStack);
+    }
+  }
+
+  if (isUat) {
+    renderUatBuilderSchedulePanel();
+    renderUatDbReadPanel();
   }
 }
 
@@ -1123,6 +1206,8 @@ function renderMarketSchemaPanel() {
       ? `Selected team: ${selectedSpreadTeamLabel}. Regenerate to update the spreads family JSON.`
       : "Spread team becomes available when Spreads is selected in UAT.";
   }
+
+  renderGenerateWorkspaceLayout();
 }
 
 function bindEvents() {
@@ -1249,6 +1334,10 @@ function bindEvents() {
     setGeneratePage("fixtures", { focusTarget: els.generateFixtureSearchInput });
   });
 
+  els.generateJsonPageBtn?.addEventListener("click", () => {
+    setGeneratePage("json");
+  });
+
   els.generatePageTabs?.addEventListener("keydown", (event) => {
     moveSingleSelectFocus(event, ".generate-page-tab", (tab) => tab.click());
   });
@@ -1298,10 +1387,24 @@ function bindEvents() {
   els.generateBuilderWeekSelect?.addEventListener("change", () => {
     const selectedWeek = parseScheduleWeekValue(els.generateBuilderWeekSelect.value);
     state.builderScheduleWeek = selectedWeek;
+    state.builderSchedulePage = 1;
     state.fixturesPageScheduleWeek = selectedWeek;
     persistInputSnapshot();
     renderBuilderFixturePreview();
+    renderUatBuilderSchedulePanel();
     renderCurrentUpcomingFixturesPage();
+  });
+
+  els.uatBuilderSchedulePrevBtn?.addEventListener("click", () => {
+    state.builderSchedulePage = Math.max(1, Number(state.builderSchedulePage || 1) - 1);
+    persistInputSnapshot();
+    renderUatBuilderSchedulePanel();
+  });
+
+  els.uatBuilderScheduleNextBtn?.addEventListener("click", () => {
+    state.builderSchedulePage = Number(state.builderSchedulePage || 1) + 1;
+    persistInputSnapshot();
+    renderUatBuilderSchedulePanel();
   });
 
   const handleRefetchFixtures = () => {
@@ -1674,6 +1777,7 @@ function persistInputSnapshot() {
       uatSpreadTeamSide: String(state.selectedUatSpreadTeamSide || DEFAULT_UAT_SPREAD_TEAM_SIDE),
       page: String(state.currentGeneratePage || "builder"),
       builderScheduleWeek: Number.isInteger(state.builderScheduleWeek) ? state.builderScheduleWeek : "",
+      builderSchedulePage: Number.isInteger(state.builderSchedulePage) ? state.builderSchedulePage : 1,
       fixturesPageScheduleWeek: Number.isInteger(state.fixturesPageScheduleWeek) ? state.fixturesPageScheduleWeek : "",
       eventName: String(els.generateEventNameInput.value || ""),
       leagueSelection: String(els.generateLeagueSelect.value || state.pendingRestoredLeagueSelection || ""),
@@ -1730,8 +1834,17 @@ function restoreInputSnapshot() {
   state.selectedUatMarketFamily = normalizeUatMarketFamilyKey(generate.uatMarketFamily);
   state.selectedUatMarketLine = normalizeUatMarketLine(generate.uatMarketLine, generate.uatMarketFamily);
   state.selectedUatSpreadTeamSide = normalizeUatSpreadTeamSide(generate.uatSpreadTeamSide);
-  state.currentGeneratePage = String(generate.page || "") === "fixtures" ? "fixtures" : "builder";
+  {
+    const restoredPage = String(generate.page || "").trim();
+    state.currentGeneratePage =
+      restoredPage === "fixtures"
+        ? "fixtures"
+        : (restoredPage === "json" ? "json" : "builder");
+  }
   state.builderScheduleWeek = parseScheduleWeekValue(generate.builderScheduleWeek);
+  state.builderSchedulePage = Number.parseInt(String(generate.builderSchedulePage || "1"), 10) > 0
+    ? Number.parseInt(String(generate.builderSchedulePage || "1"), 10)
+    : 1;
   state.fixturesPageScheduleWeek = parseScheduleWeekValue(generate.fixturesPageScheduleWeek);
   els.generateEventNameInput.value = asRestoredString(generate.eventName);
   state.pendingRestoredLeagueSelection = asRestoredString(generate.leagueSelection);
@@ -2097,6 +2210,7 @@ function applyScheduleSnapshot(leagueCode, snapshot, { reason = "snapshot" } = {
     leagueChanged ? defaultWeek : state.builderScheduleWeek ?? defaultWeek,
     fixtures
   );
+  state.builderSchedulePage = 1;
   state.fixturesPageScheduleWeek = resolveActiveScheduleWeek(
     leagueChanged ? defaultWeek : state.fixturesPageScheduleWeek ?? defaultWeek,
     fixtures
@@ -2152,6 +2266,10 @@ function clearScheduleSuggestions({ clearLeagueContext = false } = {}) {
   if (els.generateBuilderFixturePreview) {
     els.generateBuilderFixturePreview.innerHTML = `<div class="schedule-browser-empty">No schedule loaded yet.</div>`;
   }
+  if (els.uatBuilderScheduleResults) {
+    els.uatBuilderScheduleResults.innerHTML = `<div class="schedule-browser-empty">No schedule loaded yet.</div>`;
+  }
+  state.builderSchedulePage = 1;
   renderScheduleLeagueTabs();
   if (els.generateFixtureWeekTabs) {
     els.generateFixtureWeekTabs.innerHTML = "";
@@ -2241,6 +2359,7 @@ function applySelectedScheduleFixture(rawEventName, { fromManualEntry = false, s
   const fixtureWeek = parseScheduleWeekValue(fixture.matchDay);
   if (Number.isInteger(fixtureWeek)) {
     state.builderScheduleWeek = fixtureWeek;
+    state.builderSchedulePage = 1;
     state.fixturesPageScheduleWeek = fixtureWeek;
   }
   renderCurrentUpcomingFixturesPage();
@@ -2508,6 +2627,106 @@ function renderBuilderFixturePreview(fixtures = state.upcomingScheduleFixtures) 
       );
     })
     .join("");
+
+  renderUatBuilderSchedulePanel(fixtures);
+}
+
+function renderUatBuilderSchedulePanel(fixtures = state.upcomingScheduleFixtures) {
+  if (!els.uatBuilderScheduleResults) {
+    return;
+  }
+
+  const source = getActiveFixtureSource();
+  if (source?.key !== "live-schedules") {
+    if (els.uatBuilderScheduleState) {
+      els.uatBuilderScheduleState.textContent = "Imported CSV";
+    }
+    els.uatBuilderScheduleResults.innerHTML =
+      `<div class="schedule-browser-empty">Imported CSV mode is ready for the upcoming Lsports DB-export adapter.</div>`;
+    if (els.uatBuilderSchedulePrevBtn) els.uatBuilderSchedulePrevBtn.disabled = true;
+    if (els.uatBuilderScheduleNextBtn) els.uatBuilderScheduleNextBtn.disabled = true;
+    if (els.uatBuilderSchedulePageLabel) els.uatBuilderSchedulePageLabel.textContent = "Page 1";
+    return;
+  }
+
+  const allFixtures = Array.isArray(fixtures) ? fixtures : [];
+  if (els.uatBuilderScheduleState) {
+    els.uatBuilderScheduleState.textContent = state.isScheduleLoading ? "Loading..." : "Loaded schedule";
+  }
+  if (!allFixtures.length) {
+    const emptyMessage = state.upcomingScheduleLeagueCode
+      ? buildNoFixturesBodyMessage(state.upcomingScheduleLeagueCode)
+      : "Select a supported league to browse upcoming fixtures.";
+    els.uatBuilderScheduleResults.innerHTML = `<div class="schedule-browser-empty">${escapeHtml(emptyMessage)}</div>`;
+    if (els.uatBuilderSchedulePrevBtn) els.uatBuilderSchedulePrevBtn.disabled = true;
+    if (els.uatBuilderScheduleNextBtn) els.uatBuilderScheduleNextBtn.disabled = true;
+    if (els.uatBuilderSchedulePageLabel) els.uatBuilderSchedulePageLabel.textContent = "Page 1";
+    return;
+  }
+
+  const activeWeek = resolveActiveScheduleWeek(state.builderScheduleWeek, allFixtures);
+  const visibleFixtures = Number.isInteger(activeWeek) ? getFixturesForScheduleWeek(activeWeek, allFixtures) : allFixtures;
+  const pageSize = 10;
+  const totalPages = Math.max(1, Math.ceil(visibleFixtures.length / pageSize));
+  state.builderSchedulePage = Math.min(Math.max(1, Number(state.builderSchedulePage || 1)), totalPages);
+  const pageStart = (state.builderSchedulePage - 1) * pageSize;
+  const pageFixtures = visibleFixtures.slice(pageStart, pageStart + pageSize);
+
+  els.uatBuilderScheduleResults.innerHTML = pageFixtures
+    .map((fixture) => {
+      const fixtureId = getScheduleFixtureIdentity(fixture);
+      const eventName = String(fixture?.eventName || "").trim();
+      const gameId = String(fixture?.gameId || fixture?.game_id || "").trim();
+      const isSelected = fixtureId && fixtureId === state.selectedScheduleFixtureId;
+      const sides = splitScheduleEventName(eventName);
+      return (
+        `<button type="button" class="builder-fixture-row${isSelected ? " is-selected" : ""}" data-event-name="${escapeHtml(eventName)}" data-fixture-id="${escapeHtml(fixtureId)}">` +
+        `<span class="builder-fixture-copy">` +
+        renderFixtureTeamsMarkup(sides, { compact: true }) +
+        (gameId ? `<span class="schedule-fixture-id builder-fixture-id">Game ID ${escapeHtml(gameId)}</span>` : ``) +
+        `<span class="builder-fixture-footer">` +
+        `<span class="builder-fixture-meta">${escapeHtml(buildScheduleFixtureMetaLine(fixture))}</span>` +
+        `<span class="builder-fixture-cta">${isSelected ? "Applied" : "Apply"}</span>` +
+        `</span>` +
+        `</span>` +
+        `</button>`
+      );
+    })
+    .join("");
+
+  if (els.uatBuilderSchedulePrevBtn) {
+    els.uatBuilderSchedulePrevBtn.disabled = state.builderSchedulePage <= 1;
+  }
+  if (els.uatBuilderScheduleNextBtn) {
+    els.uatBuilderScheduleNextBtn.disabled = state.builderSchedulePage >= totalPages;
+  }
+  if (els.uatBuilderSchedulePageLabel) {
+    els.uatBuilderSchedulePageLabel.textContent = `Page ${state.builderSchedulePage} of ${totalPages}`;
+  }
+}
+
+function renderUatDbReadPanel() {
+  if (!els.uatDbReadSummary || !els.uatDbReadDetails) {
+    return;
+  }
+
+  const fixture = getCurrentSelectedScheduleFixture();
+  const typeReferenceId = String(els.generateTypeRefInput?.value || "").trim();
+  if (!fixture) {
+    els.uatDbReadSummary.textContent = "No fixture selected.";
+    els.uatDbReadDetails.textContent = "Pick a schedule-backed fixture to inspect existing fixture and market rows.";
+    return;
+  }
+
+  const fixtureName = String(fixture.eventName || "").trim() || "Selected fixture";
+  const gameId = String(fixture.gameId || fixture.game_id || "").trim();
+  els.uatDbReadSummary.textContent = fixtureName;
+  const details = [
+    buildScheduleFixtureMetaLine(fixture),
+    gameId ? `Game ID ${gameId}` : "",
+    typeReferenceId ? `Type reference ID ${typeReferenceId}` : "Add a type reference ID to inspect linked parent-market rows.",
+  ].filter(Boolean);
+  els.uatDbReadDetails.textContent = details.join(" · ");
 }
 
 function splitScheduleEventName(eventName) {

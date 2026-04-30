@@ -16,6 +16,7 @@ function normalizeBaseUrl(rawValue) {
 export function createCmsRuntimeConfig(runtimeEnv = {}) {
   const baseUrl = normalizeBaseUrl(
     runtimeEnv?.COMP_SERVICE_INTERNAL_HOST ||
+      inferCmsInternalHostFromRuntimeEnv(runtimeEnv) ||
       runtimeEnv?.CMS_INTERNAL_BASE_URL ||
       runtimeEnv?.CMS_BASE_URL
   );
@@ -41,6 +42,22 @@ export function createCmsRuntimeConfig(runtimeEnv = {}) {
       parentMarket: baseUrl ? `${baseUrl}/api/v1/cms/internal/parent-and-market/` : "",
     },
   };
+}
+
+function inferCmsInternalHostFromRuntimeEnv(runtimeEnv = {}) {
+  const dbHost = String(runtimeEnv?.DB_HOST || "").trim();
+  const matchedDbHost = dbHost.match(/^(?:reader|writer)\.([a-z0-9-]+)\.database\.pred\.app$/i);
+  if (matchedDbHost?.[1]) {
+    return `http://api-internal.${matchedDbHost[1]}.pred.app`;
+  }
+
+  const publicCompServiceHost = String(runtimeEnv?.COMP_SERVICE_HOST || runtimeEnv?.PUBLIC_HOST || "").trim();
+  const matchedPublicHost = publicCompServiceHost.match(/^https?:\/\/([a-z0-9-]+)\.pred\.app\/?$/i);
+  if (matchedPublicHost?.[1]) {
+    return `http://api-internal.${matchedPublicHost[1]}.pred.app`;
+  }
+
+  return "";
 }
 
 function parsePositiveInteger(value, fallback) {

@@ -706,6 +706,7 @@ export function generateFromEventInput(input, catalog) {
     fixtureDateIso: effectiveFixtureDate,
     typeReferenceId,
     outputProfile,
+    leagueCode: bundle.meta?.league?.key || bundle.meta?.league?.scheduleCode || bundle.meta?.league?.code || "",
   });
 
   const fixtureScheduleContext = effectiveSelectedScheduleFixture;

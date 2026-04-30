@@ -19,6 +19,12 @@ import {
   createLsportsCsvColumnMap,
   normalizeLsportsCsvRows,
 } from "../src/backend/fixtureSources/lsportsCsv.js";
+import {
+  createPolymarketFixtureWindowPayload,
+  discoverPolymarketLeagueSlug,
+  fetchPolymarketRawRows,
+  normalizePolymarketRow,
+} from "../src/backend/fixtureSources/polymarket.js";
 import { fetchSportsDataRawRows } from "../src/backend/fixtureSources/sportsdata.js";
 
 test("catalog source contract builds stable payload metadata and counts", () => {
@@ -122,11 +128,13 @@ test("normalized fixture contract preserves provider identity and strips interna
   assert.equal("kickoffMs" in payload.fixtures[0], false);
 });
 
-test("backend fixture adapter registry exposes sportsdata active and lsports csv planned lanes", () => {
+test("backend fixture adapter registry exposes sportsdata, polymarket, and lsports lanes", () => {
   const adapters = getBackendFixtureSourceAdapters();
   assert.ok(adapters.some((adapter) => adapter.key === "sportsdata" && adapter.status === "active"));
+  assert.ok(adapters.some((adapter) => adapter.key === "polymarket" && adapter.status === "experimental"));
   assert.ok(adapters.some((adapter) => adapter.key === "lsports_csv" && adapter.status === "planned"));
   assert.equal(getBackendFixtureSourceAdapter("sportsdata")?.label, "SportsData");
+  assert.equal(getBackendFixtureSourceAdapter("polymarket")?.label, "Polymarket Sports");
 });
 
 test("lsports csv adapter normalizes future DB-export rows into the shared fixture contract", () => {
@@ -184,4 +192,108 @@ test("sportsdata fixture path rejects csv exports for non-fifa-friendlies league
       }),
     /CSV fixture paths are only supported for fifa-friendlies/i
   );
+});
+
+test("polymarket league discovery matches configured league aliases", async () => {
+  const slug = await discoverPolymarketLeagueSlug({
+    leagueCode: "epl",
+    baseUrl: "https://gateway.polymarket.us",
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          leagues: [
+            { slug: "la-liga", name: "La Liga" },
+            { slug: "premier-league", name: "Premier League" },
+          ],
+        };
+      },
+    }),
+  });
+
+  assert.equal(slug, "premier-league");
+});
+
+test("polymarket adapter fetches league events after discovery", async () => {
+  const requestedUrls = [];
+  const rows = await fetchPolymarketRawRows({
+    leagueCode: "epl",
+    env: {},
+    fetchImpl: async (url) => {
+      requestedUrls.push(String(url));
+      if (String(url).includes("/v2/leagues?")) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              leagues: [{ slug: "premier-league", name: "Premier League" }],
+            };
+          },
+        };
+      }
+      return {
+        ok: true,
+        async json() {
+          return {
+            events: [
+              {
+                id: "pm-1",
+                gameId: "109999",
+                title: "Arsenal vs Chelsea",
+                startDate: "2026-05-01T19:00:00Z",
+                active: true,
+                closed: false,
+                participants: [{ name: "Arsenal" }, { name: "Chelsea" }],
+              },
+            ],
+          };
+        },
+      };
+    },
+  });
+
+  assert.equal(rows.length, 1);
+  assert.match(requestedUrls[0], /\/v2\/leagues\?/);
+  assert.match(requestedUrls[1], /\/v2\/leagues\/premier-league\/events\?/);
+});
+
+test("polymarket rows normalize into the shared fixture contract", () => {
+  const fixture = normalizePolymarketRow({
+    id: "pm-1",
+    gameId: "109999",
+    title: "Arsenal vs Chelsea",
+    startDate: "2026-05-01T19:00:00Z",
+    active: true,
+    closed: false,
+    participants: [{ name: "Arsenal" }, { name: "Chelsea" }],
+    slug: "arsenal-vs-chelsea",
+  });
+
+  assert.equal(fixture.provider, "polymarket");
+  assert.equal(fixture.gameId, "109999");
+  assert.equal(fixture.eventName, "Arsenal vs Chelsea");
+  assert.equal(fixture.homeTeamName, "Arsenal");
+  assert.equal(fixture.awayTeamName, "Chelsea");
+});
+
+test("polymarket fixture payload produces rolling upcoming windows", () => {
+  const payload = createPolymarketFixtureWindowPayload({
+    leagueCode: "epl",
+    now: new Date("2026-04-28T00:00:00Z"),
+    rawRows: [
+      {
+        id: "pm-1",
+        gameId: "109999",
+        title: "Arsenal vs Chelsea",
+        startDate: "2026-05-01T19:00:00Z",
+        active: true,
+        closed: false,
+        participants: [{ name: "Arsenal" }, { name: "Chelsea" }],
+      },
+    ],
+  });
+
+  assert.equal(payload.source, "polymarket");
+  assert.equal(payload.selection_mode, "rolling-upcoming");
+  assert.equal(payload.fixtures.length, 1);
 });
