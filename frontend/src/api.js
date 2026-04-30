@@ -51,11 +51,19 @@ export async function fetchBatchRun(runId) {
   return res.json()
 }
 
-export async function publishJsonFixture(fixtureName) {
+export async function fetchJsonLeagues() {
+  const res = await fetch(`${BASE}/api/json/leagues`)
+  if (!res.ok) throw new Error(`fetchJsonLeagues failed: ${res.status}`)
+  return res.json()
+}
+
+export async function publishJsonFixture(fixtureName, leagueId = '') {
+  const body = { fixture_name: fixtureName }
+  if (leagueId) body.league_id = leagueId
   const res = await fetch(`${BASE}/api/json/publish-fixture`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fixture_name: fixtureName }),
+    body: JSON.stringify(body),
   })
   const data = await res.json()
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)

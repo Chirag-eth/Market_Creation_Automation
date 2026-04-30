@@ -286,6 +286,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/json/leagues" && req.method === "GET") {
+      await handleJsonLeaguesRequest(res);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/json/publish-fixture" && req.method === "POST") {
       await handleJsonPublishFixtureRequest(req, res);
       return;
@@ -1628,6 +1633,22 @@ async function handleJsonGenerateParentMarketRequest(req, res) {
   }
 }
 
+async function handleJsonLeaguesRequest(res) {
+  const pool = getDbPoolForEnv(getActiveRuntimeEnvVars());
+  if (!pool) {
+    sendJson(res, 503, { error: "DB not configured for active environment" });
+    return;
+  }
+  try {
+    const result = await pool.query(
+      `SELECT league_id, name FROM leagues ORDER BY lower(name)`
+    );
+    sendJson(res, 200, { leagues: result.rows });
+  } catch (err) {
+    sendJson(res, 500, { error: err.message });
+  }
+}
+
 async function handleJsonPublishFixtureRequest(req, res) {
   const activeProfile = getActiveRuntimeEnvironmentProfile();
   const cmsConfig = createCmsRuntimeConfig(activeProfile.env);
@@ -1654,8 +1675,11 @@ async function handleJsonPublishFixtureRequest(req, res) {
     sendJson(res, 400, { error: "fixture_name is required" });
     return;
   }
+  const leagueId = String(body?.league_id || "").trim();
 
   try {
+    const params = [`%${fixtureName}%`];
+    if (leagueId) params.push(leagueId);
     const r = await pool.query(
       `SELECT
          f.fixture_id, f.name, f.league_id, f.home_team_id, f.away_team_id, f.game_start_time,
@@ -1666,10 +1690,11 @@ async function handleJsonPublishFixtureRequest(req, res) {
        LEFT JOIN leagues l  ON l.league_id  = f.league_id
        LEFT JOIN teams ht   ON ht.team_id   = f.home_team_id
        LEFT JOIN teams at2  ON at2.team_id  = f.away_team_id
-       WHERE f.name ILIKE $1 OR f.alternate_name ILIKE $1
+       WHERE (f.name ILIKE $1 OR f.alternate_name ILIKE $1)
+         ${leagueId ? "AND f.league_id = $2" : ""}
        ORDER BY f.game_start_time DESC NULLS LAST
        LIMIT 5`,
-      [`%${fixtureName}%`]
+      params
     );
 
     if (!r.rows.length) {

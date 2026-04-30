@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { publishJsonFixture, publishJsonParentMarket, generateParentMarket } from '../api.js'
+import { publishJsonFixture, publishJsonParentMarket, generateParentMarket, fetchJsonLeagues } from '../api.js'
 
 const LEAF_PARAMS = {
   moneyline: { market_family: 'moneyline' },
@@ -147,6 +147,9 @@ function JsonPanel({ title, value, onChange, readOnly = false }) {
 }
 
 export default function JsonView() {
+  const [leagues,        setLeagues]        = useState([])
+  const [leagueId,       setLeagueId]       = useState('')
+
   const [fixtureName,    setFixtureName]    = useState('')
   const [fixtureLoading, setFixtureLoading] = useState(false)
   const [fixtureError,   setFixtureError]   = useState(null)
@@ -167,7 +170,14 @@ export default function JsonView() {
   const debounceRef  = useRef(null)
   const parentGenRef = useRef(0)
 
-  // Debounced fixture fetch on name change
+  // Fetch leagues from DB on mount
+  useEffect(() => {
+    fetchJsonLeagues()
+      .then(data => setLeagues(Array.isArray(data.leagues) ? data.leagues : []))
+      .catch(() => {})
+  }, [])
+
+  // Debounced fixture fetch on name or league change
   useEffect(() => {
     const name = fixtureName.trim()
     if (!name) {
@@ -186,7 +196,7 @@ export default function JsonView() {
       setFixtureLoading(true)
       setFixtureError(null)
       try {
-        const data = await publishJsonFixture(name)
+        const data = await publishJsonFixture(name, leagueId)
         setFixtureJson(JSON.stringify(data.fixture_payload, null, 2))
         setTypeRefId(data.type_reference_id || '')
       } catch (err) {
@@ -198,7 +208,7 @@ export default function JsonView() {
       }
     }, 600)
     return () => clearTimeout(debounceRef.current)
-  }, [fixtureName])
+  }, [fixtureName, leagueId])
 
   // Auto-generate parent markets when typeRefId or selection changes
   useEffect(() => {
@@ -308,6 +318,16 @@ export default function JsonView() {
               value={fixtureName}
               onChange={e => setFixtureName(e.target.value)}
             />
+            <select
+              className="json-fixture-bar__select"
+              value={leagueId}
+              onChange={e => setLeagueId(e.target.value)}
+            >
+              <option value="">All leagues</option>
+              {leagues.map(l => (
+                <option key={l.league_id} value={l.league_id}>{l.name}</option>
+              ))}
+            </select>
             {fixtureLoading && <span className="json-fixture-bar__hint">Fetching…</span>}
             {fixtureError   && <span className="json-fixture-bar__err">{fixtureError}</span>}
           </div>
