@@ -51,11 +51,13 @@ export async function createScheduleSupportMetadata({
     activeMappings = await queryActiveLeagueSourceMappings(pool);
   } catch {
     const merged = sqlLeagueCodeSet.size ? mergeSqlScheduleSupport(base, sqlLeagueCodeSet) : base;
-    return mergePolymarketScheduleSupport(merged, polymarketReadyCodes);
+    const withCatalog = mergeCatalogDbLeagueSupport(merged, leagues);
+    return mergePolymarketScheduleSupport(withCatalog, polymarketReadyCodes);
   }
   if (!activeMappings.length) {
     const merged = sqlLeagueCodeSet.size ? mergeSqlScheduleSupport(base, sqlLeagueCodeSet) : base;
-    return mergePolymarketScheduleSupport(merged, polymarketReadyCodes);
+    const withCatalog = mergeCatalogDbLeagueSupport(merged, leagues);
+    return mergePolymarketScheduleSupport(withCatalog, polymarketReadyCodes);
   }
 
   const definitions = getLeagueScheduleDefinitions();
@@ -121,6 +123,14 @@ export async function createScheduleSupportMetadata({
           ? current.config_source
           : fallbackSource,
     });
+  }
+
+  // Mark leagues ready if they exist in the catalog DB, regardless of mappings table
+  for (const code of new Set(leagueCodeById.values())) {
+    if (!entriesByCode.has(code)) continue;
+    const current = entriesByCode.get(code);
+    if (current.ready) continue;
+    entriesByCode.set(code, { ...current, ready: true, config_source: "catalog-db" });
   }
 
   const leaguesMeta = definitions.map((definition) => entriesByCode.get(definition.code) || {
@@ -191,6 +201,24 @@ function mergeSqlScheduleSupport(base, sqlLeagueCodeSet, csvFilePath = "") {
     ready_leagues: leaguesMeta.filter((league) => league.ready).map((league) => league.code),
     leagues: leaguesMeta,
   };
+}
+
+function mergeCatalogDbLeagueSupport(base, catalogLeagues) {
+  if (!Array.isArray(catalogLeagues) || !catalogLeagues.length) return base;
+  const leagueCodeById = buildCatalogLeagueCodeMap(catalogLeagues);
+  if (!leagueCodeById.size) return base;
+
+  const catalogCodes = new Set(leagueCodeById.values());
+  const readyCodes = new Set(Array.isArray(base?.ready_leagues) ? base.ready_leagues : []);
+  const leagues = Array.isArray(base?.leagues) ? base.leagues : [];
+  const nextLeagues = leagues.map((league) => {
+    const code = String(league?.code || "").trim().toLowerCase();
+    if (!code || Boolean(league?.ready) || !catalogCodes.has(code)) return league;
+    readyCodes.add(code);
+    return { ...league, ready: true, config_source: "catalog-db" };
+  });
+
+  return { ...base, ready_leagues: Array.from(readyCodes), leagues: nextLeagues };
 }
 
 function mergePolymarketScheduleSupport(base, polymarketReadyCodes) {
