@@ -110,6 +110,58 @@ function JsonMarketComposer({ selected, onToggle, onBulk }) {
   )
 }
 
+function LeagueSelector({ leagues, value, onChange }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    function onDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  const selected = leagues.find(l => l.league_id === value)
+  const label    = selected ? selected.name : 'All leagues'
+
+  return (
+    <div className="league-sel" ref={ref}>
+      <button
+        className={`league-sel__trigger${open ? ' league-sel__trigger--open' : ''}`}
+        onClick={() => setOpen(o => !o)}
+        type="button"
+      >
+        <span className="league-sel__label">{label}</span>
+        <svg className="league-sel__chevron" width="10" height="10" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+
+      {open && (
+        <div className="league-sel__menu">
+          <button
+            className={`league-sel__item${!value ? ' league-sel__item--active' : ''}`}
+            onClick={() => { onChange(''); setOpen(false) }}
+            type="button"
+          >
+            All leagues
+          </button>
+          {leagues.map(l => (
+            <button
+              key={l.league_id}
+              className={`league-sel__item${l.league_id === value ? ' league-sel__item--active' : ''}`}
+              onClick={() => { onChange(l.league_id); setOpen(false) }}
+              type="button"
+            >
+              {l.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function isValidJson(text) {
   if (!text.trim()) return true
   try { JSON.parse(text); return true } catch { return false }
@@ -321,16 +373,7 @@ export default function JsonView() {
               value={fixtureName}
               onChange={e => setFixtureName(e.target.value)}
             />
-            <select
-              className="json-fixture-bar__select"
-              value={leagueId}
-              onChange={e => setLeagueId(e.target.value)}
-            >
-              <option value="">All leagues</option>
-              {leagues.map(l => (
-                <option key={l.league_id} value={l.league_id}>{l.name}</option>
-              ))}
-            </select>
+            <LeagueSelector leagues={leagues} value={leagueId} onChange={setLeagueId} />
             {fixtureLoading && <span className="json-fixture-bar__hint">Fetching…</span>}
             {fixtureError   && <span className="json-fixture-bar__err">{fixtureError}</span>}
           </div>
