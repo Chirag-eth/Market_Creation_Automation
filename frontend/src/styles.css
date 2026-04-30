@@ -197,8 +197,10 @@ input  { font-family: inherit; }
 }
 .env-sel__trigger:hover { opacity: .8; }
 
-.env-sel__trigger--uat  { color: var(--s-warn, #f5a623); border-color: color-mix(in srgb, var(--s-warn, #f5a623) 30%, transparent); background: color-mix(in srgb, var(--s-warn, #f5a623) 10%, transparent); }
+.env-sel__trigger--uat     { color: var(--s-warn, #f5a623); border-color: color-mix(in srgb, var(--s-warn, #f5a623) 30%, transparent); background: color-mix(in srgb, var(--s-warn, #f5a623) 10%, transparent); }
 .env-sel__trigger--mainnet { color: var(--a); border-color: var(--a-ring); background: var(--a-bg); }
+.env-sel__trigger--dev     { color: #34d399; border-color: color-mix(in srgb, #34d399 30%, transparent); background: color-mix(in srgb, #34d399 10%, transparent); }
+.env-sel__trigger--testnet { color: #a78bfa; border-color: color-mix(in srgb, #a78bfa 30%, transparent); background: color-mix(in srgb, #a78bfa 10%, transparent); }
 
 .env-sel__dot {
   width: 5px;
@@ -241,7 +243,9 @@ input  { font-family: inherit; }
 .env-sel__item:hover { background: var(--a-bg); }
 .env-sel__item--active { color: var(--a); font-weight: 700; }
 .env-sel__dot--mainnet { background: var(--a); }
-.env-sel__dot--uat { background: var(--s-warn, #f5a623); }
+.env-sel__dot--uat     { background: var(--s-warn, #f5a623); }
+.env-sel__dot--dev     { background: #34d399; }
+.env-sel__dot--testnet { background: #a78bfa; }
 
 .hdr__date {
   font-size: 12px;
@@ -2348,6 +2352,7 @@ input  { font-family: inherit; }
   width: 100%;
   padding: 9px 0;
   font-size: 13px;
+  justify-content: center;
 }
 
 .builder__publish-ok {

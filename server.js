@@ -434,9 +434,9 @@ function resolveRuntimeEnvironmentCode(env = process.env) {
   if (!raw || raw === "local" || raw === "mainnet") {
     return "mainnet";
   }
-  if (raw === "uat") {
-    return "uat";
-  }
+  if (raw === "uat") return "uat";
+  if (raw === "dev" || raw === "development") return "dev";
+  if (raw === "testnet") return "testnet";
   return raw;
 }
 
@@ -455,17 +455,26 @@ function formatRuntimeEnvironmentLabel(appEnv) {
 
 function createRuntimeEnvironmentProfiles(rootDir, startupEnv = {}) {
   const resolvedRoot = path.resolve(rootDir || process.cwd());
-  const mainnetEnvFile = path.resolve(resolvedRoot, ".env");
-  const mainnetLocalEnvFile = path.resolve(resolvedRoot, ".env.mainnet.local");
-  const uatEnvFile = path.resolve(resolvedRoot, ".env.uat");
-  const uatLocalEnvFile = path.resolve(resolvedRoot, ".env.uat.local");
-  const sharedLocalEnvFile = path.resolve(resolvedRoot, ".env.local");
+  const mainnetEnvFile    = path.resolve(resolvedRoot, ".env");
+  const mainnetLocalFile  = path.resolve(resolvedRoot, ".env.mainnet.local");
+  const uatEnvFile        = path.resolve(resolvedRoot, ".env.uat");
+  const uatLocalFile      = path.resolve(resolvedRoot, ".env.uat.local");
+  const devEnvFile        = path.resolve(resolvedRoot, ".env.dev");
+  const devLocalFile      = path.resolve(resolvedRoot, ".env.dev.local");
+  const testnetEnvFile    = path.resolve(resolvedRoot, ".env.testnet");
+  const testnetLocalFile  = path.resolve(resolvedRoot, ".env.testnet.local");
+  const sharedLocalFile   = path.resolve(resolvedRoot, ".env.local");
   const sanitizedStartupEnv = sanitizeRuntimeStartupEnv(startupEnv);
-  const mainnetFileValues = readDotEnvValues(mainnetEnvFile);
-  const mainnetLocalFileValues = readDotEnvValues(mainnetLocalEnvFile);
-  const uatFileValues = readDotEnvValues(uatEnvFile);
-  const uatLocalFileValues = readDotEnvValues(uatLocalEnvFile);
-  const sharedLocalFileValues = readDotEnvValues(sharedLocalEnvFile);
+
+  const mainnetValues  = readDotEnvValues(mainnetEnvFile);
+  const mainnetLocal   = readDotEnvValues(mainnetLocalFile);
+  const uatValues      = readDotEnvValues(uatEnvFile);
+  const uatLocal       = readDotEnvValues(uatLocalFile);
+  const devValues      = readDotEnvValues(devEnvFile);
+  const devLocal       = readDotEnvValues(devLocalFile);
+  const testnetValues  = readDotEnvValues(testnetEnvFile);
+  const testnetLocal   = readDotEnvValues(testnetLocalFile);
+  const sharedLocal    = readDotEnvValues(sharedLocalFile);
 
   return {
     mainnet: {
@@ -474,9 +483,9 @@ function createRuntimeEnvironmentProfiles(rootDir, startupEnv = {}) {
       envFile: mainnetEnvFile,
       available: true,
       env: {
-        ...mainnetFileValues,
-        ...sharedLocalFileValues,
-        ...mainnetLocalFileValues,
+        ...mainnetValues,
+        ...sharedLocal,
+        ...mainnetLocal,
         ...sanitizedStartupEnv,
         APP_ENV: "mainnet",
         ENV_FILE: mainnetEnvFile,
@@ -488,13 +497,43 @@ function createRuntimeEnvironmentProfiles(rootDir, startupEnv = {}) {
       envFile: uatEnvFile,
       available: true,
       env: {
-        ...mainnetFileValues,
-        ...uatFileValues,
-        ...sharedLocalFileValues,
-        ...uatLocalFileValues,
+        ...mainnetValues,
+        ...uatValues,
+        ...sharedLocal,
+        ...uatLocal,
         ...sanitizedStartupEnv,
         APP_ENV: "uat",
         ENV_FILE: uatEnvFile,
+      },
+    },
+    dev: {
+      code: "dev",
+      label: "Dev",
+      envFile: devEnvFile,
+      available: true,
+      env: {
+        ...mainnetValues,
+        ...devValues,
+        ...sharedLocal,
+        ...devLocal,
+        ...sanitizedStartupEnv,
+        APP_ENV: "dev",
+        ENV_FILE: devEnvFile,
+      },
+    },
+    testnet: {
+      code: "testnet",
+      label: "Testnet",
+      envFile: testnetEnvFile,
+      available: true,
+      env: {
+        ...mainnetValues,
+        ...testnetValues,
+        ...sharedLocal,
+        ...testnetLocal,
+        ...sanitizedStartupEnv,
+        APP_ENV: "testnet",
+        ENV_FILE: testnetEnvFile,
       },
     },
   };
@@ -701,7 +740,7 @@ async function handleRuntimeEnvironmentRequest(req, res) {
   if (!RUNTIME_ENV_PROFILES[requestedEnv]) {
     sendJson(res, 400, {
       error: "Unsupported environment",
-      detail: 'Pass {"app_env":"mainnet"} or {"app_env":"uat"}.',
+      detail: 'Pass {"app_env":"mainnet"}, {"app_env":"uat"}, {"app_env":"dev"}, or {"app_env":"testnet"}.',
     });
     return;
   }

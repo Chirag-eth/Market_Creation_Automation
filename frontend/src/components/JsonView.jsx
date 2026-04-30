@@ -14,6 +14,8 @@ const LEAF_PARAMS = {
   btts:      { market_family: 'btts' },
 }
 
+const ALL_LEAF_IDS = Object.keys(LEAF_PARAMS)
+
 const JSON_GROUPS = [
   {
     id: 'result', label: 'Match Result',
@@ -70,6 +72,7 @@ function JsonMarketComposer({ selected, onToggle, onBulk }) {
   return (
     <div className="mcomposer">
       <div className="mcomposer__hdr">
+        <BulkToggle leafIds={ALL_LEAF_IDS} selected={selected} onBulk={onBulk} />
         <span className="mcomposer__title">Market Family</span>
         {selected.size > 0 && (
           <span className="mcomposer__count">{selected.size} selected</span>
