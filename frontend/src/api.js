@@ -62,6 +62,17 @@ export async function publishJsonFixture(fixtureName) {
   return data
 }
 
+export async function generateParentMarket(params) {
+  const res = await fetch(`${BASE}/api/json/generate-parent-market`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  return data
+}
+
 export async function publishJsonParentMarket(payload) {
   const res = await fetch(`${BASE}/api/json/publish-parent-market`, {
     method: 'POST',

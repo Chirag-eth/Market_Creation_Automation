@@ -1,15 +1,111 @@
-import { useState } from 'react'
-import { publishJsonFixture, publishJsonParentMarket } from '../api.js'
+import { useState, useEffect, useRef } from 'react'
+import { publishJsonFixture, publishJsonParentMarket, generateParentMarket } from '../api.js'
 
-const MARKET_FAMILIES = [
-  { id: 'moneyline', label: 'Moneyline' },
-  { id: 'spreads',   label: 'Spreads' },
-  { id: 'totals',    label: 'Totals' },
-  { id: 'btts',      label: 'Both Teams Score (BTTS)' },
+const LEAF_PARAMS = {
+  moneyline: { market_family: 'moneyline' },
+  home_1_5:  { market_family: 'spreads', market_line: '1.5', spread_team_side: 'home' },
+  away_1_5:  { market_family: 'spreads', market_line: '1.5', spread_team_side: 'away' },
+  home_2_5:  { market_family: 'spreads', market_line: '2.5', spread_team_side: 'home' },
+  away_2_5:  { market_family: 'spreads', market_line: '2.5', spread_team_side: 'away' },
+  ou_1_5:    { market_family: 'totals', market_line: '1.5' },
+  ou_2_5:    { market_family: 'totals', market_line: '2.5' },
+  ou_3_5:    { market_family: 'totals', market_line: '3.5' },
+  ou_4_5:    { market_family: 'totals', market_line: '4.5' },
+  btts:      { market_family: 'btts' },
+}
+
+const JSON_GROUPS = [
+  {
+    id: 'result', label: 'Match Result',
+    allLeafs: ['moneyline'],
+    items: [{ id: 'moneyline', label: 'Moneyline', isLeaf: true }],
+  },
+  {
+    id: 'handicap', label: 'Handicap',
+    allLeafs: ['home_1_5', 'away_1_5', 'home_2_5', 'away_2_5'],
+    items: [
+      { id: 'spreads-toggle', label: 'Spreads', isLeaf: false, toggles: ['home_1_5', 'away_1_5', 'home_2_5', 'away_2_5'] },
+      { id: 'home_1_5', label: 'Home 1.5', isLeaf: true },
+      { id: 'away_1_5', label: 'Away 1.5', isLeaf: true },
+      { id: 'home_2_5', label: 'Home 2.5', isLeaf: true },
+      { id: 'away_2_5', label: 'Away 2.5', isLeaf: true },
+    ],
+  },
+  {
+    id: 'goals', label: 'Goals O/U',
+    allLeafs: ['ou_1_5', 'ou_2_5', 'ou_3_5', 'ou_4_5'],
+    items: [
+      { id: 'totals-toggle', label: 'Totals', isLeaf: false, toggles: ['ou_1_5', 'ou_2_5', 'ou_3_5', 'ou_4_5'] },
+      { id: 'ou_1_5', label: 'O/U 1.5', isLeaf: true },
+      { id: 'ou_2_5', label: 'O/U 2.5', isLeaf: true },
+      { id: 'ou_3_5', label: 'O/U 3.5', isLeaf: true },
+      { id: 'ou_4_5', label: 'O/U 4.5', isLeaf: true },
+    ],
+  },
+  {
+    id: 'btts', label: 'Both Teams Score',
+    allLeafs: ['btts'],
+    items: [{ id: 'btts', label: 'BTTS', isLeaf: true }],
+  },
 ]
 
-const SPREAD_LINES = ['1.5', '2.5']
-const TOTAL_LINES  = ['1.5', '2.5', '3.5', '4.5']
+function BulkToggle({ leafIds, selected, onBulk }) {
+  const allIn  = leafIds.every(id => selected.has(id))
+  const someIn = !allIn && leafIds.some(id => selected.has(id))
+  const ref    = useRef(null)
+  useEffect(() => { if (ref.current) ref.current.indeterminate = someIn }, [someIn])
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      className="cb"
+      checked={allIn}
+      onChange={() => onBulk(leafIds, allIn)}
+      onClick={e => e.stopPropagation()}
+    />
+  )
+}
+
+function JsonMarketComposer({ selected, onToggle, onBulk }) {
+  return (
+    <div className="mcomposer">
+      <div className="mcomposer__hdr">
+        <span className="mcomposer__title">Market Family</span>
+        {selected.size > 0 && (
+          <span className="mcomposer__count">{selected.size} selected</span>
+        )}
+      </div>
+      <div className="mcomposer__body">
+        {JSON_GROUPS.map(group => (
+          <div key={group.id} className="mcomposer__group">
+            <div className="mcomposer__group-hdr">
+              <BulkToggle leafIds={group.allLeafs} selected={selected} onBulk={onBulk} />
+              <span className="mcomposer__group-label">{group.label}</span>
+            </div>
+            {group.items.map(item =>
+              item.isLeaf ? (
+                <label key={item.id} className="mcomposer__item">
+                  <input
+                    type="checkbox"
+                    className="cb"
+                    checked={selected.has(item.id)}
+                    onChange={() => onToggle(item.id)}
+                  />
+                  <span className="mcomposer__item-label">{item.label}</span>
+                </label>
+              ) : (
+                <label key={item.id} className="mcomposer__item">
+                  <BulkToggle leafIds={item.toggles} selected={selected} onBulk={onBulk} />
+                  <span className="mcomposer__item-label">{item.label}</span>
+                </label>
+              )
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 function isValidJson(text) {
   if (!text.trim()) return true
@@ -44,246 +140,196 @@ function JsonPanel({ title, value, onChange, readOnly = false }) {
         onChange={readOnly ? undefined : e => onChange(e.target.value)}
         readOnly={readOnly}
         spellCheck={false}
+        placeholder={readOnly ? 'Auto-generated after fixture loads…' : ''}
       />
     </div>
   )
 }
 
-function StatusPill({ label, existed }) {
-  return (
-    <span className={`json-status-pill${existed ? ' json-status-pill--existed' : ' json-status-pill--created'}`}>
-      {label}: {existed ? 'already existed' : 'created'}
-    </span>
-  )
-}
-
 export default function JsonView() {
-  // ── Step 1: fixture lookup + publish ──────────────────────────────────────
-  const [fixtureName,       setFixtureName]       = useState('')
-  const [fixturePublishing, setFixturePublishing] = useState(false)
-  const [fixtureResult,     setFixtureResult]     = useState(null)   // { fixture_id, type_reference_id, fixture_existed, type_ref_existed, fixture_payload }
-  const [fixtureError,      setFixtureError]      = useState(null)
-  const [fixtureJson,       setFixtureJson]       = useState('')     // editable fixture JSON preview
+  const [fixtureName,    setFixtureName]    = useState('')
+  const [fixtureLoading, setFixtureLoading] = useState(false)
+  const [fixtureError,   setFixtureError]   = useState(null)
+  const [fixtureJson,    setFixtureJson]    = useState('')
+  const [typeRefId,      setTypeRefId]      = useState('')
 
-  // ── Step 2: parent market generation + publish ────────────────────────────
-  const [typeRefId,         setTypeRefId]         = useState('')
-  const [marketFamily,      setMarketFamily]      = useState('moneyline')
-  const [marketLine,        setMarketLine]        = useState('1.5')
-  const [spreadSide,        setSpreadSide]        = useState('home')
-  const [generating,        setGenerating]        = useState(false)
-  const [generated,         setGenerated]         = useState('')
-  const [genError,          setGenError]          = useState(null)
-  const [publishing,        setPublishing]        = useState(false)
-  const [publishResult,     setPublishResult]     = useState(null)
-  const [publishError,      setPublishError]      = useState(null)
+  const [selected,       setSelected]       = useState(new Set())
 
-  async function handlePublishFixture() {
-    if (!fixtureName.trim()) return
-    setFixturePublishing(true)
-    setFixtureError(null)
-    setFixtureResult(null)
-    setFixtureJson('')
-    setTypeRefId('')
-    setGenerated('')
-    setGenError(null)
+  const [parentPayloads, setParentPayloads] = useState([])
+  const [parentJson,     setParentJson]     = useState('')
+  const [parentLoading,  setParentLoading]  = useState(false)
+  const [parentError,    setParentError]    = useState(null)
+
+  const [publishing,     setPublishing]     = useState(false)
+  const [publishResult,  setPublishResult]  = useState(null)
+  const [publishError,   setPublishError]   = useState(null)
+
+  const debounceRef  = useRef(null)
+  const parentGenRef = useRef(0)
+
+  // Debounced fixture fetch on name change
+  useEffect(() => {
+    const name = fixtureName.trim()
+    if (!name) {
+      setFixtureJson('')
+      setTypeRefId('')
+      setFixtureError(null)
+      setParentJson('')
+      setParentPayloads([])
+      setParentError(null)
+      setPublishResult(null)
+      setPublishError(null)
+      return
+    }
+    clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(async () => {
+      setFixtureLoading(true)
+      setFixtureError(null)
+      try {
+        const data = await publishJsonFixture(name)
+        setFixtureJson(JSON.stringify(data.fixture_payload, null, 2))
+        setTypeRefId(data.type_reference_id || '')
+      } catch (err) {
+        setFixtureError(err.message)
+        setFixtureJson('')
+        setTypeRefId('')
+      } finally {
+        setFixtureLoading(false)
+      }
+    }, 600)
+    return () => clearTimeout(debounceRef.current)
+  }, [fixtureName])
+
+  // Auto-generate parent markets when typeRefId or selection changes
+  useEffect(() => {
+    const leafIds = Array.from(selected).filter(id => LEAF_PARAMS[id])
+    if (!typeRefId || !fixtureName.trim() || !leafIds.length) {
+      setParentJson('')
+      setParentPayloads([])
+      setParentError(null)
+      return
+    }
+    const gen = ++parentGenRef.current
+    setParentLoading(true)
+    setParentError(null)
+
+    Promise.all(
+      leafIds.map(id =>
+        generateParentMarket({ fixture_name: fixtureName.trim(), type_reference_id: typeRefId, ...LEAF_PARAMS[id] })
+          .then(data => ({ id, payload: data.payload }))
+      )
+    ).then(results => {
+      if (parentGenRef.current !== gen) return
+      setParentPayloads(results)
+      const payloads = results.map(r => r.payload)
+      setParentJson(JSON.stringify(payloads.length === 1 ? payloads[0] : payloads, null, 2))
+    }).catch(err => {
+      if (parentGenRef.current !== gen) return
+      setParentError(err.message)
+      setParentJson('')
+      setParentPayloads([])
+    }).finally(() => {
+      if (parentGenRef.current === gen) setParentLoading(false)
+    })
+  }, [typeRefId, selected, fixtureName])
+
+  function handleToggle(id) {
+    setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
     setPublishResult(null)
     setPublishError(null)
-    try {
-      const data = await publishJsonFixture(fixtureName.trim())
-      setFixtureResult(data)
-      setFixtureJson(JSON.stringify(data.fixture_payload, null, 2))
-      setTypeRefId(data.type_reference_id || '')
-    } catch (err) {
-      setFixtureError(err.message)
-    } finally {
-      setFixturePublishing(false)
-    }
   }
 
-  async function handleGenerate() {
-    if (!typeRefId.trim()) return
-    setGenerating(true)
-    setGenError(null)
-    setGenerated('')
+  function handleBulk(ids, allIn) {
+    setSelected(prev => { const n = new Set(prev); ids.forEach(id => allIn ? n.delete(id) : n.add(id)); return n })
     setPublishResult(null)
     setPublishError(null)
-    try {
-      const res = await fetch('/api/json/generate-parent-market', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fixture_name:      fixtureName.trim(),
-          type_reference_id: typeRefId.trim(),
-          market_family:     marketFamily,
-          market_line:       marketLine,
-          spread_team_side:  spreadSide,
-        }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
-      setGenerated(JSON.stringify(data.payload, null, 2))
-    } catch (err) {
-      setGenError(err.message)
-    } finally {
-      setGenerating(false)
-    }
   }
 
-  async function handlePublishParentMarket() {
-    if (!generated.trim() || !isValidJson(generated)) return
+  async function handlePublish() {
+    if (!parentPayloads.length) return
     setPublishing(true)
-    setPublishError(null)
     setPublishResult(null)
-    try {
-      const payload = JSON.parse(generated)
-      const data = await publishJsonParentMarket(payload)
-      setPublishResult(data)
-    } catch (err) {
-      setPublishError(err.message)
-    } finally {
-      setPublishing(false)
+    setPublishError(null)
+    const results = await Promise.allSettled(
+      parentPayloads.map(({ payload }) => publishJsonParentMarket(payload))
+    )
+    const succeeded = results.filter(r => r.status === 'fulfilled').length
+    const failed    = results.filter(r => r.status === 'rejected')
+    setPublishResult({ succeeded, total: results.length })
+    if (failed.length) {
+      setPublishError(`${failed.length} failed: ${failed[0]?.reason?.message || 'Unknown error'}`)
     }
+    setPublishing(false)
   }
 
-  const showLine = marketFamily === 'spreads' || marketFamily === 'totals'
-  const showSide = marketFamily === 'spreads'
-  const lineOpts = marketFamily === 'spreads' ? SPREAD_LINES : TOTAL_LINES
-  const canPublishParent = generated.trim() && isValidJson(generated) && !publishing
+  const canPublish = parentPayloads.length > 0 && !publishing
 
   return (
     <div className="json-view">
+      <div className="builder__main">
 
-      {/* ── Step 1 ── */}
-      <div className="json-event-setup">
-        <div className="json-event-setup__hdr">
-          <span className="json-event-setup__title">Step 1 — Publish Fixture &amp; Type Reference</span>
+        {/* ── Left: market selector + publish ── */}
+        <div className="builder__left">
+          <JsonMarketComposer selected={selected} onToggle={handleToggle} onBulk={handleBulk} />
+          <div className="builder__publish">
+            <div className="builder__publish-divider" />
+            <div className="builder__publish-summary">
+              {selected.size > 0
+                ? <><strong>{selected.size}</strong> market{selected.size !== 1 ? 's' : ''} selected</>
+                : <span className="builder__publish-hint">Select markets on the left</span>
+              }
+            </div>
+            {publishResult && !publishError && (
+              <div className="builder__publish-ok">
+                Published {publishResult.succeeded} / {publishResult.total}
+              </div>
+            )}
+            {publishError && (
+              <div className="builder__publish-err">{publishError}</div>
+            )}
+            <button
+              className="btn-primary builder__publish-btn"
+              disabled={!canPublish}
+              onClick={handlePublish}
+            >
+              {publishing ? 'Publishing…' : 'Publish'}
+            </button>
+          </div>
         </div>
-        <div className="json-event-setup__fields">
-          <label className="json-field">
-            <span className="json-field__label">Fixture Name</span>
+
+        {/* ── Right: fixture bar + JSON panels ── */}
+        <div className="builder__right json-right">
+          <div className="json-fixture-bar">
+            <span className="json-fixture-bar__label">Fixture Name</span>
             <input
-              className="json-field__input"
+              className="json-fixture-bar__input"
               type="text"
               placeholder="e.g. Arsenal vs Chelsea"
               value={fixtureName}
               onChange={e => setFixtureName(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handlePublishFixture()}
             />
-          </label>
-        </div>
-        <div className="json-event-setup__actions">
-          <button
-            className="btn-primary"
-            onClick={handlePublishFixture}
-            disabled={fixturePublishing || !fixtureName.trim()}
-          >
-            {fixturePublishing ? 'Publishing…' : 'Publish Fixture'}
-          </button>
-        </div>
-        {fixtureError && <div className="json-error">{fixtureError}</div>}
-        {fixtureResult && (
-          <div className="json-publish-status">
-            <StatusPill label="Fixture"       existed={fixtureResult.fixture_existed} />
-            <StatusPill label="Type Reference" existed={fixtureResult.type_ref_existed} />
-            <span className="json-status-id">Type Ref ID: {fixtureResult.type_reference_id}</span>
+            {fixtureLoading && <span className="json-fixture-bar__hint">Fetching…</span>}
+            {fixtureError   && <span className="json-fixture-bar__err">{fixtureError}</span>}
           </div>
-        )}
-      </div>
 
-      {fixtureJson && (
-        <div className="json-panels">
-          <JsonPanel title="Fixture JSON" value={fixtureJson} onChange={setFixtureJson} readOnly />
-        </div>
-      )}
-
-      {/* ── Step 2 ── */}
-      <div className="json-event-setup json-event-setup--step2">
-        <div className="json-event-setup__hdr">
-          <span className="json-event-setup__title">Step 2 — Generate &amp; Publish Parent Market</span>
-        </div>
-        <div className="json-event-setup__fields">
-          <label className="json-field">
-            <span className="json-field__label">Type Reference ID</span>
-            <input
-              className="json-field__input"
-              type="text"
-              placeholder="UUID (auto-filled after Step 1)"
-              value={typeRefId}
-              onChange={e => setTypeRefId(e.target.value)}
+          <div className="json-panels">
+            <JsonPanel
+              title="Fixture JSON"
+              value={fixtureJson}
+              onChange={setFixtureJson}
             />
-          </label>
-          <label className="json-field">
-            <span className="json-field__label">Market Family</span>
-            <select
-              className="json-field__input json-field__select"
-              value={marketFamily}
-              onChange={e => { setMarketFamily(e.target.value); setGenerated(''); setGenError(null); setPublishResult(null); setPublishError(null) }}
-            >
-              {MARKET_FAMILIES.map(f => (
-                <option key={f.id} value={f.id}>{f.label}</option>
-              ))}
-            </select>
-          </label>
-          {showLine && (
-            <label className="json-field">
-              <span className="json-field__label">Market Line</span>
-              <select
-                className="json-field__input json-field__select"
-                value={marketLine}
-                onChange={e => { setMarketLine(e.target.value); setGenerated(''); setGenError(null); setPublishResult(null); setPublishError(null) }}
-              >
-                {lineOpts.map(l => (
-                  <option key={l} value={l}>{l}</option>
-                ))}
-              </select>
-            </label>
-          )}
-          {showSide && (
-            <label className="json-field">
-              <span className="json-field__label">Spread Team</span>
-              <select
-                className="json-field__input json-field__select"
-                value={spreadSide}
-                onChange={e => { setSpreadSide(e.target.value); setGenerated(''); setGenError(null); setPublishResult(null); setPublishError(null) }}
-              >
-                <option value="home">Home Team</option>
-                <option value="away">Away Team</option>
-              </select>
-            </label>
-          )}
-        </div>
-        <div className="json-event-setup__actions">
-          <button
-            className="btn-primary"
-            onClick={handleGenerate}
-            disabled={generating || !typeRefId.trim() || !fixtureName.trim()}
-          >
-            {generating ? 'Generating…' : 'Generate'}
-          </button>
-          {generated && (
-            <button
-              className="btn-primary btn-publish"
-              onClick={handlePublishParentMarket}
-              disabled={!canPublishParent}
-            >
-              {publishing ? 'Publishing…' : 'Publish'}
-            </button>
-          )}
-        </div>
-        {genError    && <div className="json-error">{genError}</div>}
-        {publishError && <div className="json-error">{publishError}</div>}
-        {publishResult && (
-          <div className="json-publish-status">
-            <span className="json-status-pill json-status-pill--created">Parent market published</span>
+            <JsonPanel
+              title={parentLoading ? 'Parent Market JSON (generating…)' : 'Parent Market JSON'}
+              value={parentJson}
+              onChange={setParentJson}
+              readOnly
+            />
           </div>
-        )}
-      </div>
 
-      {generated && (
-        <div className="json-panels">
-          <JsonPanel title="Parent Market JSON" value={generated} onChange={setGenerated} />
+          {parentError && <div className="json-panels-err">{parentError}</div>}
         </div>
-      )}
+
+      </div>
     </div>
   )
 }

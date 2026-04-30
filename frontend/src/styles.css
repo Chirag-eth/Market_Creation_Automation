@@ -2647,6 +2647,75 @@ input  { font-family: inherit; }
   margin-left: 8px;
 }
 
+/* ─── JSON View – builder-like layout ────────────────────────────── */
+.json-right {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.json-fixture-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.json-fixture-bar__label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--t3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.json-fixture-bar__input {
+  flex: 1;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--t1);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.12s;
+}
+
+.json-fixture-bar__input:focus {
+  border-color: var(--a);
+}
+
+.json-fixture-bar__input::placeholder {
+  color: var(--t3);
+}
+
+.json-fixture-bar__hint {
+  font-size: 12px;
+  color: var(--t3);
+  white-space: nowrap;
+}
+
+.json-fixture-bar__err {
+  font-size: 12px;
+  color: var(--s-live);
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.json-panels-err {
+  flex-shrink: 0;
+  padding: 6px 16px 0;
+  font-size: 12px;
+  color: var(--s-live);
+}
+
 /* ─── User Menu ──────────────────────────────────────────────────── */
 .user-menu {
   position: relative;
