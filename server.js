@@ -1,4 +1,5 @@
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -47,7 +48,12 @@ import {
 import {
   classifyParentStatusFromRows,
   getExpectedMarketCountForPublishKey,
+  buildExistingPublishKeyFromRows,
+  reconstructParentMarketPayloadFromRows,
+  canonicalizeParentMarketComparisonPayload,
 } from "./src/backend/cmsSelectedPublish.js";
+import { validateFixtureJson } from "./src/core/validation.js";
+import { InvalidIntegrationPayloadError } from "./src/backend/publisherCore.js";
 import { normalizeForSearch } from "./src/shared/util.js";
 
 const STARTUP_ENV = { ...process.env };
@@ -55,6 +61,22 @@ const ROOT_DIR = path.resolve(process.cwd());
 for (const envFile of resolveDotEnvFiles(ROOT_DIR, process.env)) {
   loadDotEnv(envFile);
 }
+
+// Keys that must come exclusively from a profile's .env file and must not
+// bleed in from the process startup environment when profiles are built.
+const PROFILE_BOUND_KEYS = new Set([
+  "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_SSL",
+  "COMP_SERVICE_HOST", "COMP_SERVICE_INTERNAL_HOST", "MARKET_MAKING_HOST",
+  "ORDER_SERVICE_HOST", "LSPORTS_HOST", "PUBLIC_HOST",
+  "ACCESS_TOKEN", "SPORTSDATA_API_KEY",
+  "POLYMARKET_BEARER_TOKEN", "POLYMARKET_AUTH_HEADER_NAME", "POLYMARKET_AUTH_HEADER_VALUE",
+  "POLYMARKET_CLOB_BASE_URL", "POLYMARKET_DISCOVERY_BASE_URL",
+  "SPORTSDATA_SCHEDULE_BASE_URL", "SPORTSDATA_SCHEDULE_SEASON",
+  "ENABLED_INTEGRATIONS_CATALOG_ADMIN", "ENABLED_INTEGRATIONS_CMS",
+  "ENABLED_INTEGRATIONS_REDEMPTION", "ENABLED_INTEGRATIONS_SPORTSINFO",
+  "ENABLED_INTEGRATIONS_VAULT", "DEV_ALLOW_MOCK_DOWNSTREAM",
+]);
+
 const RUNTIME_ENV_PROFILES = createRuntimeEnvironmentProfiles(ROOT_DIR, STARTUP_ENV);
 let activeRuntimeEnvCode = resolveRuntimeEnvironmentCode(process.env);
 
@@ -74,7 +96,7 @@ function getDbPoolForEnv(envVars = {}) {
   return _dbPoolCache.get(key) || null;
 }
 if (!RUNTIME_ENV_PROFILES[activeRuntimeEnvCode]) {
-  activeRuntimeEnvCode = "mainnet";
+  activeRuntimeEnvCode = "uat";
 }
 
 const PORT = parsePositiveIntegerEnv(process.env.PORT, 2020, { min: 1 });
@@ -82,14 +104,17 @@ const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const CATALOG_DIR = path.join(ROOT_DIR, "catalog");
 const DEFAULT_DOWNLOADS_LEAGUES_CSV_PATH = path.join(os.homedir(), "Downloads", "leagues.csv");
 const DEFAULT_DOWNLOADS_TEAMS_CSV_PATH = path.join(os.homedir(), "Downloads", "teams.csv");
-const DEFAULT_DOWNLOADS_FIFA_TEAMS_CSV_PATH = path.join(os.homedir(), "Downloads", "fifa_teams.csv");
-const DEFAULT_LOCAL_LEAGUES_CSV_CANDIDATES = [
-  path.join(CATALOG_DIR, "leagues-main.csv"),
-  path.join(CATALOG_DIR, "leagues.csv"),
-];
-const DEFAULT_LOCAL_TEAMS_CSV_CANDIDATES = [
-  path.join(CATALOG_DIR, "teams-main.csv"),
-  path.join(CATALOG_DIR, "teams.csv"),
+// Candidate pairs are tried in order; both files in a pair must exist so leagues
+// and teams always come from the same catalog generation.
+const DEFAULT_LOCAL_CATALOG_CANDIDATE_PAIRS = [
+  {
+    leagues: path.join(CATALOG_DIR, "leagues.csv"),
+    teams:   path.join(CATALOG_DIR, "teams.csv"),
+  },
+  {
+    leagues: path.join(CATALOG_DIR, "leagues-main.csv"),
+    teams:   path.join(CATALOG_DIR, "teams-main.csv"),
+  },
 ];
 const ALLOW_DOWNLOADS_CSV_FALLBACK = String(process.env.ALLOW_DOWNLOADS_CSV_FALLBACK || "").trim() === "1";
 const EXTRA_LEAGUES_CSV_PATHS = parseCsvPathListEnv(process.env.EXTRA_LEAGUES_CSV_PATHS || "");
@@ -256,6 +281,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/schedules/all") {
+      await handleAllSchedulesRequest(res);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/schedules/upcoming") {
       await handleUpcomingScheduleRequest(requestUrl, res);
       return;
@@ -281,6 +311,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/json/build-outputs" && req.method === "POST") {
+      await handleJsonBuildOutputsRequest(req, res);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/json/generate-parent-market" && req.method === "POST") {
       await handleJsonGenerateParentMarketRequest(req, res);
       return;
@@ -291,6 +326,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/json/teams" && req.method === "GET") {
+      await handleJsonTeamsRequest(res, requestUrl);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/json/publish-fixture" && req.method === "POST") {
       await handleJsonPublishFixtureRequest(req, res);
       return;
@@ -298,6 +338,16 @@ const server = http.createServer(async (req, res) => {
 
     if (requestUrl.pathname === "/api/json/publish-parent-market" && req.method === "POST") {
       await handleJsonPublishParentMarketRequest(req, res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/json/prepare-publish" && req.method === "POST") {
+      await handleJsonPreparePublishRequest(req, res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/cms/fixture-create" && req.method === "POST") {
+      await handleCmsFixtureCreateRequest(req, res);
       return;
     }
 
@@ -431,10 +481,8 @@ export function resolveRuntimeEnvironment(env = process.env) {
 
 function resolveRuntimeEnvironmentCode(env = process.env) {
   const raw = String(env?.APP_ENV || "").trim().toLowerCase();
-  if (!raw || raw === "local" || raw === "mainnet") {
-    return "mainnet";
-  }
-  if (raw === "uat") return "uat";
+  if (raw === "mainnet") return "mainnet";
+  if (raw === "uat" || !raw || raw === "local") return "uat";
   if (raw === "dev" || raw === "development") return "dev";
   if (raw === "testnet") return "testnet";
   return raw;
@@ -543,12 +591,13 @@ function sanitizeRuntimeStartupEnv(startupEnv = {}) {
   const next = { ...(startupEnv && typeof startupEnv === "object" ? startupEnv : {}) };
   delete next.APP_ENV;
   delete next.ENV_FILE;
+  for (const key of PROFILE_BOUND_KEYS) delete next[key];
   return next;
 }
 
 function getRuntimeEnvironmentProfile(code = activeRuntimeEnvCode) {
   const normalized = resolveRuntimeEnvironmentCode({ APP_ENV: code });
-  return RUNTIME_ENV_PROFILES[normalized] || RUNTIME_ENV_PROFILES.mainnet;
+  return RUNTIME_ENV_PROFILES[normalized] || RUNTIME_ENV_PROFILES.uat;
 }
 
 function getActiveRuntimeEnvironmentProfile() {
@@ -660,6 +709,18 @@ if (IS_MAIN) {
         console.log(`CSV source resolution failed: ${String(error?.message || error)}`);
       }
     })();
+
+    // Warm up schedule cache for all leagues so the first request is instant
+    void Promise.allSettled(
+      getLeagueScheduleDefinitions().map(def =>
+        getUpcomingSchedulePayload(def.code).catch(err =>
+          console.warn(`[schedule-warmup] ${def.code}: ${err.message}`)
+        )
+      )
+    ).then(() => {
+      const warm = [...scheduleCache.keys()];
+      console.log(`[schedule-warmup] ${warm.length} league(s) cached: ${warm.join(", ")}`);
+    });
 
     // Background schedule refresh — runs every SCHEDULE_CACHE_TTL_MS (default 5 min)
     const bgIntervalMs = SCHEDULE_CACHE_TTL_MS;
@@ -790,6 +851,15 @@ async function handleCmsPublishRequest(req, res) {
     return;
   }
 
+  const fixtureValidationErrors = validateFixtureJson(bundle.fixturePayload);
+  if (fixtureValidationErrors.length > 0) {
+    sendJson(res, 400, {
+      error: "Invalid fixture payload",
+      detail: fixtureValidationErrors,
+    });
+    return;
+  }
+
   const result = await publishCmsBundle({
     config: cmsConfig,
     fixturePayload: bundle.fixturePayload,
@@ -814,6 +884,69 @@ async function handleCmsPublishRequest(req, res) {
   }
 
   sendJson(res, 200, responsePayload);
+}
+
+async function handleCmsFixtureCreateRequest(req, res) {
+  let payload;
+  try {
+    payload = await readJsonRequestBody(req, { maxBytes: 64 * 1024 });
+  } catch (err) {
+    sendJson(res, 400, { error: "Invalid JSON body", detail: String(err?.message || err) });
+    return;
+  }
+
+  const gameId       = String(payload?.game_id || "").trim();
+  const source       = String(payload?.source || "").trim();
+  const parentMarkets = Array.isArray(payload?.parent_markets) ? payload.parent_markets : [];
+  const cname        = String(payload?.cname || "").trim();
+  const appendix     = String(payload?.appendix ?? "");
+
+  if (!gameId)  { sendJson(res, 400, { error: "game_id is required" }); return; }
+  if (!source)  { sendJson(res, 400, { error: "source is required" }); return; }
+  if (!parentMarkets.length) { sendJson(res, 400, { error: "parent_markets must be a non-empty array" }); return; }
+
+  const activeProfile = getActiveRuntimeEnvironmentProfile();
+  const cmsConfig = createCmsRuntimeConfig(activeProfile.env);
+  if (!cmsConfig.enabled) {
+    sendJson(res, 503, {
+      error: "CMS not configured",
+      detail: `Set COMP_SERVICE_INTERNAL_HOST for the active ${activeProfile.label} environment.`,
+    });
+    return;
+  }
+
+  const url = `${cmsConfig.baseUrl}/api/v1/cms/internal/fixtures/create`;
+  const headers = { "Content-Type": "application/json" };
+  if (cmsConfig.bearerToken) headers.Authorization = `Bearer ${cmsConfig.bearerToken}`;
+
+  let upstream;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), cmsConfig.timeoutMs);
+    try {
+      upstream = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ game_id: gameId, source, parent_markets: parentMarkets, cname, appendix }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    sendJson(res, 502, { error: "Upstream request failed", detail: String(err?.message || err) });
+    return;
+  }
+
+  let body;
+  try {
+    const text = await upstream.text();
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = null;
+  }
+
+  sendJson(res, upstream.status, body ?? {});
 }
 
 async function handleCmsBatchPublishRequest(req, res) {
@@ -855,7 +988,10 @@ async function handleCmsBatchPublishRequest(req, res) {
     return;
   }
 
-  const activeProfile = getActiveRuntimeEnvironmentProfile();
+  const requestedEnvCode = String(payload?.environment || "").trim();
+  const activeProfile = requestedEnvCode
+    ? getRuntimeEnvironmentProfile(requestedEnvCode)
+    : getActiveRuntimeEnvironmentProfile();
   const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   console.log(`[batch-publish] ▶ ${runId}`);
@@ -1571,6 +1707,118 @@ async function handleDbVerifyParentMarketRequest(req, res) {
   }
 }
 
+async function handleJsonBuildOutputsRequest(req, res) {
+  let body;
+  try {
+    body = await readJsonRequestBody(req);
+  } catch {
+    sendJson(res, 400, { error: "Invalid JSON body" });
+    return;
+  }
+
+  const fixtureName    = String(body?.fixture_name      || "").trim();
+  const homeTeamName   = String(body?.home_team         || "").trim();
+  const homeTeamId     = String(body?.home_team_id      || "").trim();
+  const homeTeamAlt    = String(body?.home_team_alt     || homeTeamName).trim();
+  const awayTeamName   = String(body?.away_team         || "").trim();
+  const awayTeamId     = String(body?.away_team_id      || "").trim();
+  const awayTeamAlt    = String(body?.away_team_alt     || awayTeamName).trim();
+  const leagueName     = String(body?.league_name       || "").trim();
+  const leagueId       = String(body?.league_id         || "").trim();
+  const kickoffIso     = String(body?.kickoff_iso       || "").trim();
+  const typeRefId      = String(body?.type_reference_id || "").trim() || randomUUID();
+  const leaves         = Array.isArray(body?.leaves) ? body.leaves : [];
+
+  if (!fixtureName) { sendJson(res, 400, { error: "fixture_name is required" }); return; }
+  if (!kickoffIso)  { sendJson(res, 400, { error: "kickoff_iso is required" });  return; }
+
+  const kickoffDate = kickoffIso.slice(0, 10);
+  const kickoffTime = kickoffIso.slice(11, 16);
+  const pool = getDbPoolForEnv(getActiveRuntimeEnvVars());
+  const fallbackLeagueSlug = slugifyLookupValue(leagueName) || "league";
+  const league = await resolveLeagueRecordFromDb(pool, {
+    leagueId,
+    leagueName,
+    leagueSlug: fallbackLeagueSlug,
+  });
+  const [homeTeamRecord, awayTeamRecord] = await Promise.all([
+    resolveTeamRecordFromDb(pool, {
+      teamId: homeTeamId,
+      teamName: homeTeamName,
+      leagueId: league.id,
+    }),
+    resolveTeamRecordFromDb(pool, {
+      teamId: awayTeamId,
+      teamName: awayTeamName,
+      leagueId: league.id,
+    }),
+  ]);
+
+  const homeTeam = {
+    id: homeTeamRecord.id,
+    name: homeTeamRecord.name || homeTeamName,
+    alternateName: homeTeamRecord.alternateName || homeTeamAlt,
+  };
+  const awayTeam = {
+    id: awayTeamRecord.id,
+    name: awayTeamRecord.name || awayTeamName,
+    alternateName: awayTeamRecord.alternateName || awayTeamAlt,
+  };
+
+  const fixturePayload = {
+    name:            fixtureName,
+    league_id:       league.id,
+    home_team_id:    homeTeam.id || null,
+    away_team_id:    awayTeam.id || null,
+    format:          null,
+    logo_url:        "https://public-assets.pred.app/market-assets/fixture_128x128.png",
+    theme_color:     "#FFFFFF",
+    match_day:       1,
+    match_week:      0,
+    location:        "",
+    venue:           "",
+    game_start_time: kickoffIso || null,
+    alternate_name:  buildUatFixtureAlternateName(homeTeam, awayTeam),
+  };
+
+  const parentPayloads = [];
+  for (const leaf of leaves) {
+    const marketFamily   = String(leaf?.market_family    || "").trim().toLowerCase();
+    const marketLine     = String(leaf?.market_line      || "1.5").trim();
+    const spreadTeamSide = String(leaf?.spread_team_side || "home").trim().toLowerCase();
+    const leafId         = String(leaf?.id               || "").trim();
+    const validFamilies  = ["moneyline", "spreads", "totals", "btts"];
+    if (!validFamilies.includes(marketFamily)) continue;
+
+    const payloads = buildUatParentPayloads({
+      fixtureJson:     { name: fixtureName, league_id: league.id },
+      league,
+      homeTeam,
+      awayTeam,
+      fixtureDateIso:  kickoffDate,
+      kickoffTimeUtc:  kickoffTime,
+      openIso:         kickoffIso,
+      createdAtIso:    new Date().toISOString(),
+      typeReferenceId: typeRefId,
+      outputProfile:   "uat",
+      marketLine,
+      spreadTeamSide,
+    });
+
+    if (payloads && payloads[marketFamily]) {
+      parentPayloads.push({ id: leafId, payload: payloads[marketFamily] });
+    }
+  }
+
+  sendJson(res, 200, {
+    type_reference_id: typeRefId,
+    fixture_payload:   fixturePayload,
+    parent_payloads:   parentPayloads,
+    teams_resolved:    Boolean(homeTeam.id && awayTeam.id),
+    league_resolved:   Boolean(league.id),
+  });
+}
+
 async function handleJsonGenerateParentMarketRequest(req, res) {
   const pool = getDbPoolForEnv(getActiveRuntimeEnvVars());
   if (!pool) {
@@ -1680,9 +1928,35 @@ async function handleJsonLeaguesRequest(res) {
   }
   try {
     const result = await pool.query(
-      `SELECT league_id, name FROM leagues ORDER BY lower(name)`
+      `SELECT league_id, name, alternate_name, active_logo_url, theme_color
+       FROM leagues ORDER BY lower(name)`
     );
     sendJson(res, 200, { leagues: result.rows });
+  } catch (err) {
+    sendJson(res, 500, { error: err.message });
+  }
+}
+
+async function handleJsonTeamsRequest(res, requestUrl) {
+  const pool = getDbPoolForEnv(getActiveRuntimeEnvVars());
+  if (!pool) {
+    sendJson(res, 200, { teams: [] });
+    return;
+  }
+  const q = String(requestUrl.searchParams.get("q") || "").trim();
+  if (q.length < 2) {
+    sendJson(res, 200, { teams: [] });
+    return;
+  }
+  try {
+    const r = await pool.query(
+      `SELECT team_id, name, alternate_name, logo_url
+       FROM teams
+       WHERE name ILIKE $1 OR alternate_name ILIKE $1
+       ORDER BY name LIMIT 12`,
+      [`%${q}%`]
+    );
+    sendJson(res, 200, { teams: r.rows });
   } catch (err) {
     sendJson(res, 500, { error: err.message });
   }
@@ -1745,15 +2019,27 @@ async function handleJsonPublishFixtureRequest(req, res) {
     const kickoffIso  = row.game_start_time ? new Date(row.game_start_time).toISOString() : "";
     const kickoffDate = kickoffIso.slice(0, 10);
 
+    const [resolvedHomeTeam, resolvedAwayTeam] = await Promise.all([
+      resolveTeamRecordFromDb(pool, {
+        teamId: String(row.home_team_id || "").trim(),
+        teamName: String(row.home_team_name || "").trim(),
+        leagueId: String(row.league_id || "").trim(),
+      }),
+      resolveTeamRecordFromDb(pool, {
+        teamId: String(row.away_team_id || "").trim(),
+        teamName: String(row.away_team_name || "").trim(),
+        leagueId: String(row.league_id || "").trim(),
+      }),
+    ]);
     const homeTeam = {
-      id:            String(row.home_team_id || "").trim(),
-      name:          String(row.home_team_name || "").trim(),
-      alternateName: String(row.home_team_alternate || row.home_team_name || "").trim(),
+      id:            resolvedHomeTeam.id,
+      name:          resolvedHomeTeam.name || String(row.home_team_name || "").trim(),
+      alternateName: resolvedHomeTeam.alternateName || String(row.home_team_alternate || row.home_team_name || "").trim(),
     };
     const awayTeam = {
-      id:            String(row.away_team_id || "").trim(),
-      name:          String(row.away_team_name || "").trim(),
-      alternateName: String(row.away_team_alternate || row.away_team_name || "").trim(),
+      id:            resolvedAwayTeam.id,
+      name:          resolvedAwayTeam.name || String(row.away_team_name || "").trim(),
+      alternateName: resolvedAwayTeam.alternateName || String(row.away_team_alternate || row.away_team_name || "").trim(),
     };
     const leagueName = String(row.league_name || "").trim();
     const league = {
@@ -1777,6 +2063,16 @@ async function handleJsonPublishFixtureRequest(req, res) {
       game_start_time: kickoffIso || null,
       alternate_name:  buildUatFixtureAlternateName(homeTeam, awayTeam),
     };
+
+    const fixtureValidationErrors = validateFixtureJson(fixturePayload);
+    if (fixtureValidationErrors.length > 0) {
+      sendJson(res, 400, {
+        error: "Resolved fixture payload is invalid",
+        detail: fixtureValidationErrors,
+        fixture_name: String(row.name || "").trim(),
+      });
+      return;
+    }
 
     // Use existing fixture_id from DB row if present — fixture already exists
     let fixtureUuid = String(row.fixture_id || "").trim() || null;
@@ -1875,6 +2171,129 @@ async function handleJsonPublishParentMarketRequest(req, res) {
     sendJson(res, 200, { success: true, response: pmResp });
   } catch (err) {
     console.error("[json-publish-parent-market]", err.message);
+    sendJson(res, 500, { error: err.message });
+  }
+}
+
+async function handleJsonPreparePublishRequest(req, res) {
+  const activeProfile = getActiveRuntimeEnvironmentProfile();
+  const cmsConfig = createCmsRuntimeConfig(activeProfile.env);
+  if (!cmsConfig.enabled) {
+    sendJson(res, 503, { error: "CMS is not configured for this environment" });
+    return;
+  }
+  const pool = getDbPoolForEnv(getActiveRuntimeEnvVars());
+
+  let body;
+  try {
+    body = await readJsonRequestBody(req);
+  } catch {
+    sendJson(res, 400, { error: "Invalid JSON body" });
+    return;
+  }
+
+  const rawFixturePayload = body?.fixture_payload;
+  if (!rawFixturePayload || typeof rawFixturePayload !== "object" || Array.isArray(rawFixturePayload)) {
+    sendJson(res, 400, { error: "fixture_payload (object) is required" });
+    return;
+  }
+  const leagueSlug    = String(body?.league_slug    || "").trim();
+  const homeTeamName  = String(body?.home_team_name || "").trim();
+  const awayTeamName  = String(body?.away_team_name || "").trim();
+
+  try {
+    const fixturePayload = {
+      ...rawFixturePayload,
+    };
+    const resolvedLeague = await resolveLeagueRecordFromDb(pool, {
+      leagueId: String(fixturePayload.league_id || "").trim(),
+      leagueSlug,
+      leagueName: "",
+    });
+    if (!String(fixturePayload.league_id || "").trim() && resolvedLeague.id) {
+      fixturePayload.league_id = resolvedLeague.id;
+    }
+
+    const [resolvedHomeTeam, resolvedAwayTeam] = await Promise.all([
+      resolveTeamRecordFromDb(pool, {
+        teamId: String(fixturePayload.home_team_id || "").trim(),
+        teamName: homeTeamName,
+        leagueId: resolvedLeague.id || String(fixturePayload.league_id || "").trim(),
+      }),
+      resolveTeamRecordFromDb(pool, {
+        teamId: String(fixturePayload.away_team_id || "").trim(),
+        teamName: awayTeamName,
+        leagueId: resolvedLeague.id || String(fixturePayload.league_id || "").trim(),
+      }),
+    ]);
+    if (!String(fixturePayload.home_team_id || "").trim() && resolvedHomeTeam.id) {
+      fixturePayload.home_team_id = resolvedHomeTeam.id;
+    }
+    if (!String(fixturePayload.away_team_id || "").trim() && resolvedAwayTeam.id) {
+      fixturePayload.away_team_id = resolvedAwayTeam.id;
+    }
+
+    const fixtureValidationErrors = validateFixtureJson(fixturePayload);
+    if (fixtureValidationErrors.length > 0) {
+      sendJson(res, 400, {
+        error: "Resolved fixture payload is invalid",
+        detail: fixtureValidationErrors,
+      });
+      return;
+    }
+
+    const fixtureResp = await postCmsJson(cmsConfig, cmsConfig.endpoints.fixture, fixturePayload);
+    const fixtureUuid = String(
+      fixtureResp?.fixture_id  ||
+      fixtureResp?.data?.fixture_id ||
+      fixtureResp?.data?.id    ||
+      fixtureResp?.id          ||
+      ""
+    ).trim();
+    if (!fixtureUuid) throw new Error(`Fixture POST returned no ID: ${JSON.stringify(fixtureResp)}`);
+
+    let typeRefId = null;
+    if (pool) {
+      try {
+        const typeRefRows = await pool.query(
+          `SELECT id, type_reference_id FROM type_references WHERE type_value = 'fixture' AND type_value_id = $1 LIMIT 1`,
+          [fixtureUuid]
+        );
+        if (typeRefRows.rows.length > 0) {
+          typeRefId = pickUuidLikeValue(typeRefRows.rows[0].type_reference_id, typeRefRows.rows[0].id);
+        }
+      } catch (e) {
+        console.warn("[json-prepare-publish] DB type-ref lookup failed:", e.message);
+      }
+    }
+
+    if (!typeRefId) {
+      const kickoffDate = String(fixturePayload.game_start_time || "").slice(0, 10);
+      const canonicalName = buildUatCanonicalFixtureName(
+        String(fixturePayload.name || "").trim(),
+        kickoffDate,
+        leagueSlug
+      );
+      const typeRefPayload = {
+        type_value:     "fixture",
+        type_value_id:  fixtureUuid,
+        canonical_name: canonicalName,
+      };
+      const typeRefResp = await postCmsJson(cmsConfig, cmsConfig.endpoints.typeReference, typeRefPayload);
+      typeRefId = pickUuidLikeValue(
+        typeRefResp?.type_reference_id,
+        typeRefResp?.meta?.type_reference_id,
+        typeRefResp?.data?.type_reference_id,
+        typeRefResp?.id,
+        typeRefResp?.meta?.id,
+        typeRefResp?.data?.id,
+      );
+      if (!typeRefId) throw new Error(`Type reference POST returned no ID: ${JSON.stringify(typeRefResp)}`);
+    }
+
+    sendJson(res, 200, { fixture_id: fixtureUuid, type_reference_id: typeRefId });
+  } catch (err) {
+    console.error("[json-prepare-publish]", err.message);
     sendJson(res, 500, { error: err.message });
   }
 }
@@ -2015,6 +2434,24 @@ async function getUpcomingSchedulePayload(leagueCode, { refresh = false, now = n
         fetchedAt: new Date().toISOString(),
       });
     },
+    loadGammaPolymarket: async () => {
+      const gammaAdapter = getBackendFixtureSourceAdapter("gamma-polymarket");
+      if (!gammaAdapter) {
+        return null;
+      }
+      const rawRows = await gammaAdapter.fetchRawRows({
+        leagueCode,
+        env: getActiveRuntimeEnvVars(),
+        timeoutMs: resolveScheduleFetchTimeoutMs(),
+        fetchImpl: fetch,
+      });
+      return gammaAdapter.createFixtureWindowPayload({
+        leagueCode,
+        rawRows,
+        now: resolvedNow,
+        fetchedAt: new Date().toISOString(),
+      });
+    },
     loadPolymarket: async () => {
       const polymarketAdapter = getBackendFixtureSourceAdapter("polymarket");
       const rawRows = await polymarketAdapter.fetchRawRows({
@@ -2071,21 +2508,40 @@ function handleScheduleStatusRequest(res) {
   sendJson(res, 200, { leagues });
 }
 
+async function handleAllSchedulesRequest(res) {
+  const definitions = getLeagueScheduleDefinitions();
+  const results = await Promise.allSettled(
+    definitions.map(def => getUpcomingSchedulePayload(def.code))
+  );
+
+  const schedules = {};
+  const leagues = [];
+  results.forEach((r, i) => {
+    const def = definitions[i];
+    if (r.status === "fulfilled" && r.value?.fixtures?.length) {
+      schedules[def.code] = r.value;
+      leagues.push({ code: def.code, label: def.label, version: r.value.version ?? 0 });
+    }
+  });
+
+  sendJson(res, 200, { leagues, schedules });
+}
+
 async function backgroundRefreshAllSchedules() {
   const codes = [...scheduleCache.keys()];
   if (!codes.length) return;
   console.log(`[schedule-bg] refreshing ${codes.length} league(s): ${codes.join(", ")}`);
-  for (const code of codes) {
-    try {
-      await getUpcomingSchedulePayload(code, { refresh: true });
-      const r = scheduleCache.get(code);
-      console.log(`[schedule-bg] ${code} — version=${r?.version} fixtures=${r?.payload?.fixtures?.length ?? 0}`);
-    } catch (err) {
-      console.warn(`[schedule-bg] refresh failed for "${code}": ${err.message}`);
-    }
-    // Stagger requests to avoid hammering sources simultaneously
-    await new Promise(resolve => setTimeout(resolve, 800));
-  }
+  await Promise.allSettled(
+    codes.map(async (code) => {
+      try {
+        await getUpcomingSchedulePayload(code, { refresh: true });
+        const r = scheduleCache.get(code);
+        console.log(`[schedule-bg] ${code} — version=${r?.version} fixtures=${r?.payload?.fixtures?.length ?? 0}`);
+      } catch (err) {
+        console.warn(`[schedule-bg] refresh failed for "${code}": ${err.message}`);
+      }
+    })
+  );
 }
 
 async function fetchRawScheduleRows(leagueCode) {
@@ -2114,6 +2570,18 @@ async function fetchRawScheduleRows(leagueCode) {
         pool: dbPool,
         leagueNameLike,
         now: resolveScheduleNow(),
+      });
+    },
+    loadGammaPolymarket: async () => {
+      const gammaAdapter = getBackendFixtureSourceAdapter("gamma-polymarket");
+      if (!gammaAdapter) {
+        return null;
+      }
+      return await gammaAdapter.fetchRawRows({
+        leagueCode,
+        env: getActiveRuntimeEnvVars(),
+        timeoutMs: resolveScheduleFetchTimeoutMs(),
+        fetchImpl: fetch,
       });
     },
     loadPolymarket: async () => {
@@ -2532,28 +3000,12 @@ async function resolveCatalogPaths() {
 }
 
 async function resolvePreferredLocalCatalogPaths() {
-  const leagues = await pickFirstExistingPath(DEFAULT_LOCAL_LEAGUES_CSV_CANDIDATES);
-  const teams = await pickFirstExistingPath(DEFAULT_LOCAL_TEAMS_CSV_CANDIDATES);
-  if (!leagues || !teams) {
-    return null;
-  }
-  return {
-    leagues,
-    teams,
-    sourceKind: "workspace-catalog",
-  };
-}
-
-async function pickFirstExistingPath(candidates = []) {
-  for (const candidate of candidates) {
-    if (!candidate) {
-      continue;
-    }
-    if (await pathsExist(candidate)) {
-      return candidate;
+  for (const { leagues, teams } of DEFAULT_LOCAL_CATALOG_CANDIDATE_PAIRS) {
+    if (await pathsExist(leagues, teams)) {
+      return { leagues, teams, sourceKind: "workspace-catalog" };
     }
   }
-  return "";
+  return null;
 }
 
 async function resolveSupplementalCatalogPaths(primaryPaths, runtimeEnv = getActiveRuntimeEnvVars()) {
@@ -2626,8 +3078,13 @@ async function getCatalogPayloadCached() {
     .map((filePath, index) => `${filePath}:${allStats[index]?.mtimeMs || 0}`)
   ].join("|");
   if (catalogCache && catalogCache.key === cacheKey) {
+    // Re-normalize with the current time on every hit — normalizeLeagueStartWindows is
+    // time-sensitive (it advances past start dates), so the cached raw leagues must be
+    // re-evaluated rather than serving the frozen normalized slice.
+    const normalizedLeagues = normalizeLeagueStartWindows(catalogCache.rawLeagues, { now: new Date() });
     return {
       ...catalogCache.payload,
+      leagues: normalizedLeagues,
       cache: { hit: true, key: cacheKey, loaded_at: catalogCache.payload.loaded_at },
     };
   }
@@ -2637,11 +3094,11 @@ async function getCatalogPayloadCached() {
     Promise.all(teamFiles.map((filePath) => fs.readFile(filePath, "utf8"))),
   ]);
 
-  const leagues = mergeCatalogRows(
+  const rawLeagues = mergeCatalogRows(
     leagueCsvs.map((csv) => parseSemicolonCsv(csv)),
     ["league_id", "id"]
   );
-  const normalizedLeagues = normalizeLeagueStartWindows(leagues, { now: new Date() });
+  const normalizedLeagues = normalizeLeagueStartWindows(rawLeagues, { now: new Date() });
   const teams = mergeCatalogRows(
     teamCsvs.map((csv) => parseSemicolonCsv(csv)),
     ["team_id", "id"]
@@ -2665,6 +3122,7 @@ async function getCatalogPayloadCached() {
 
   catalogCache = {
     key: cacheKey,
+    rawLeagues,
     payload,
   };
 
@@ -2730,6 +3188,152 @@ function normalizeDbLookupValue(value) {
     return text.slice(1, -1).trim();
   }
   return text;
+}
+
+function slugifyLookupValue(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+async function resolveLeagueRecordFromDb(pool, { leagueId = "", leagueName = "", leagueSlug = "" } = {}) {
+  const fallbackSlug = slugifyLookupValue(leagueSlug || leagueName) || "league";
+  const fallback = {
+    id: String(leagueId || "").trim(),
+    name: String(leagueName || "").trim(),
+    alternateName: "",
+    slug: fallbackSlug,
+  };
+  if (!pool) {
+    return fallback;
+  }
+
+  const normalizedLeagueId = String(leagueId || "").trim();
+  if (normalizedLeagueId) {
+    const exact = await pool.query(
+      `SELECT league_id, name, alternate_name
+         FROM leagues
+        WHERE league_id = $1
+        LIMIT 1`,
+      [normalizedLeagueId]
+    );
+    if (exact.rows[0]) {
+      const row = exact.rows[0];
+      return {
+        id: String(row.league_id || "").trim(),
+        name: String(row.name || "").trim(),
+        alternateName: String(row.alternate_name || "").trim(),
+        slug: slugifyLookupValue(row.alternate_name || row.name) || fallbackSlug,
+      };
+    }
+  }
+
+  const normalizedSlug = slugifyLookupValue(leagueSlug || leagueName);
+  const normalizedName = String(leagueName || "").trim();
+  if (!normalizedSlug && !normalizedName) {
+    return fallback;
+  }
+
+  const query = await pool.query(
+    `SELECT league_id, name, alternate_name
+       FROM leagues
+      WHERE (
+        regexp_replace(lower(coalesce(alternate_name, name)), '[^a-z0-9]+', '-', 'g') = $1
+        OR regexp_replace(lower(name), '[^a-z0-9]+', '-', 'g') = $1
+        OR name ILIKE $2
+        OR alternate_name ILIKE $2
+      )
+      ORDER BY
+        CASE
+          WHEN regexp_replace(lower(coalesce(alternate_name, name)), '[^a-z0-9]+', '-', 'g') = $1 THEN 0
+          WHEN regexp_replace(lower(name), '[^a-z0-9]+', '-', 'g') = $1 THEN 1
+          WHEN lower(name) = lower($3) THEN 2
+          WHEN lower(alternate_name) = lower($3) THEN 3
+          ELSE 4
+        END,
+        lower(name)
+      LIMIT 1`,
+    [normalizedSlug || fallbackSlug, `%${normalizedName || leagueSlug}%`, normalizedName]
+  );
+
+  if (!query.rows[0]) {
+    return fallback;
+  }
+
+  const row = query.rows[0];
+  return {
+    id: String(row.league_id || "").trim(),
+    name: String(row.name || "").trim(),
+    alternateName: String(row.alternate_name || "").trim(),
+    slug: slugifyLookupValue(row.alternate_name || row.name) || fallbackSlug,
+  };
+}
+
+async function resolveTeamRecordFromDb(pool, { teamId = "", teamName = "", leagueId = "" } = {}) {
+  const fallback = {
+    id: String(teamId || "").trim(),
+    name: String(teamName || "").trim(),
+    alternateName: String(teamName || "").trim(),
+  };
+  if (!pool) {
+    return fallback;
+  }
+
+  const normalizedTeamId = String(teamId || "").trim();
+  if (normalizedTeamId) {
+    const exact = await pool.query(
+      `SELECT team_id, name, alternate_name
+         FROM teams
+        WHERE team_id = $1
+        LIMIT 1`,
+      [normalizedTeamId]
+    );
+    if (exact.rows[0]) {
+      const row = exact.rows[0];
+      return {
+        id: String(row.team_id || "").trim(),
+        name: String(row.name || "").trim(),
+        alternateName: String(row.alternate_name || row.name || "").trim(),
+      };
+    }
+  }
+
+  const normalizedTeamName = String(teamName || "").trim();
+  if (!normalizedTeamName) {
+    return fallback;
+  }
+
+  const params = [normalizedTeamName, `%${normalizedTeamName}%`];
+  let sql = `SELECT team_id, name, alternate_name
+       FROM teams
+      WHERE (name ILIKE $2 OR alternate_name ILIKE $2)`;
+  if (String(leagueId || "").trim()) {
+    params.push(String(leagueId || "").trim());
+    sql += ` AND league_id = $3`;
+  }
+  sql += `
+      ORDER BY
+        CASE
+          WHEN lower(name) = lower($1) THEN 0
+          WHEN lower(alternate_name) = lower($1) THEN 1
+          ELSE 2
+        END,
+        lower(name)
+      LIMIT 1`;
+
+  const query = await pool.query(sql, params);
+  if (!query.rows[0]) {
+    return fallback;
+  }
+
+  const row = query.rows[0];
+  return {
+    id: String(row.team_id || "").trim(),
+    name: String(row.name || "").trim(),
+    alternateName: String(row.alternate_name || row.name || "").trim(),
+  };
 }
 
 function buildResponseHeaders(contentType, contentLength, extraHeaders = {}, { cacheControl = "no-store" } = {}) {
@@ -2900,6 +3504,357 @@ function classifyExistingBatchParentMarketRows(rows = [], {
   });
 }
 
+function sortCmsBatchFixturesByKickoff(fixtures) {
+  if (!Array.isArray(fixtures) || !fixtures.length) return [];
+  return [...fixtures].sort((a, b) => {
+    const aKey = `${String(a?.fixture_date || "")} ${String(a?.kickoff_time_utc || "")}`;
+    const bKey = `${String(b?.fixture_date || "")} ${String(b?.kickoff_time_utc || "")}`;
+    if (aKey !== bKey) return aKey < bKey ? -1 : 1;
+    return String(a?.event_name || "").localeCompare(String(b?.event_name || ""));
+  });
+}
+
+async function pollUntil({ fn, attempts = 5, delayMs = 500 } = {}) {
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0 && delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+    const result = await fn();
+    if (result) return result;
+  }
+  return null;
+}
+
+function _matchRowsToPublishKey(allRows, publishKey) {
+  const parts = String(publishKey || "").split("|");
+  const family = parts[0] || "";
+  const line = String(parts[1] || "0").replace(/^-/, "");
+  const byId = new Map();
+  for (const row of allRows) {
+    const pmId = String(row.parent_market_id || "");
+    if (!pmId) continue;
+    if (!byId.has(pmId)) byId.set(pmId, []);
+    byId.get(pmId).push(row);
+  }
+  for (const [, rows] of byId) {
+    const head = rows[0] || {};
+    const rowFamily = String(head.parent_market_family || "").toLowerCase();
+    const rowLine = String(head.market_line || "").replace(/^-/, "");
+    if (rowFamily === family && rowLine === line) return rows;
+  }
+  return null;
+}
+
+async function buildCmsSelectedPreflight({ envelope, config = {}, pool, resolveFixtureCandidate }) {
+  const payload = envelope?.payload || {};
+  const providedTypeReferenceId = String(payload.type_reference_id || "").trim();
+  const selectedPublishItems = Array.isArray(payload.selected_publish_items) ? payload.selected_publish_items : [];
+  const forceRepublish = Boolean(payload.force_republish);
+
+  const resolvedFixture = await resolveFixtureCandidate(payload);
+
+  let fixtureRecord = null;
+  const gameId = String(resolvedFixture?.game_id || resolvedFixture?.gameId || "").trim();
+  if (pool && gameId) {
+    const result = await pool.query(
+      `SELECT fixture_id, name, league_id, home_team_id, away_team_id, game_start_time, match_day FROM fixtures WHERE game_id = $1 LIMIT 1`,
+      [gameId]
+    );
+    fixtureRecord = result.rows[0] || null;
+  }
+
+  let typeReferenceRecord = null;
+  if (pool) {
+    if (providedTypeReferenceId) {
+      const result = await pool.query(
+        `SELECT type_reference_id, type_value_id, canonical_name FROM type_references WHERE type_reference_id = $1 LIMIT 5`,
+        [providedTypeReferenceId]
+      );
+      const found = result.rows[0] || null;
+      if (found && fixtureRecord && found.type_value_id !== fixtureRecord.fixture_id) {
+        throw new InvalidIntegrationPayloadError(
+          "The provided type_reference_id does not belong to the selected fixture.",
+          { issues: ["payload.type_reference_id"] }
+        );
+      }
+      typeReferenceRecord = found || null;
+    } else if (fixtureRecord) {
+      const result = await pool.query(
+        `SELECT type_reference_id, type_value_id, canonical_name FROM type_references WHERE type_value_id = $1 LIMIT 1`,
+        [fixtureRecord.fixture_id]
+      );
+      typeReferenceRecord = result.rows[0] || null;
+    }
+  }
+
+  let existingParentRows = [];
+  const resolvedTypeRefId = typeReferenceRecord?.type_reference_id || "";
+  if (pool && resolvedTypeRefId) {
+    const result = await pool.query(
+      `SELECT pm.parent_market_id, pm.type_reference_id, pm.title, pm.parent_market_family, pm.market_line, pm.rules AS parent_rules, pm.is_cross_matching_enabled, pm.markets_open_time, pm.league_id, m.market_id, m.name AS market_name, m.tick_size, m.market_code, m.rules AS market_rules, m.team_id FROM parent_markets pm LEFT JOIN markets m ON m.parent_market_id = pm.parent_market_id WHERE pm.type_reference_id = $1`,
+      [resolvedTypeRefId]
+    );
+    existingParentRows = result.rows || [];
+  }
+
+  const rowsByPublishKey = new Map();
+  const byParentId = new Map();
+  for (const row of existingParentRows) {
+    const pmId = String(row.parent_market_id || "");
+    if (!pmId) continue;
+    if (!byParentId.has(pmId)) byParentId.set(pmId, []);
+    byParentId.get(pmId).push(row);
+  }
+  for (const [, rows] of byParentId) {
+    const key = buildExistingPublishKeyFromRows(rows, {
+      selectedFixture: payload.fixture_payload || {},
+      fixtureRecord,
+    });
+    if (!key) continue;
+    if (!rowsByPublishKey.has(key)) rowsByPublishKey.set(key, rows);
+    else rowsByPublishKey.get(key).push(...rows);
+  }
+
+  const preflightItems = selectedPublishItems.map((item) => {
+    const publishKey = String(item?.publish_key || "").trim();
+    const parentMarketPayload = item?.parent_market_payload || null;
+    const matchingRows = rowsByPublishKey.get(publishKey) || [];
+
+    if (!matchingRows.length) {
+      return { publish_key: publishKey, parent_market_payload: parentMarketPayload, status: "selectable" };
+    }
+    if (matchingRows.some((r) => r.market_id == null)) {
+      return { publish_key: publishKey, parent_market_payload: parentMarketPayload, status: "half_prepared", existingRows: matchingRows };
+    }
+    if (forceRepublish) {
+      return { publish_key: publishKey, parent_market_payload: parentMarketPayload, status: "blocked", existingRows: matchingRows };
+    }
+    return { publish_key: publishKey, parent_market_payload: parentMarketPayload, status: "existing", existingRows: matchingRows };
+  });
+
+  return {
+    preflightItems,
+    fixtureRecord,
+    typeReferenceRecord,
+    resolvedFixture,
+    resolvedTypeRefId,
+    forceRepublish,
+    providedTypeReferenceId,
+    fixturePayload: payload.fixture_payload || {},
+    typeReferencePayload: payload.type_reference_payload || {},
+    selectedPublishItems,
+  };
+}
+
+async function executeCmsSelectedPublish({
+  envelope,
+  config = {},
+  pool,
+  pollUntilFn,
+  createRunIdFn,
+  publishFixtureFn,
+  publishTypeReferenceFn,
+  publishParentMarketFn,
+  runStore,
+  preflight,
+}) {
+  const payload = envelope?.payload || {};
+  const providedTypeReferenceId = String(payload.type_reference_id || "").trim();
+  const fixturePayload = payload.fixture_payload || {};
+  const typeReferencePayload = payload.type_reference_payload || {};
+
+  const runId =
+    (typeof createRunIdFn === "function" ? createRunIdFn() : null) ||
+    `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const runRecord = {
+    run_id: runId,
+    status: "running",
+    step_results: {},
+    parent_market_results: {},
+    aggregate: { published: 0, failed: 0, blocked: 0, existing: 0 },
+    summary: "",
+    detail: "",
+    started_at: new Date().toISOString(),
+    completed_at: null,
+  };
+  if (runStore) runStore.set(runId, runRecord);
+
+  const preflightItems = preflight?.preflightItems || [];
+  const skipFixtureAndTypeRef = Boolean(providedTypeReferenceId);
+  let resolvedTypeRefId = providedTypeReferenceId || preflight?.resolvedTypeRefId || "";
+  let resolvedFixtureRecord = preflight?.fixtureRecord || null;
+
+  if (skipFixtureAndTypeRef) {
+    runRecord.step_results.fixture = { status: "skipped" };
+    runRecord.step_results.type_reference = { status: "skipped" };
+  } else {
+    try {
+      await publishFixtureFn({ fixturePayload, config });
+      runRecord.step_results.fixture = { status: "created" };
+
+      if (pollUntilFn && pool) {
+        const gameId = String(
+          preflight?.resolvedFixture?.game_id || preflight?.resolvedFixture?.gameId || ""
+        ).trim();
+        if (gameId) {
+          const found = await pollUntilFn({
+            fn: async () => {
+              const r = await pool.query(
+                `SELECT fixture_id, match_day FROM fixtures WHERE game_id = $1 LIMIT 1`,
+                [gameId]
+              );
+              return r.rows[0] || null;
+            },
+            attempts: 10,
+          });
+          if (found?.fixture_id) resolvedFixtureRecord = found;
+        }
+      }
+    } catch (err) {
+      runRecord.step_results.fixture = { status: "failed", error: String(err?.message || err) };
+      runRecord.status = "failed";
+      runRecord.completed_at = new Date().toISOString();
+      return { runRecord };
+    }
+
+    try {
+      await publishTypeReferenceFn({ typeReferencePayload, config });
+      runRecord.step_results.type_reference = { status: "created" };
+
+      if (pollUntilFn && pool && resolvedFixtureRecord?.fixture_id) {
+        const found = await pollUntilFn({
+          fn: async () => {
+            const r = await pool.query(
+              `SELECT type_reference_id FROM type_references WHERE type_value_id = $1 LIMIT 1`,
+              [resolvedFixtureRecord.fixture_id]
+            );
+            return r.rows[0] || null;
+          },
+          attempts: 10,
+        });
+        if (found?.type_reference_id) resolvedTypeRefId = found.type_reference_id;
+      }
+    } catch (err) {
+      runRecord.step_results.type_reference = { status: "failed", error: String(err?.message || err) };
+      runRecord.status = "failed";
+      runRecord.completed_at = new Date().toISOString();
+      return { runRecord };
+    }
+  }
+
+  const matchDay = Number(resolvedFixtureRecord?.match_day || 0) + 1;
+
+  for (const item of preflightItems) {
+    const publishKey = String(item?.publish_key || "").trim();
+    const itemStatus = String(item?.status || "");
+
+    if (itemStatus === "existing") {
+      runRecord.parent_market_results[publishKey] = { status: "existing" };
+      runRecord.aggregate.existing++;
+      continue;
+    }
+
+    if (itemStatus === "blocked") {
+      const existingRows = item.existingRows || [];
+      const existingReconstructed = reconstructParentMarketPayloadFromRows(existingRows);
+      const providedCanonical = canonicalizeParentMarketComparisonPayload(item.parent_market_payload);
+      const existingCanonical = canonicalizeParentMarketComparisonPayload(existingReconstructed);
+
+      if (providedCanonical === existingCanonical) {
+        runRecord.parent_market_results[publishKey] = { status: "blocked" };
+        runRecord.aggregate.blocked++;
+        continue;
+      }
+
+      const pm = item.parent_market_payload?.parent_market || {};
+      const modifiedPayload = {
+        ...item.parent_market_payload,
+        parent_market: {
+          ...pm,
+          type_reference_id: resolvedTypeRefId || pm.type_reference_id || "",
+          rules: `${String(pm.rules || "")} [Match Day ${matchDay}]`,
+        },
+      };
+      try {
+        await publishParentMarketFn({ parentMarketPayload: modifiedPayload, publishKey, config });
+        if (pollUntilFn && pool && resolvedTypeRefId) {
+          await pollUntilFn({
+            fn: async () => {
+              const r = await pool.query(
+                `SELECT pm.parent_market_id, pm.parent_market_family, pm.market_line, m.market_id FROM parent_markets pm LEFT JOIN markets m ON m.parent_market_id = pm.parent_market_id WHERE pm.type_reference_id = $1`,
+                [resolvedTypeRefId]
+              );
+              const rows = r.rows || [];
+              const matched = _matchRowsToPublishKey(rows, publishKey);
+              if (!matched || matched.some((row) => row.market_id == null)) return null;
+              return matched;
+            },
+            attempts: 10,
+          });
+        }
+        runRecord.parent_market_results[publishKey] = { status: "published" };
+        runRecord.aggregate.published++;
+      } catch (err) {
+        runRecord.parent_market_results[publishKey] = { status: "failed", error: String(err?.message || err) };
+        runRecord.aggregate.failed++;
+      }
+      continue;
+    }
+
+    const pm = item.parent_market_payload?.parent_market || {};
+    const modifiedPayload = {
+      ...item.parent_market_payload,
+      parent_market: { ...pm, type_reference_id: resolvedTypeRefId || pm.type_reference_id || "" },
+    };
+    try {
+      await publishParentMarketFn({ parentMarketPayload: modifiedPayload, publishKey, config });
+      if (pollUntilFn && pool && resolvedTypeRefId) {
+        await pollUntilFn({
+          fn: async () => {
+            const r = await pool.query(
+              `SELECT pm.parent_market_id, pm.parent_market_family, pm.market_line, m.market_id FROM parent_markets pm LEFT JOIN markets m ON m.parent_market_id = pm.parent_market_id WHERE pm.type_reference_id = $1`,
+              [resolvedTypeRefId]
+            );
+            const rows = r.rows || [];
+            const matched = _matchRowsToPublishKey(rows, publishKey);
+            if (!matched || matched.some((row) => row.market_id == null)) return null;
+            return matched;
+          },
+          attempts: 10,
+        });
+      }
+      runRecord.parent_market_results[publishKey] = { status: "published" };
+      runRecord.aggregate.published++;
+    } catch (err) {
+      runRecord.parent_market_results[publishKey] = { status: "failed", error: String(err?.message || err) };
+      runRecord.aggregate.failed++;
+    }
+  }
+
+  const { published, failed } = runRecord.aggregate;
+  runRecord.status = failed > 0 && published > 0 ? "partial" : failed > 0 ? "failed" : "completed";
+  runRecord.summary =
+    runRecord.status === "completed"
+      ? "Publish completed."
+      : runRecord.status === "partial"
+        ? "Publish partially completed."
+        : "Publish failed.";
+
+  if (skipFixtureAndTypeRef) {
+    runRecord.detail = `Used existing type reference and published ${published} selected market${published !== 1 ? "s" : ""}.`;
+  } else {
+    const fixStep = runRecord.step_results.fixture?.status;
+    const trStep = runRecord.step_results.type_reference?.status;
+    const parts = [];
+    if (fixStep === "created") parts.push("fixture");
+    if (trStep === "created") parts.push("type reference");
+    if (published > 0) parts.push(`${published} selected market${published !== 1 ? "s" : ""}`);
+    runRecord.detail = parts.length > 0 ? `Created ${parts.join(", ")}.` : "";
+  }
+
+  runRecord.completed_at = new Date().toISOString();
+  return { runRecord };
+}
+
 export {
   resolveCatalogPaths,
   getCatalogPayloadCached,
@@ -2914,5 +3869,9 @@ export {
   deriveBatchFixtureStatusFromMarkets,
   deriveBatchRunStatusFromFixtures,
   classifyExistingBatchParentMarketRows,
+  sortCmsBatchFixturesByKickoff,
+  pollUntil,
+  buildCmsSelectedPreflight,
+  executeCmsSelectedPublish,
   server,
 };

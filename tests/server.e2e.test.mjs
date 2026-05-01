@@ -21,6 +21,23 @@ function nextPort() {
   return 24000 + Math.floor(Math.random() * 2000);
 }
 
+function createValidFixturePayload(name = "Fulham vs Aston Villa") {
+  return {
+    name,
+    league_id: "11111111-1111-1111-1111-111111111111",
+    home_team_id: "22222222-2222-2222-2222-222222222222",
+    away_team_id: "33333333-3333-3333-3333-333333333333",
+    format: null,
+    logo_url: "https://public-assets.pred.app/market-assets/fixture_128x128.png",
+    theme_color: "#FFFFFF",
+    match_day: 34,
+    match_week: 0,
+    location: "",
+    venue: "",
+    game_start_time: "2026-04-25T14:30:00Z",
+  };
+}
+
 async function startCmsStub({
   port,
   failStep = "",
@@ -131,7 +148,7 @@ test("server e2e: static auth, api auth, and rate limiting", async (t) => {
   });
   assert.equal(staticAllowed.status, 200);
   const html = await staticAllowed.text();
-  assert.match(html, /Fixture & Parent Market Verifier/i);
+  assert.match(html, /Market Ops/i);
 
   const apiDenied = await fetch(`${started.baseUrl}/api/catalog/meta`);
   assert.equal(apiDenied.status, 401);
@@ -283,7 +300,7 @@ test("server e2e: CMS publish posts fixture, type reference, and parent market i
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      fixture_json: { name: "Fulham vs Aston Villa" },
+      fixture_json: createValidFixturePayload("Fulham vs Aston Villa"),
       type_reference_payloads: {
         fixture: { canonical_name: "fulham-vs-aston-villa-2026-04-25" },
       },
@@ -312,7 +329,7 @@ test("server e2e: CMS publish posts fixture, type reference, and parent market i
       "/api/v1/cms/internal/parent-and-market/",
     ]
   );
-  assert.deepEqual(cms.requests[0]?.body, { name: "Fulham vs Aston Villa" });
+  assert.deepEqual(cms.requests[0]?.body, createValidFixturePayload("Fulham vs Aston Villa"));
   assert.deepEqual(cms.requests[1]?.body, { canonical_name: "fulham-vs-aston-villa-2026-04-25" });
   assert.deepEqual(cms.requests[2]?.body, { parent_market: { title: "Fulham vs Aston Villa" }, markets: [] });
 });
@@ -355,7 +372,7 @@ test("server e2e: CMS publish stops when an intermediate step fails", async (t) 
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      fixture_payload: { name: "Fixture One" },
+      fixture_payload: createValidFixturePayload("Fixture One"),
       type_reference_payload: { canonical_name: "fixture-one-2026-04-25" },
       parent_market_payload: { parent_market: { title: "Fixture One" }, markets: [] },
     }),
@@ -372,6 +389,60 @@ test("server e2e: CMS publish stops when an intermediate step fails", async (t) 
       "/api/v1/cms/internal/type-reference",
     ]
   );
+});
+
+test("server e2e: CMS publish rejects fixture payloads missing team ids before calling CMS", async (t) => {
+  const port = nextPort();
+  const cmsPort = nextPort();
+  const bearer = "api-test-token";
+
+  const cms = await startCmsStub({ port: cmsPort });
+  t.after(async () => {
+    await cms.close();
+  });
+
+  const started = await startServerForTest({
+    cwd: WORKSPACE,
+    port,
+    env: {
+      APP_ENV: "mainnet",
+      API_BEARER_TOKEN: bearer,
+      LEAGUES_CSV_PATH: LEAGUES_CSV,
+      TEAMS_CSV_PATH: TEAMS_CSV,
+      COMP_SERVICE_INTERNAL_HOST: cms.baseUrl,
+    },
+  });
+
+  if (started.skipReason) {
+    t.skip(started.skipReason);
+    return;
+  }
+
+  t.after(async () => {
+    await started.stop();
+  });
+
+  const response = await fetch(`${started.baseUrl}/api/cms/publish`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${bearer}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      fixture_payload: {
+        ...createValidFixturePayload("Fixture Two"),
+        home_team_id: "",
+      },
+      type_reference_payload: { canonical_name: "fixture-two-2026-04-25" },
+      parent_market_payload: { parent_market: { title: "Fixture Two" }, markets: [] },
+    }),
+  });
+
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.equal(body?.error, "Invalid fixture payload");
+  assert.deepEqual(body?.detail, ["home_team_id is required from CSV team catalog."]);
+  assert.equal(cms.requests.length, 0);
 });
 
 test("server e2e: multi-league schedule contracts stay normalized across providers", async (t) => {
@@ -459,6 +530,7 @@ test("server e2e: schedule endpoint validates request params and surfaces provid
       SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH: "",
       SPORTSDATA_API_KEY: "",
       POLYMARKET_SCHEDULE_ENABLED: "0",
+      GAMMA_POLYMARKET_ENABLED: "0",
       LSPORTS_SCHEDULE_CSV_PATH: `${WORKSPACE}/tests/fixtures/does-not-exist.csv`,
       SCHEDULE_NOW_ISO: "2026-03-18T14:00:00Z",
     },
@@ -481,7 +553,7 @@ test("server e2e: schedule endpoint validates request params and surfaces provid
   assert.equal(unsupportedLeague.status, 400);
   assert.match(
     String((await unsupportedLeague.json())?.detail || ""),
-    /\?league=epl, \?league=ucl, \?league=laliga, \?league=seriea, \?league=bundesliga, \?league=ligue1, \?league=europa, \?league=fifa-worldcup, or \?league=fifa-friendlies/i
+    /\?league=epl.*\?league=ucl.*\?league=laliga.*\?league=seriea.*\?league=bundesliga.*\?league=uecl/i
   );
 
   const invalidNow = await fetch(`${started.baseUrl}/api/schedules/upcoming?league=epl&now=not-a-date`, {

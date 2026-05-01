@@ -1,15 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
-import { fetchLeagues, fetchFixtures, fetchScheduleStatus } from '../api.js'
+import { fetchAllSchedules, fetchScheduleStatus } from '../api.js'
 
-const POLL_INTERVAL_MS = 60_000 // 1 minute — checks versions, fetches only if changed
+const POLL_INTERVAL_MS = 60_000
 
-function normalizeFixture(f, league) {
+function normalizeFixture(f, leagueCode, leagueLabel) {
   return {
-    id:         f.providerFixtureId || f.fixture_id || `${league.code}-${f.eventName}`,
+    id:         f.providerFixtureId || f.fixture_id || `${leagueCode}-${f.eventName}`,
     home:       f.homeTeamName  || '',
     away:       f.awayTeamName  || '',
-    league:     league.label    || league.code,
-    leagueCode: league.code,
+    league:     leagueLabel    || leagueCode,
+    leagueCode,
     kickoff:    f.kickoffIso    || `${f.fixtureDate}T${f.kickoffTimeUtc}:00Z`,
     matchday:   f.matchDay      || null,
     gameId:     f.gameId        || null,
@@ -31,7 +31,7 @@ export function useFixtures() {
   const versionMapRef  = useRef(new Map()) // leagueCode → version
   const leagueListRef  = useRef([])
 
-  // ── Initial load ─────────────────────────────────────────────────────────────
+  // ── Initial load: single request for all leagues ─────────────────────────
   useEffect(() => {
     let cancelled = false
 
@@ -39,26 +39,24 @@ export function useFixtures() {
       setLoading(true)
       setError(null)
       try {
-        const leagueList = await fetchLeagues()
+        const data = await fetchAllSchedules()
         if (cancelled) return
+
+        const leagueList = data.leagues || []
         setLeagues(leagueList)
         leagueListRef.current = leagueList
 
-        const results = await Promise.allSettled(leagueList.map(l => fetchFixtures(l.code)))
-        if (cancelled) return
-
         const fMap = new Map()
         const vMap = new Map()
-        results.forEach((r, i) => {
-          if (r.status !== 'fulfilled') return
-          const payload = r.value
-          const league  = leagueList[i]
-          if (payload.version != null) vMap.set(league.code, payload.version)
-          ;(Array.isArray(payload.fixtures) ? payload.fixtures : []).forEach(f => {
-            const norm = normalizeFixture(f, league)
+        for (const league of leagueList) {
+          const sched = data.schedules?.[league.code]
+          if (!sched) continue
+          if (sched.version != null) vMap.set(league.code, sched.version)
+          for (const f of Array.isArray(sched.fixtures) ? sched.fixtures : []) {
+            const norm = normalizeFixture(f, league.code, league.label)
             fMap.set(norm.id, norm)
-          })
-        })
+          }
+        }
 
         fixtureMapRef.current = fMap
         versionMapRef.current = vMap
@@ -74,34 +72,39 @@ export function useFixtures() {
     return () => { cancelled = true }
   }, [])
 
-  // ── Background poll: check versions, append only new fixtures ─────────────
+  // ── Background poll: check versions, re-fetch only changed leagues ────────
   useEffect(() => {
     const timer = setInterval(async () => {
       const leagueList = leagueListRef.current
       if (!leagueList.length) return
       try {
         const status = await fetchScheduleStatus()
-        const changed = leagueList.filter(l => {
-          const serverVer = status.leagues?.[l.code]?.version
-          return serverVer != null && serverVer !== versionMapRef.current.get(l.code)
-        })
-        if (!changed.length) return
+        const changedCodes = new Set(
+          leagueList
+            .filter(l => {
+              const serverVer = status.leagues?.[l.code]?.version
+              return serverVer != null && serverVer !== versionMapRef.current.get(l.code)
+            })
+            .map(l => l.code)
+        )
+        if (!changedCodes.size) return
 
-        const results = await Promise.allSettled(changed.map(l => fetchFixtures(l.code)))
+        // One round-trip gets the refreshed data for all changed leagues
+        const data = await fetchAllSchedules()
         let anyNew = false
-        results.forEach((r, i) => {
-          if (r.status !== 'fulfilled') return
-          const payload = r.value
-          const league  = changed[i]
-          if (payload.version != null) versionMapRef.current.set(league.code, payload.version)
-          ;(Array.isArray(payload.fixtures) ? payload.fixtures : []).forEach(f => {
-            const norm = normalizeFixture(f, league)
+        for (const league of leagueList) {
+          if (!changedCodes.has(league.code)) continue
+          const sched = data.schedules?.[league.code]
+          if (!sched) continue
+          if (sched.version != null) versionMapRef.current.set(league.code, sched.version)
+          for (const f of Array.isArray(sched.fixtures) ? sched.fixtures : []) {
+            const norm = normalizeFixture(f, league.code, league.label)
             if (!fixtureMapRef.current.has(norm.id)) {
               fixtureMapRef.current.set(norm.id, norm)
               anyNew = true
             }
-          })
-        })
+          }
+        }
         if (anyNew) setFixtures(sortedFromMap(fixtureMapRef.current))
       } catch { /* ignore poll errors silently */ }
     }, POLL_INTERVAL_MS)

@@ -16,17 +16,23 @@ export async function switchEnvironment(code) {
   return res.json()
 }
 
-export async function fetchLeagues() {
-  const res = await fetch(`${BASE}/api/schedules/leagues`)
-  if (!res.ok) throw new Error(`fetchLeagues failed: ${res.status}`)
-  const data = await res.json()
-  return Array.isArray(data.leagues) ? data.leagues : []
+export async function fetchAllSchedules() {
+  const res = await fetch(`${BASE}/api/schedules/all`)
+  if (!res.ok) throw new Error(`fetchAllSchedules failed: ${res.status}`)
+  return res.json()
 }
 
 export async function fetchScheduleStatus() {
   const res = await fetch(`${BASE}/api/schedules/status`)
   if (!res.ok) throw new Error(`fetchScheduleStatus failed: ${res.status}`)
   return res.json()
+}
+
+export async function fetchLeagues() {
+  const res = await fetch(`${BASE}/api/schedules/leagues`)
+  if (!res.ok) throw new Error(`fetchLeagues failed: ${res.status}`)
+  const data = await res.json()
+  return Array.isArray(data.leagues) ? data.leagues : []
 }
 
 export async function fetchFixtures(leagueCode) {
@@ -78,6 +84,60 @@ export async function generateParentMarket(params) {
   })
   const data = await res.json()
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  return data
+}
+
+export async function searchJsonTeams(q, leagueId = '') {
+  const params = new URLSearchParams({ q })
+  if (leagueId) params.set('league_id', leagueId)
+  const res = await fetch(`${BASE}/api/json/teams?${params}`)
+  if (!res.ok) return { teams: [] }
+  return res.json()
+}
+
+export async function buildJsonOutputs({ fixtureName, homeTeam, homeTeamId, homeTeamAlt, awayTeam, awayTeamId, awayTeamAlt, leagueName, leagueId, kickoffIso, typeReferenceId, leaves }) {
+  const res = await fetch(`${BASE}/api/json/build-outputs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      fixture_name:      fixtureName,
+      home_team:         homeTeam,
+      home_team_id:      homeTeamId,
+      home_team_alt:     homeTeamAlt,
+      away_team:         awayTeam,
+      away_team_id:      awayTeamId,
+      away_team_alt:     awayTeamAlt,
+      league_name:       leagueName,
+      league_id:         leagueId,
+      kickoff_iso:       kickoffIso,
+      type_reference_id: typeReferenceId,
+      leaves,
+    }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  return data
+}
+
+export async function prepareJsonPublish(fixturePayload, leagueSlug = '', homeTeamName = '', awayTeamName = '') {
+  const res = await fetch(`${BASE}/api/json/prepare-publish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fixture_payload: fixturePayload, league_slug: leagueSlug, home_team_name: homeTeamName, away_team_name: awayTeamName }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  return data
+}
+
+export async function createCmsFixture({ gameId, source, parentMarkets, cname, appendix = '' }) {
+  const res = await fetch(`${BASE}/api/cms/fixture-create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ game_id: gameId, source, parent_markets: parentMarkets, cname, appendix }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data?.error?.message || data?.error || `HTTP ${res.status}`)
   return data
 }
 

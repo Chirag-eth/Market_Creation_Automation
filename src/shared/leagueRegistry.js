@@ -17,6 +17,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     competitionIdEnvName: "SPORTSDATA_EPL_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_EPL_LEAGUE_SLUG",
+    gammaTagSlugs: ["EPL", "premier-league"],
   },
   {
     code: "ucl",
@@ -34,6 +35,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     competitionIdEnvName: "SPORTSDATA_UCL_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_UCL_LEAGUE_SLUG",
+    gammaTagSlugs: ["ucl", "champions-league", "uefa-champions-league"],
   },
   {
     code: "laliga",
@@ -53,6 +55,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     fixturePathEnvName: "SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_LALIGA_LEAGUE_SLUG",
     lsportsLeagueNameLike: "%LaLiga%",
+    gammaTagSlugs: ["la-liga"],
   },
   {
     code: "seriea",
@@ -70,6 +73,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     fixturePathEnvName: "SPORTSDATA_SERIEA_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_SERIEA_LEAGUE_SLUG",
     lsportsLeagueNameLike: "%Serie A%",
+    gammaTagSlugs: ["serie-a"],
   },
   {
     code: "bundesliga",
@@ -87,6 +91,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     fixturePathEnvName: "SPORTSDATA_BUNDESLIGA_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_BUNDESLIGA_LEAGUE_SLUG",
     lsportsLeagueNameLike: "%Bundesliga%",
+    gammaTagSlugs: ["bundesliga"],
   },
   {
     code: "ligue1",
@@ -104,6 +109,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     fixturePathEnvName: "SPORTSDATA_LIGUE1_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_LIGUE1_LEAGUE_SLUG",
     lsportsLeagueNameLike: "%Ligue 1%",
+    gammaTagSlugs: ["ligue-1"],
   },
   {
     code: "europa",
@@ -121,6 +127,27 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     fixturePathEnvName: "SPORTSDATA_EUROPA_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_EUROPA_LEAGUE_SLUG",
     lsportsLeagueNameLike: "%Europa League%",
+    gammaTagSlugs: ["uel", "europa-league", "uefa-europa-league"],
+  },
+  {
+    code: "uecl",
+    label: "Conference League",
+    icon: "⬡",
+    aliases: [
+      "uecl",
+      "conference league",
+      "conference",
+      "uefa conference league",
+      "uefa europa conference league",
+      "europa conference league",
+      "ecl",
+    ],
+    defaultCompetitionId: null,
+    competitionIdEnvName: "SPORTSDATA_UECL_COMPETITION_ID",
+    fixturePathEnvName: "SPORTSDATA_UECL_SCHEDULE_FIXTURE_PATH",
+    polymarketLeagueSlugEnvName: "POLYMARKET_UECL_LEAGUE_SLUG",
+    lsportsLeagueNameLike: "%Conference League%",
+    gammaTagSlugs: ["uecl", "europa-conference-league", "uefa-conference-league"],
   },
   {
     code: "fifa-worldcup",
@@ -139,6 +166,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     competitionIdEnvName: "SPORTSDATA_FIFA_WORLD_CUP_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_FIFA_WORLD_CUP_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_FIFA_WORLD_CUP_LEAGUE_SLUG",
+    gammaTagSlugs: ["fifa-world-cup", "2026-fifa-world-cup"],
   },
   {
     code: "fifa-friendlies",
@@ -158,6 +186,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     competitionIdEnvName: "SPORTSDATA_FIFA_FRIENDLIES_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_FIFA_FRIENDLIES_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_FIFA_FRIENDLIES_LEAGUE_SLUG",
+    gammaTagSlugs: [],
   },
 ]);
 

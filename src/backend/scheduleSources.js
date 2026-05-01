@@ -1,6 +1,7 @@
 export const SCHEDULE_SOURCE_AUTO = "auto";
 export const SCHEDULE_SOURCE_PRED_APP = "pred-app";
 export const SCHEDULE_SOURCE_POLYMARKET = "polymarket";
+export const SCHEDULE_SOURCE_GAMMA_POLYMARKET = "gamma-polymarket";
 export const SCHEDULE_SOURCE_SPORTSDATA = "sportsdata";
 export const SCHEDULE_SOURCE_LSPORTS_DB = "lsports-db";
 export const SCHEDULE_SOURCE_LSPORTS_SQL = "lsports-sql";
@@ -20,6 +21,9 @@ export function normalizeScheduleSource(value, { allowAuto = true } = {}) {
   }
   if (normalized === SCHEDULE_SOURCE_POLYMARKET || normalized === "poly" || normalized === "polymarket-us") {
     return SCHEDULE_SOURCE_POLYMARKET;
+  }
+  if (normalized === SCHEDULE_SOURCE_GAMMA_POLYMARKET || normalized === "gamma" || normalized === "gamma-poly") {
+    return SCHEDULE_SOURCE_GAMMA_POLYMARKET;
   }
   if (normalized === SCHEDULE_SOURCE_SPORTSDATA || normalized === "sports-data" || normalized === "sports_data") {
     return SCHEDULE_SOURCE_SPORTSDATA;
