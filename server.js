@@ -2454,6 +2454,7 @@ async function getUpcomingSchedulePayload(leagueCode, { refresh = false, now = n
     },
     loadPolymarket: async () => {
       const polymarketAdapter = getBackendFixtureSourceAdapter("polymarket");
+      if (!polymarketAdapter) return null;
       const rawRows = await polymarketAdapter.fetchRawRows({
         leagueCode,
         env: getActiveRuntimeEnvVars(),
@@ -2518,10 +2519,9 @@ async function handleAllSchedulesRequest(res) {
   const leagues = [];
   results.forEach((r, i) => {
     const def = definitions[i];
-    if (r.status === "fulfilled" && r.value?.fixtures?.length) {
-      schedules[def.code] = r.value;
-      leagues.push({ code: def.code, label: def.label, version: r.value.version ?? 0 });
-    }
+    const payload = r.status === "fulfilled" ? r.value : null;
+    schedules[def.code] = payload ?? { fixtures: [], source: "none" };
+    leagues.push({ code: def.code, label: def.label, version: payload?.version ?? 0 });
   });
 
   sendJson(res, 200, { leagues, schedules });
@@ -2662,13 +2662,12 @@ async function handleScheduleLeaguesRequest(res) {
     support = createSportsDataScheduleSupportMetadata({ env });
   }
 
-  const readySet = new Set(support.ready_leagues || []);
+  const supportLeagueMap = new Map((support.leagues || []).map(l => [l.code, l]));
   const leagues = getLeagueScheduleDefinitions()
-    .filter((def) => readySet.has(def.code))
     .map((def) => ({
       code: def.code,
       label: def.label,
-      source: (support.leagues || []).find(l => l.code === def.code)?.config_source || "sportsdata",
+      source: supportLeagueMap.get(def.code)?.config_source || "gamma-polymarket",
     }));
 
   sendJson(res, 200, { leagues });

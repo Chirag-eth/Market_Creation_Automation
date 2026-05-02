@@ -34,11 +34,9 @@ export async function resolveSchedulePayloadWithFallback({
   const csvPayload = await loadLsportsCsv?.();
   if (hasSchedulePayload(csvPayload)) return csvPayload;
 
-  const primaryError =
-    sdResult.status === "rejected" ? sdResult.reason :
-    lsResult.status === "rejected" ? lsResult.reason : null;
-  if (primaryError) throw primaryError;
-  throw new Error("No schedule source produced a payload.");
+  // All sources exhausted with no data — return empty payload so callers get 200 + [] fixtures
+  // (502 is reserved for actual upstream failures, not "no data for this league")
+  return { fixtures: [], source: "none", selectionMode: "none", selectedLabel: null };
 }
 
 export async function resolveRawScheduleRowsWithFallback({
@@ -77,11 +75,7 @@ export async function resolveRawScheduleRowsWithFallback({
   const csvRows = await loadLsportsCsv?.();
   if (hasScheduleRows(csvRows)) return csvRows;
 
-  const primaryError =
-    sdResult.status === "rejected" ? sdResult.reason :
-    lsResult.status === "rejected" ? lsResult.reason : null;
-  if (primaryError) throw primaryError;
-  throw new Error("No schedule source produced raw fixture rows.");
+  return [];
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

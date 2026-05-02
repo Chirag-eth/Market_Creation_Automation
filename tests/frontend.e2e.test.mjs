@@ -68,6 +68,10 @@ function nextPort() {
   return 29000 + Math.floor(Math.random() * 1000);
 }
 
+async function switchToFixturesTab(page) {
+  await page.locator(".tabbar__btn", { hasText: /upcoming fixtures/i }).click();
+}
+
 async function launchFrontendApp(t, { serverEnv = {} } = {}) {
   let playwright;
   try {
@@ -152,9 +156,10 @@ test("frontend e2e: fixture table loads rows from mocked API", async (t) => {
 
   const { page, started } = launched;
 
-  await page.goto(`${started.baseUrl}/market-ops.html`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${started.baseUrl}/`, { waitUntil: "domcontentloaded" });
 
   // Wait for fixture rows to appear (the useFixtures hook fetches and renders them)
+  await switchToFixturesTab(page);
   await page.waitForSelector(".frow", { timeout: 15_000 });
   const rows = await page.locator(".frow").count();
   assert.ok(rows >= 3, `Expected at least 3 fixture rows, got ${rows}`);
@@ -175,7 +180,8 @@ test("frontend e2e: filter by league reduces visible fixtures", async (t) => {
 
   const { page, started } = launched;
 
-  await page.goto(`${started.baseUrl}/market-ops.html`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${started.baseUrl}/`, { waitUntil: "domcontentloaded" });
+  await switchToFixturesTab(page);
   await page.waitForSelector(".frow", { timeout: 15_000 });
 
   // Count before filter
@@ -210,7 +216,8 @@ test("frontend e2e: clicking a fixture opens the submarket panel", async (t) => 
 
   const { page, started } = launched;
 
-  await page.goto(`${started.baseUrl}/market-ops.html`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${started.baseUrl}/`, { waitUntil: "domcontentloaded" });
+  await switchToFixturesTab(page);
   await page.waitForSelector(".frow", { timeout: 15_000 });
 
   // Submarket panel should not be visible before selection
@@ -236,7 +243,8 @@ test("frontend e2e: selection bar appears after selecting fixture and submarket"
 
   const { page, started } = launched;
 
-  await page.goto(`${started.baseUrl}/market-ops.html`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${started.baseUrl}/`, { waitUntil: "domcontentloaded" });
+  await switchToFixturesTab(page);
   await page.waitForSelector(".frow", { timeout: 15_000 });
 
   // Click the first fixture
@@ -269,7 +277,8 @@ test("frontend e2e: review overlay opens showing selected fixtures", async (t) =
 
   const { page, started } = launched;
 
-  await page.goto(`${started.baseUrl}/market-ops.html`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${started.baseUrl}/`, { waitUntil: "domcontentloaded" });
+  await switchToFixturesTab(page);
   await page.waitForSelector(".frow", { timeout: 15_000 });
 
   // Select first fixture
@@ -374,7 +383,8 @@ test("frontend e2e: publish flow reaches done screen via mocked batch endpoints"
     });
   });
 
-  await page.goto(`${started.baseUrl}/market-ops.html`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${started.baseUrl}/`, { waitUntil: "domcontentloaded" });
+  await switchToFixturesTab(page);
   await page.waitForSelector(".frow", { timeout: 15_000 });
 
   // Select a fixture and submarket
@@ -416,23 +426,23 @@ test("frontend e2e: theme toggle adds light class to html element", async (t) =>
 
   const { page, started } = launched;
 
-  await page.goto(`${started.baseUrl}/market-ops.html`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${started.baseUrl}/`, { waitUntil: "domcontentloaded" });
 
   // Wait for the app to render (header should be present)
-  await page.waitForSelector(".header", { timeout: 10_000 });
+  await page.waitForSelector(".hdr", { timeout: 10_000 });
 
   // Check initial theme class (defaults to dark — no 'light' class expected)
   const lightBefore = await page.evaluate(() => document.documentElement.classList.contains("light"));
 
   // Click the theme toggle button in the header
-  const themeBtn = page.locator(".header button[aria-label*=theme], .header button[title*=theme], .header .theme-btn, .header button").filter({ hasText: /theme|light|dark|☀|🌙/i }).first();
+  const themeBtn = page.locator(".hdr button[aria-label*=theme], .hdr button[title*=theme], .hdr .theme-btn, .hdr button").filter({ hasText: /theme|light|dark|☀|🌙/i }).first();
   await themeBtn.waitFor({ timeout: 5_000 }).catch(async () => {
     // Fallback: any button in header area with relevant aria
-    await page.locator(".header button").last().waitFor({ timeout: 5_000 });
+    await page.locator(".hdr button").last().waitFor({ timeout: 5_000 });
   });
 
   // Try clicking the theme toggle — find it by clicking the last/only icon-button in header
-  const headerButtons = await page.locator(".header button").all();
+  const headerButtons = await page.locator(".hdr button").all();
   let toggled = false;
   for (const btn of headerButtons) {
     const label = await btn.getAttribute("aria-label").catch(() => "");

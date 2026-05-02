@@ -2450,6 +2450,150 @@ input  { font-family: inherit; }
   overflow: hidden;
 }
 
+/* ─── JSON sub-tabs (Builder / Create via ID) ──────── */
+.json-subtabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--surface);
+}
+
+.json-subtab {
+  padding: 5px 14px;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--t2);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.json-subtab:hover {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.json-subtab--active {
+  background: var(--a-bg);
+  border-color: var(--a);
+  color: var(--a);
+}
+
+/* ─── Create Fixture via Game ID ──────────────────── */
+.create-fixture {
+  flex: 1;
+  overflow-y: auto;
+  padding: 36px 24px;
+  display: flex;
+  justify-content: center;
+}
+
+.create-fixture__card {
+  width: 100%;
+  max-width: 460px;
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.create-fixture__hdr {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--t1);
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0;
+}
+
+.create-fixture__fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.create-fixture__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.create-fixture__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.create-fixture__label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--t3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.create-fixture__opt {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.create-fixture__markets {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.create-fixture__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.create-fixture__chip {
+  padding: 5px 12px;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--t2);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  user-select: none;
+}
+
+.create-fixture__chip:hover {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.create-fixture__chip--on {
+  background: var(--a-bg);
+  border-color: var(--a);
+  color: var(--a);
+}
+
+.create-fixture__footer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.create-fixture__footer .btn-primary {
+  width: 100%;
+  justify-content: center;
+}
+
 /* ─── Event Setup (JSON tab) ──────────────────────── */
 .json-event-setup {
   flex-shrink: 0;

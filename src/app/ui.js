@@ -603,7 +603,7 @@ function getScheduleLeagueViewModels() {
       scheduleCode: definition.code,
       isConfiguredInCatalog: Boolean(boundLeague),
     };
-  }).filter((league) => league.isConfiguredInCatalog && isScheduleLeaguePubliclyReady(league.scheduleCode));
+  }).filter((league) => isScheduleLeaguePubliclyReady(league.scheduleCode));
 }
 
 function getScheduleLeagueDisplay(league, { isActive = false } = {}) {
@@ -1175,7 +1175,7 @@ function renderMarketSchemaPanel() {
       state.isVerifying ||
       state.isGenerating ||
       state.isScheduleLoading;
-    els.generateMarketFamilyActivateBtn.textContent = state.isRuntimeEnvSwitching ? "Switching..." : "Switch to UAT";
+    els.generateMarketFamilyActivateBtn.textContent = state.isRuntimeEnvSwitching ? "Switching..." : "Activate UAT";
   }
   if (els.generateMarketFamilyHelp) {
     els.generateMarketFamilyHelp.textContent = runtimeCode === "uat"
@@ -3874,7 +3874,12 @@ function validateGeneratedOutputPanel(outputKey) {
   renderOutputValidationBadges();
 
   if (validation.ok) {
-    showToast(`${getOutputDisplayLabel(outputKey)} validation passed.`, validation.warnings.length > 0 ? "info" : "success");
+    showToast(
+      validation.warnings.length > 0
+        ? `${getOutputDisplayLabel(outputKey)} passed with ${validation.warnings.length} warning(s).`
+        : `${getOutputDisplayLabel(outputKey)} validation passed.`,
+      validation.warnings.length > 0 ? "info" : "success"
+    );
   } else {
     showToast(
       `${getOutputDisplayLabel(outputKey)} validation found ${validation.errors.length} error(s).`,
@@ -4000,8 +4005,7 @@ function renderApiAccessPanel() {
   if (!els.apiAccessPanel) {
     return;
   }
-  // Keep saved-token recovery working quietly, but keep the bearer panel out of the current UI.
-  els.apiAccessPanel.hidden = true;
+  els.apiAccessPanel.hidden = !state.apiAccessRequired;
 }
 
 async function handleSaveApiAccessTokenAndRetry() {
@@ -4697,7 +4701,7 @@ function syncActionState() {
       state.isVerifying ||
       state.isGenerating ||
       state.isScheduleLoading;
-    els.generateMarketFamilyActivateBtn.textContent = state.isRuntimeEnvSwitching ? "Switching..." : "Switch to UAT";
+    els.generateMarketFamilyActivateBtn.textContent = state.isRuntimeEnvSwitching ? "Switching..." : "Activate UAT";
   }
   els.verifyBothBtn.disabled = !canRun;
   els.verifyFixtureBtn.disabled = !canRun;

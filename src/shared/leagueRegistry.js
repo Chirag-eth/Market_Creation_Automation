@@ -17,7 +17,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     competitionIdEnvName: "SPORTSDATA_EPL_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_EPL_LEAGUE_SLUG",
-    gammaTagSlugs: ["EPL", "premier-league"],
+    gammaTagSlugs: ["epl"],
   },
   {
     code: "ucl",
@@ -35,7 +35,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     competitionIdEnvName: "SPORTSDATA_UCL_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_UCL_LEAGUE_SLUG",
-    gammaTagSlugs: ["ucl", "champions-league", "uefa-champions-league"],
+    gammaTagSlugs: ["ucl"],
   },
   {
     code: "laliga",
@@ -127,7 +127,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     fixturePathEnvName: "SPORTSDATA_EUROPA_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_EUROPA_LEAGUE_SLUG",
     lsportsLeagueNameLike: "%Europa League%",
-    gammaTagSlugs: ["uel", "europa-league", "uefa-europa-league"],
+    gammaTagSlugs: ["uel"],
   },
   {
     code: "uecl",
@@ -147,7 +147,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     fixturePathEnvName: "SPORTSDATA_UECL_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_UECL_LEAGUE_SLUG",
     lsportsLeagueNameLike: "%Conference League%",
-    gammaTagSlugs: ["uecl", "europa-conference-league", "uefa-conference-league"],
+    gammaTagSlugs: ["uecl"],
   },
   {
     code: "fifa-worldcup",
@@ -166,7 +166,23 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     competitionIdEnvName: "SPORTSDATA_FIFA_WORLD_CUP_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_FIFA_WORLD_CUP_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_FIFA_WORLD_CUP_LEAGUE_SLUG",
-    gammaTagSlugs: ["fifa-world-cup", "2026-fifa-world-cup"],
+    gammaTagSlugs: ["fifa-world-cup"],
+  },
+  {
+    code: "mls",
+    label: "MLS",
+    icon: "◈",
+    aliases: [
+      "mls",
+      "major league soccer",
+      "major-league-soccer",
+    ],
+    defaultCompetitionId: null,
+    competitionIdEnvName: "SPORTSDATA_MLS_COMPETITION_ID",
+    fixturePathEnvName: "SPORTSDATA_MLS_SCHEDULE_FIXTURE_PATH",
+    polymarketLeagueSlugEnvName: "POLYMARKET_MLS_LEAGUE_SLUG",
+    lsportsLeagueNameLike: "%MLS%",
+    gammaTagSlugs: ["mls"],
   },
   {
     code: "fifa-friendlies",

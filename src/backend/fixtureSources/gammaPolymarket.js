@@ -4,10 +4,10 @@ import { getLeagueScheduleDefinition } from "../../shared/leagueRegistry.js";
 export const GAMMA_POLYMARKET_SOURCE_KEY = "gamma-polymarket";
 
 const GAMMA_BASE_URL = "https://gamma-api.polymarket.com";
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 min — reuse across leagues in the same server tick
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 min per slug
 
-let _cachedEvents = null;
-let _cacheTime = 0;
+// Per-slug cache: slug → { events: [], time: number }
+const _slugCache = new Map();
 
 const GAMMA_POLYMARKET_SOURCE = Object.freeze({
   key: GAMMA_POLYMARKET_SOURCE_KEY,
@@ -42,13 +42,25 @@ export async function fetchGammaPolymarketRawRows({
     throw new Error(`No gamma tag slugs configured for league "${leagueCode}".`);
   }
 
-  const events = await fetchAllSoccerEvents({ timeoutMs, fetchImpl });
+  // Fetch each slug in parallel and merge by event ID — avoids pagination issues
+  // with the global soccer dump (which has 2000+ events spread across many pages)
+  const results = await Promise.allSettled(
+    tagSlugs.map((slug) => fetchEventsBySlug(slug, { timeoutMs, fetchImpl }))
+  );
 
-  const tagSlugSet = new Set(tagSlugs.map((s) => String(s).toLowerCase()));
-  return events.filter((e) => {
-    const tags = Array.isArray(e.tags) ? e.tags : [];
-    return tags.some((t) => tagSlugSet.has(String(t.slug || "").toLowerCase()));
-  });
+  const seen = new Set();
+  const events = [];
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    for (const event of result.value) {
+      const id = String(event.id || "");
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      events.push(event);
+    }
+  }
+
+  return events;
 }
 
 export function createGammaFixtureWindowPayload({
@@ -91,14 +103,16 @@ export function normalizeGammaRow(row) {
   if (!row || typeof row !== "object") return null;
 
   let title = String(row.title || "").trim();
-  if (!/\bvs\.?\b/i.test(title)) return null;
-  if (title.includes(" - More Markets")) return null;
+  if (!/\bvs\.?\s/i.test(title) && !/\bvs\.?$/i.test(title)) return null;
 
   // Strip league prefix: "EPL: Arsenal vs Tottenham" → "Arsenal vs Tottenham"
   const colonIdx = title.indexOf(":");
   if (colonIdx !== -1 && colonIdx < 35) {
     title = title.slice(colonIdx + 1).trim();
   }
+
+  // Skip sub-market variants: "Arsenal vs Tottenham - Exact Score", "- Halftime Result", etc.
+  if (title.includes(" - ")) return null;
 
   const { homeTeamName, awayTeamName } = splitTitle(title);
   if (!homeTeamName || !awayTeamName) return null;
@@ -147,17 +161,17 @@ export function normalizeGammaRow(row) {
   });
 }
 
-async function fetchAllSoccerEvents({ timeoutMs = 10000, fetchImpl = fetch } = {}) {
+async function fetchEventsBySlug(slug, { timeoutMs = 10000, fetchImpl = fetch } = {}) {
   const now = Date.now();
-  if (_cachedEvents && now - _cacheTime < CACHE_TTL_MS) {
-    return _cachedEvents;
+  const cached = _slugCache.get(slug);
+  if (cached && now - cached.time < CACHE_TTL_MS) {
+    return cached.events;
   }
 
   const url = new URL(`${GAMMA_BASE_URL}/events`);
-  url.searchParams.set("tag_slug", "soccer");
-  url.searchParams.set("active", "true");
+  url.searchParams.set("tag_slug", slug);
   url.searchParams.set("closed", "false");
-  url.searchParams.set("limit", "200");
+  url.searchParams.set("limit", "500");
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -171,8 +185,7 @@ async function fetchAllSoccerEvents({ timeoutMs = 10000, fetchImpl = fetch } = {
     }
     const data = await response.json();
     const events = Array.isArray(data) ? data : [];
-    _cachedEvents = events;
-    _cacheTime = now;
+    _slugCache.set(slug, { events, time: now });
     return events;
   } catch (err) {
     if (err?.name === "AbortError") {

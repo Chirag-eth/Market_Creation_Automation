@@ -142,3 +142,34 @@ npm run dev                  # backend on :2020
 npm run dev:frontend         # Vite HMR on :5173, proxies /api → :2020
 # open http://localhost:5173
 ```
+
+---
+
+## BUG-J001 — `home_team_id` / `away_team_id` null on CMS fixture POST from JSON tab
+
+**Status:** Fixed
+
+### Symptom
+Publishing from the JSON tab returns HTTP 400 from the CMS fixture endpoint:
+```
+{"error":{"message":"team ID is required"}}
+```
+The fixture preview panel shows `"home_team_id": null, "away_team_id": null`.
+
+### Root Cause
+The JSON tab allows free-text team name entry. When the user types a name without selecting
+from the autocomplete dropdown, `homePick` / `awayPick` remain `null` in React state.
+`buildJsonOutputs` receives empty strings for `home_team_id` / `away_team_id`, which the
+server coerces to `null` in the fixture payload. CMS rejects any fixture where either team
+ID is absent.
+
+A server-side fallback was patched into `handleJsonPreparePublishRequest` but it only fired
+after the fixture was already being posted to CMS — too late — and relied on the server
+being restarted between iterations, which hadn't happened.
+
+### Fix
+Resolve team IDs from the `teams` table during `handleJsonBuildOutputsRequest` (the
+**preview phase**), not at publish time. The fixture payload returned to the frontend
+already carries real UUIDs. If resolution fails (team name not in DB), the response
+includes `teams_resolved: false`, the UI shows a warning banner, and the Publish button
+is disabled until the user picks both teams from the autocomplete.
