@@ -55,6 +55,14 @@ import {
 import { validateFixtureJson } from "./src/core/validation.js";
 import { InvalidIntegrationPayloadError } from "./src/backend/publisherCore.js";
 import { normalizeForSearch } from "./src/shared/util.js";
+import {
+  createSession, getSession, deleteSession,
+  parseSessionCookie, buildSessionCookie, buildClearSessionCookie,
+  createOAuthState, validateOAuthState,
+  exchangeGoogleCode, verifyGoogleIdToken,
+  isOrgEmail, buildGoogleAuthUrl, deriveInitials,
+  purgeExpiredSessions,
+} from "./src/backend/auth.js";
 
 const STARTUP_ENV = { ...process.env };
 const ROOT_DIR = path.resolve(process.cwd());
@@ -123,6 +131,12 @@ const TRUST_PROXY = String(process.env.TRUST_PROXY || "").trim() === "1";
 const API_BEARER_TOKEN = String(process.env.API_BEARER_TOKEN || "").trim();
 const APP_BASIC_AUTH_USER = String(process.env.APP_BASIC_AUTH_USER || "").trim();
 const APP_BASIC_AUTH_PASS = String(process.env.APP_BASIC_AUTH_PASS || "").trim();
+const GOOGLE_CLIENT_ID     = String(process.env.GOOGLE_CLIENT_ID     || "").trim();
+const GOOGLE_CLIENT_SECRET = String(process.env.GOOGLE_CLIENT_SECRET || "").trim();
+const PUBLIC_BASE_URL      = String(process.env.PUBLIC_BASE_URL      || "").trim();
+const AUTH_ORG_DOMAIN      = String(process.env.AUTH_ORG_DOMAIN      || "pred.app").trim();
+const AUTH_SESSION_TTL_MS  = parsePositiveIntegerEnv(process.env.AUTH_SESSION_TTL_MS, 86_400_000, { min: 60_000 });
+const GOOGLE_OAUTH_ENABLED = Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && PUBLIC_BASE_URL);
 const API_RATE_WINDOW_MS = parsePositiveIntegerEnv(process.env.API_RATE_WINDOW_MS, 60_000, { min: 1_000 });
 const API_RATE_MAX_REQUESTS = parsePositiveIntegerEnv(process.env.API_RATE_MAX_REQUESTS, 180, { min: 1 });
 const SCHEDULE_CACHE_TTL_MS = parsePositiveIntegerEnv(process.env.SCHEDULE_CACHE_TTL_MS, 300_000, { min: 1_000 });
@@ -163,7 +177,8 @@ const SECURITY_HEADERS = {
     "style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; " +
     "font-src 'self' https://fonts.gstatic.com data:; " +
     "img-src 'self' data: blob: https:; " +
-    "connect-src 'self' https://cdn.jsdelivr.net https://tessdata.projectnaptha.com; " +
+    "connect-src 'self' https://cdn.jsdelivr.net https://tessdata.projectnaptha.com https://accounts.google.com; " +
+    "form-action 'self' https://accounts.google.com; " +
     "object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
 };
 
@@ -206,6 +221,65 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // ── Google OAuth routes (exempt from auth) ────────────────────────────────
+    if (requestUrl.pathname === "/auth/google") {
+      if (!GOOGLE_OAUTH_ENABLED) {
+        sendText(res, 503, "Google OAuth is not configured on this server.");
+        return;
+      }
+      const state = createOAuthState();
+      const redirectUri = `${PUBLIC_BASE_URL}/auth/google/callback`;
+      res.writeHead(302, { Location: buildGoogleAuthUrl(GOOGLE_CLIENT_ID, redirectUri, state), "Cache-Control": "no-store" });
+      res.end();
+      return;
+    }
+
+    if (requestUrl.pathname === "/auth/google/callback") {
+      const code  = requestUrl.searchParams.get("code");
+      const state = requestUrl.searchParams.get("state");
+      const error = requestUrl.searchParams.get("error");
+      if (error || !code || !state || !validateOAuthState(state)) {
+        sendText(res, 400, `OAuth error: ${error || "invalid or expired state — please try again."}`);
+        return;
+      }
+      try {
+        const redirectUri = `${PUBLIC_BASE_URL}/auth/google/callback`;
+        const tokens  = await exchangeGoogleCode(code, redirectUri, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
+        const profile = await verifyGoogleIdToken(tokens.id_token, GOOGLE_CLIENT_ID);
+        if (!isOrgEmail(profile.email, AUTH_ORG_DOMAIN)) {
+          sendText(res, 403, `Access restricted to @${AUTH_ORG_DOMAIN} accounts. You signed in as ${profile.email}.`);
+          return;
+        }
+        const userData  = { email: profile.email, name: profile.name || profile.email.split("@")[0], initials: deriveInitials(profile.name || profile.email.split("@")[0]) };
+        const sessionId = createSession(userData, AUTH_SESSION_TTL_MS);
+        const isSecure  = TRUST_PROXY || PUBLIC_BASE_URL.startsWith("https://");
+        const cookie    = buildSessionCookie(sessionId, { secure: isSecure, ttlSeconds: Math.floor(AUTH_SESSION_TTL_MS / 1000) });
+        res.writeHead(302, { Location: "/", "Set-Cookie": cookie, "Cache-Control": "no-store" });
+        res.end();
+      } catch (err) {
+        console.error("[auth/callback]", err.message);
+        sendText(res, 500, "Authentication failed. Please try again.");
+      }
+      return;
+    }
+
+    if (requestUrl.pathname === "/auth/logout") {
+      const sessionId = parseSessionCookie(req);
+      if (sessionId) deleteSession(sessionId);
+      res.writeHead(302, { Location: "/", "Set-Cookie": buildClearSessionCookie(), "Cache-Control": "no-store" });
+      res.end();
+      return;
+    }
+
+    if (requestUrl.pathname === "/auth/me") {
+      const sessionId = parseSessionCookie(req);
+      const user = sessionId ? getSession(sessionId) : null;
+      if (!user) { sendJson(res, 401, { error: "Not authenticated" }); return; }
+      sendJson(res, 200, { name: user.name, email: user.email, initials: user.initials });
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     if (requestUrl.pathname.startsWith("/api/")) {
       if (!isAuthorizedApiRequest(req)) {
         sendJson(
@@ -230,14 +304,18 @@ const server = http.createServer(async (req, res) => {
         return;
       }
     }
-    if (!requestUrl.pathname.startsWith("/api/") && !isAuthorizedStaticRequest(req)) {
-      sendText(
-        res,
-        401,
-        "Unauthorized",
-        { "WWW-Authenticate": 'Basic realm="Fixture OCR Dashboard"' }
-      );
-      return;
+    if (!requestUrl.pathname.startsWith("/api/")) {
+      if (GOOGLE_OAUTH_ENABLED) {
+        const sessionId = parseSessionCookie(req);
+        if (!sessionId || !getSession(sessionId)) {
+          res.writeHead(302, { Location: "/auth/google", "Cache-Control": "no-store" });
+          res.end();
+          return;
+        }
+      } else if (!isAuthorizedStaticRequest(req)) {
+        sendText(res, 401, "Unauthorized", { "WWW-Authenticate": 'Basic realm="Fixture OCR Dashboard"' });
+        return;
+      }
     }
 
     if (requestUrl.pathname === "/api/catalog") {
@@ -698,6 +776,8 @@ const IS_MAIN = (() => {
 })();
 
 if (IS_MAIN) {
+  setInterval(() => purgeExpiredSessions(), 10 * 60 * 1000).unref();
+
   server.listen(PORT, () => {
     console.log(`Fixture OCR Market Builder running at http://localhost:${PORT}`);
     void (async () => {
@@ -2894,6 +2974,11 @@ function resolveClientIp(req, { trustProxy = TRUST_PROXY } = {}) {
 }
 
 function isAuthorizedApiRequest(req) {
+  // Session cookie from Google OAuth satisfies API auth for browser-originated calls
+  if (GOOGLE_OAUTH_ENABLED) {
+    const sessionId = parseSessionCookie(req);
+    if (sessionId && getSession(sessionId)) return true;
+  }
   if (!API_BEARER_TOKEN) {
     return !isBasicAuthEnabled() || hasValidBasicAuth(req);
   }

@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import { submarketGroups, ALL_SUBMARKET_IDS } from './data.js'
 import { useFixtures } from './hooks/useFixtures.js'
+import { useAuth } from './hooks/useAuth.js'
 import { publishBatch, fetchBatchRun, fetchEnvironment, switchEnvironment } from './api.js'
 import { useTheme } from './hooks/useTheme.js'
 import Header         from './components/Header.jsx'
@@ -13,10 +14,31 @@ import SelectionBar   from './components/SelectionBar.jsx'
 import ReviewOverlay  from './components/ReviewOverlay.jsx'
 import ScheduleQueue  from './components/ScheduleQueue.jsx'
 import JsonView       from './components/JsonView.jsx'
+import LoginPage      from './components/LoginPage.jsx'
 
 export default function App() {
   const { theme, toggle: toggleTheme } = useTheme()
-  const { fixtures, loading, error } = useFixtures()
+  const { fixtures, loading: fixturesLoading, error } = useFixtures()
+  const {
+    user, loading: authLoading, error: authError,
+    loadingGoogle, loadingEmail, linkSentTo,
+    signInWithGoogle, sendMagicLink, resendMagicLink, resetLinkFlow, signOut,
+  } = useAuth()
+
+  if (authLoading) return null
+
+  if (!user) return (
+    <LoginPage
+      onSignInGoogle={signInWithGoogle}
+      onSendMagicLink={sendMagicLink}
+      onResendMagicLink={resendMagicLink}
+      onResetLinkFlow={resetLinkFlow}
+      loadingGoogle={loadingGoogle}
+      loadingEmail={loadingEmail}
+      linkSentTo={linkSentTo}
+      error={authError}
+    />
+  )
 
   const [activeEnv,   setActiveEnv]   = useState(null)
   const [environments, setEnvironments] = useState([])
@@ -216,8 +238,8 @@ export default function App() {
         onToggleTheme={toggleTheme}
         queueCount={pendingJobCount}
         onQueueOpen={() => setQueueOpen(true)}
-        user={{ name: 'Operator', initials: 'OP' }}
-        onSignOut={() => {}}
+        user={user}
+        onSignOut={signOut}
         activeEnv={activeEnv}
         environments={environments}
         onSwitchEnv={handleSwitchEnv}
@@ -259,7 +281,7 @@ export default function App() {
               sort={sort}
               onSort={handleSort}
               scheduledIds={scheduledFixtureIds}
-              loading={loading}
+              loading={fixturesLoading}
             />
             <SubmarketPanel
               open={hasSelection}
