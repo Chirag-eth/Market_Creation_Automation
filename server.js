@@ -1,5 +1,5 @@
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -2307,12 +2307,16 @@ function isBasicAuthEnabled() {
 }
 
 function hasValidBearerAuth(req) {
+  if (!API_BEARER_TOKEN) return false;
   const auth = String(req.headers.authorization || "").trim();
   if (!auth.startsWith("Bearer ")) {
     return false;
   }
   const token = auth.slice("Bearer ".length).trim();
-  return token === API_BEARER_TOKEN;
+  const a = Buffer.from(token);
+  const b = Buffer.from(API_BEARER_TOKEN);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 function hasValidBasicAuth(req) {

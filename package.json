@@ -58,6 +58,9 @@
     ],
     "*.{json,md,yml,yaml,css,html}": [
       "prettier --write"
+    ],
+    ".env*": [
+      "node scripts/check-env-secrets.mjs"
     ]
   }
 }
