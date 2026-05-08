@@ -5,14 +5,11 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     code: "epl",
     label: "EPL",
     icon: "⚽",
-    activeIconUrl: "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/EPL_Active_48x48.png",
-    inactiveIconUrl: "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/EPL_Inactive_48x48.png",
-    aliases: [
-      "epl",
-      "english premier league",
-      "premier league",
-      "english-premier-league",
-    ],
+    activeIconUrl:
+      "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/EPL_Active_48x48.png",
+    inactiveIconUrl:
+      "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/EPL_Inactive_48x48.png",
+    aliases: ["epl", "english premier league", "premier league", "english-premier-league"],
     defaultCompetitionId: 1,
     competitionIdEnvName: "SPORTSDATA_EPL_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_EPL_SCHEDULE_FIXTURE_PATH",
@@ -23,14 +20,11 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     code: "ucl",
     label: "UCL",
     icon: "✦",
-    activeIconUrl: "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/UCL_Active_128x128.png",
-    inactiveIconUrl: "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/UCL_Inactive_128x128.png",
-    aliases: [
-      "ucl",
-      "uefa champions league",
-      "champions league",
-      "uefa-champions-league",
-    ],
+    activeIconUrl:
+      "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/UCL_Active_128x128.png",
+    inactiveIconUrl:
+      "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/UCL_Inactive_128x128.png",
+    aliases: ["ucl", "uefa champions league", "champions league", "uefa-champions-league"],
     defaultCompetitionId: 3,
     competitionIdEnvName: "SPORTSDATA_UCL_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_UCL_SCHEDULE_FIXTURE_PATH",
@@ -41,15 +35,11 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     code: "laliga",
     label: "La Liga",
     icon: "◢",
-    activeIconUrl: "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/LaLiga_Active_128x128.png",
-    inactiveIconUrl: "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/LaLiga_Inactive_128x128.png",
-    aliases: [
-      "laliga",
-      "la liga",
-      "la-liga",
-      "spanish la liga",
-      "spanish league",
-    ],
+    activeIconUrl:
+      "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/LaLiga_Active_128x128.png",
+    inactiveIconUrl:
+      "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/LaLiga_Inactive_128x128.png",
+    aliases: ["laliga", "la liga", "la-liga", "spanish la liga", "spanish league"],
     defaultCompetitionId: 4,
     competitionIdEnvName: "SPORTSDATA_LALIGA_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_LALIGA_SCHEDULE_FIXTURE_PATH",
@@ -61,13 +51,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     code: "seriea",
     label: "Serie A",
     icon: "◣",
-    aliases: [
-      "serie a",
-      "seriea",
-      "italian serie a",
-      "italy serie a",
-      "lega serie a",
-    ],
+    aliases: ["serie a", "seriea", "italian serie a", "italy serie a", "lega serie a"],
     defaultCompetitionId: null,
     competitionIdEnvName: "SPORTSDATA_SERIEA_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_SERIEA_SCHEDULE_FIXTURE_PATH",
@@ -97,13 +81,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     code: "ligue1",
     label: "Ligue 1",
     icon: "△",
-    aliases: [
-      "ligue 1",
-      "ligue1",
-      "french ligue 1",
-      "france ligue 1",
-      "ligue-1",
-    ],
+    aliases: ["ligue 1", "ligue1", "french ligue 1", "france ligue 1", "ligue-1"],
     defaultCompetitionId: null,
     competitionIdEnvName: "SPORTSDATA_LIGUE1_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_LIGUE1_SCHEDULE_FIXTURE_PATH",
@@ -115,13 +93,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     code: "europa",
     label: "Europa League",
     icon: "⬢",
-    aliases: [
-      "europa",
-      "uel",
-      "europa league",
-      "uefa europa league",
-      "uefa europa",
-    ],
+    aliases: ["europa", "uel", "europa league", "uefa europa league", "uefa europa"],
     defaultCompetitionId: null,
     competitionIdEnvName: "SPORTSDATA_EUROPA_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_EUROPA_SCHEDULE_FIXTURE_PATH",
@@ -147,7 +119,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     fixturePathEnvName: "SPORTSDATA_UECL_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_UECL_LEAGUE_SLUG",
     lsportsLeagueNameLike: "%Conference League%",
-    gammaTagSlugs: ["uecl"],
+    gammaTagSlugs: ["europa-conference-league"],
   },
   {
     code: "fifa-worldcup",
@@ -172,11 +144,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     code: "mls",
     label: "MLS",
     icon: "◈",
-    aliases: [
-      "mls",
-      "major league soccer",
-      "major-league-soccer",
-    ],
+    aliases: ["mls", "major league soccer", "major-league-soccer"],
     defaultCompetitionId: null,
     competitionIdEnvName: "SPORTSDATA_MLS_COMPETITION_ID",
     fixturePathEnvName: "SPORTSDATA_MLS_SCHEDULE_FIXTURE_PATH",
@@ -188,8 +156,10 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     code: "fifa-friendlies",
     label: "FIFA Friendlies",
     icon: "◌",
-    activeIconUrl: "https://public-assets.pred.app/market-assets/FIFA/FIFA-League/Fifa%20Active%202_128x128.png",
-    inactiveIconUrl: "https://public-assets.pred.app/market-assets/FIFA/FIFA-League/Inative%202_128x128.png",
+    activeIconUrl:
+      "https://public-assets.pred.app/market-assets/FIFA/FIFA-League/Fifa%20Active%202_128x128.png",
+    inactiveIconUrl:
+      "https://public-assets.pred.app/market-assets/FIFA/FIFA-League/Inative%202_128x128.png",
     aliases: [
       "fifa friendlies",
       "friendlies",
@@ -217,7 +187,9 @@ export function getLeagueScheduleDefinitions() {
 }
 
 export function getLeagueScheduleDefinition(code) {
-  const normalizedCode = String(code || "").trim().toLowerCase();
+  const normalizedCode = String(code || "")
+    .trim()
+    .toLowerCase();
   return LEAGUE_SCHEDULE_BY_CODE.get(normalizedCode) || null;
 }
 
