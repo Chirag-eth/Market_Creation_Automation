@@ -169,6 +169,43 @@ Health endpoint (for load balancers/uptime checks):
 - `GET /api/healthz`
 - `GET /api/readyz` (checks CSV source availability/readiness)
 
+## Vault-Automation post-publish hook
+
+When `VAULT_AUTOMATION_HOST` is set, every successful CMS publish (selected
+or batch) auto-syncs Polymarket-sourced fixtures to the matching market-making
+vault via `pred-polymarket-http`'s `POST /api/v1/polymarket/sync-fixture`.
+Non-Polymarket fixtures (sportsdata, lsports) are silently skipped — they
+have no Polymarket URL to sync. Vault-sync failures are surfaced in
+`runRecord.vault_sync` (or `record.fixtures[].vault_sync` for batch) without
+demoting the publish itself.
+
+**One-time DB migration**. Each environment needs the assignments table:
+
+```bash
+psql "$DB_URL" -f sql/001_fixture_vault_assignments.sql
+```
+
+The table tracks which vault (1 or 2) each fixture was routed to. New
+assignments load-balance across vaults within the same `game_start_time`,
+so two fixtures kicking off at the same instant land on different vaults.
+
+**Configuration** (env vars, per profile):
+
+```bash
+VAULT_AUTOMATION_HOST=http://127.0.0.1:8080  # leave empty to disable
+VAULT_AUTOMATION_TIMEOUT_MS=8000
+VAULT_AUTOMATION_RETRY_COUNT=1               # retries on 5xx / network only
+VAULT_AUTOMATION_DRY_RUN=0
+```
+
+Real per-environment hosts go in `.env.<profile>.local` (gitignored). Tracked
+profile templates leave `VAULT_AUTOMATION_HOST` empty.
+
+**Deployment prerequisite**. `pred-polymarket-http` (the Vault-Automation
+HTTP service) must be running and reachable from Market_Making at
+`VAULT_AUTOMATION_HOST`. See `/Users/chirag/Desktop/Vault-Automation /` —
+note the trailing space in the directory name.
+
 ## Docker (optional phase 1 deployment packaging)
 
 Build and run:
