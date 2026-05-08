@@ -12,9 +12,12 @@ import {
   classifyParentStatusFromRows,
   getExpectedMarketCountForPublishKey,
 } from "./cmsSelectedPublish.js";
+import { createVaultAutomationConfig } from "./vaultAutomationConfig.js";
+import { syncFixturesAfterPublish } from "./vaultSyncOrchestrator.js";
 
 const batchLog = createScopedLogger("batch");
 const cmsLog = createScopedLogger("cms");
+const vaultLog = createScopedLogger("vault");
 
 // ── Public-from-server-perspective utilities ──────────────────────────────────
 
@@ -756,6 +759,59 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
         status: "failed",
         reason: String(err?.message || err),
         markets: publishKeys.map((key) => ({ publish_key: key, status: "failed" })),
+      });
+    }
+  }
+
+  // ── Post-loop vault sync hook ───────────────────────────────────────────────
+  // Runs vault sync for every successfully published fixture. Covers both the
+  // fixtures/create shortcut and the legacy 3-step paths. Missing polymarket
+  // URLs (e.g., sportsdata fixtures) and missing fixture_ids are silently
+  // skipped by the orchestrator. Failures are surfaced per-fixture without
+  // demoting the overall publish status.
+  const vaultConfig = createVaultAutomationConfig(activeProfile.env);
+  if (vaultConfig.enabled) {
+    const vLog = vaultLog.child({ runId });
+    const syncInputs = [];
+    const syncTargets = [];
+    for (let i = 0; i < fixtures.length; i++) {
+      const fx = fixtures[i];
+      const fr = fixtureResults[i];
+      if (!fr || fr.status === "failed") continue;
+      let fixtureId = fr.fixture_id || null;
+      if (!fixtureId && dbPool) {
+        const gameId = String(
+          fx.gameId || fx.game_id || fx.providerFixtureId || fx.id || ""
+        ).trim();
+        if (gameId) {
+          try {
+            const r = await dbPool.query(
+              `SELECT fixture_id FROM fixtures WHERE game_id = $1 LIMIT 1`,
+              [gameId]
+            );
+            fixtureId = r.rows[0]?.fixture_id || null;
+          } catch (e) {
+            vLog.warn({ err: e, gameId }, "vault sync: fixture_id lookup failed");
+          }
+        }
+      }
+      syncInputs.push({
+        fixture_id: fixtureId,
+        game_start_time: fx.kickoff || fx.kickoffIso || "",
+        polymarket_url: fx.polymarket_url || fx.polymarketUrl || "",
+        polymarket_event_id:
+          fx.polymarket_event_id || fx.polymarketEventId || fx.sourceMeta?.polymarketEventId || "",
+      });
+      syncTargets.push(i);
+    }
+    if (syncInputs.length > 0) {
+      vLog.info({ count: syncInputs.length }, "running vault sync for completed fixtures");
+      const syncResults = await syncFixturesAfterPublish(dbPool, syncInputs, vaultConfig, vLog);
+      syncResults.forEach((res, idx) => {
+        const target = syncTargets[idx];
+        if (fixtureResults[target]) {
+          fixtureResults[target].vault_sync = res;
+        }
       });
     }
   }

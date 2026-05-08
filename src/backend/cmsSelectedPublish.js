@@ -51,6 +51,14 @@ export function normalizeCmsSelectedFixture(value = {}) {
     provider: String(source.provider || source.source || "")
       .trim()
       .toLowerCase(),
+    // Polymarket coordinates for the post-publish vault sync hook. The
+    // orchestrator builds polymarket_url from polymarket_event_id when the
+    // URL isn't supplied. Both empty for non-Polymarket fixtures (vault sync
+    // skipped).
+    polymarket_url: String(source.polymarket_url || source.polymarketUrl || "").trim(),
+    polymarket_event_id: String(
+      source.polymarket_event_id || source.polymarketEventId || ""
+    ).trim(),
   };
 }
 

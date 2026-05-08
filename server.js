@@ -74,6 +74,8 @@ import {
   buildFixtureCreateCname,
   postCmsFixtureCreate,
 } from "./src/backend/cmsBatchExecution.js";
+import { createVaultAutomationConfig } from "./src/backend/vaultAutomationConfig.js";
+import { syncSingleFixtureAfterPublish } from "./src/backend/vaultSyncOrchestrator.js";
 import {
   getUpcomingSchedulePayload,
   backgroundRefreshAllSchedules,
@@ -111,6 +113,7 @@ const authLog = createScopedLogger("auth");
 const schedLog = createScopedLogger("schedule");
 const batchLog = createScopedLogger("batch");
 const cmsLog = createScopedLogger("cms");
+const vaultLog = createScopedLogger("vault");
 
 const STARTUP_ENV = { ...process.env };
 const ROOT_DIR = path.resolve(process.cwd());
@@ -148,6 +151,10 @@ const PROFILE_BOUND_KEYS = new Set([
   "ENABLED_INTEGRATIONS_SPORTSINFO",
   "ENABLED_INTEGRATIONS_VAULT",
   "DEV_ALLOW_MOCK_DOWNSTREAM",
+  "VAULT_AUTOMATION_HOST",
+  "VAULT_AUTOMATION_TIMEOUT_MS",
+  "VAULT_AUTOMATION_RETRY_COUNT",
+  "VAULT_AUTOMATION_DRY_RUN",
 ]);
 
 const RUNTIME_ENV_PROFILES = createRuntimeEnvironmentProfiles(ROOT_DIR, STARTUP_ENV);
@@ -3032,6 +3039,7 @@ async function buildCmsSelectedPreflight({ envelope, config = {}, pool, resolveF
 async function executeCmsSelectedPublish({
   envelope,
   config = {},
+  vaultConfig = { enabled: false },
   pool,
   pollUntilFn,
   createRunIdFn,
@@ -3064,6 +3072,27 @@ async function executeCmsSelectedPublish({
   if (runStore) runStore.set(runId, runRecord);
 
   const preflightItems = preflight?.preflightItems || [];
+  let resolvedFixtureRecord = preflight?.fixtureRecord || null;
+
+  async function runVaultSyncIfApplicable() {
+    if (!vaultConfig?.enabled) return;
+    if (runRecord.status === "failed") return;
+    const sel = envelope?.payload?.selected_fixture || {};
+    runRecord.vault_sync = await syncSingleFixtureAfterPublish(
+      pool,
+      {
+        fixture_id: resolvedFixtureRecord?.fixture_id,
+        game_start_time:
+          resolvedFixtureRecord?.game_start_time ||
+          fixturePayload?.game_start_time ||
+          deriveStartTimeFromSelectedFixture(sel),
+        polymarket_url: sel.polymarket_url || sel.polymarketUrl,
+        polymarket_event_id: sel.polymarket_event_id || sel.polymarketEventId,
+      },
+      vaultConfig,
+      vaultLog.child({ runId })
+    );
+  }
 
   // ── New combined fixtures/create endpoint shortcut ──────────────────────────
   // When the schedule provider is sportsdata or lsports, collapse the legacy
@@ -3163,13 +3192,13 @@ async function executeCmsSelectedPublish({
       runRecord.summary = "Publish failed.";
       runRecord.detail = errorMessage;
     }
+    await runVaultSyncIfApplicable();
     runRecord.completed_at = new Date().toISOString();
     return { runRecord };
   }
 
   const skipFixtureAndTypeRef = Boolean(providedTypeReferenceId);
   let resolvedTypeRefId = providedTypeReferenceId || preflight?.resolvedTypeRefId || "";
-  let resolvedFixtureRecord = preflight?.fixtureRecord || null;
 
   if (skipFixtureAndTypeRef) {
     runRecord.step_results.fixture = { status: "skipped" };
@@ -3350,8 +3379,20 @@ async function executeCmsSelectedPublish({
     runRecord.detail = parts.length > 0 ? `Created ${parts.join(", ")}.` : "";
   }
 
+  await runVaultSyncIfApplicable();
   runRecord.completed_at = new Date().toISOString();
   return { runRecord };
+}
+
+function deriveStartTimeFromSelectedFixture(selectedFixture = {}) {
+  const date = String(selectedFixture?.fixture_date || selectedFixture?.fixtureDate || "").trim();
+  if (!date) return "";
+  const time = String(
+    selectedFixture?.kickoff_time_utc || selectedFixture?.kickoffTimeUtc || ""
+  ).trim();
+  if (!time) return `${date}T00:00:00Z`;
+  const normalizedTime = /^\d{2}:\d{2}$/.test(time) ? `${time}:00` : time;
+  return `${date}T${normalizedTime}Z`;
 }
 
 export {

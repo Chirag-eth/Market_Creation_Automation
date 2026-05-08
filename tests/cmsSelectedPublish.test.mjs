@@ -169,6 +169,56 @@ function createPool(queryImpl) {
   };
 }
 
+function createPoolWithVaultRouter(queryImpl, vaultRows = []) {
+  const rows = vaultRows.map((r) => ({ ...r }));
+  return {
+    async query(sql, params) {
+      return queryImpl(String(sql || ""), Array.isArray(params) ? params : []);
+    },
+    async connect() {
+      return {
+        async query(sql, params = []) {
+          const t = String(sql || "").trim();
+          if (/^BEGIN/i.test(t) || /^COMMIT/i.test(t) || /^ROLLBACK/i.test(t)) {
+            return { rows: [] };
+          }
+          if (t.includes("pg_advisory_xact_lock")) return { rows: [] };
+          if (
+            t.includes("SELECT vault_num FROM fixture_vault_assignments") &&
+            t.includes("WHERE fixture_id = $1")
+          ) {
+            const found = rows.find((r) => r.fixture_id === params[0]);
+            return { rows: found ? [{ vault_num: found.vault_num }] : [] };
+          }
+          if (t.includes("SELECT vault_num, COUNT(*)")) {
+            const counts = new Map();
+            for (const r of rows) {
+              if (r.game_start_time === params[0]) {
+                counts.set(r.vault_num, (counts.get(r.vault_num) || 0) + 1);
+              }
+            }
+            return {
+              rows: [...counts.entries()].map(([vault_num, c]) => ({ vault_num, c })),
+            };
+          }
+          if (t.startsWith("INSERT INTO fixture_vault_assignments")) {
+            const [fid, startTime, candidate] = params;
+            rows.push({
+              fixture_id: fid,
+              game_start_time: startTime,
+              vault_num: candidate,
+            });
+            return { rows: [{ vault_num: candidate }] };
+          }
+          throw new Error(`mock vault client: unexpected SQL: ${t}`);
+        },
+        release() {},
+      };
+    },
+    _vaultRows: rows,
+  };
+}
+
 function createParentMarketRows({
   payload,
   parentMarketId = "pm-1",
@@ -972,6 +1022,263 @@ test("executeCmsSelectedPublish marks all selectable items failed when fixtures/
     assert.equal(result.runRecord.parent_market_results["moneyline|0"]?.status, "failed");
     assert.equal(result.runRecord.aggregate.failed, 1);
     assert.equal(result.runRecord.aggregate.published, 0);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+const VAULT_CONFIG_ENABLED = {
+  enabled: true,
+  host: "https://vault.test",
+  endpoint: "https://vault.test/api/v1/polymarket/sync-fixture",
+  timeoutMs: 5_000,
+  retryCount: 0,
+  dryRun: false,
+};
+
+test("vault sync runs after a successful legacy publish when polymarket fields are present", async () => {
+  const fetchCalls = [];
+  const originalFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    fetchCalls.push({ url: String(url), init });
+    return {
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      text: async () =>
+        JSON.stringify({ status: "matched", sync_posted: 2, sync_already_exists: 0 }),
+    };
+  };
+
+  const moneylineRows = createParentMarketRows({
+    payload: createMoneylinePayload(),
+    parentMarketId: "pm-moneyline",
+    typeReferenceId: TYPE_REFERENCE_RECORD.type_reference_id,
+  });
+
+  let fixtureLookupCount = 0;
+  let typeRefLookupCount = 0;
+  let parentRowsServed = false;
+  const pool = createPoolWithVaultRouter(async (sql) => {
+    if (sql.includes("FROM fixtures")) {
+      fixtureLookupCount += 1;
+      return { rows: fixtureLookupCount >= 2 ? [FIXTURE_RECORD] : [] };
+    }
+    if (sql.includes("FROM type_references") && sql.includes("WHERE type_value_id")) {
+      typeRefLookupCount += 1;
+      return { rows: typeRefLookupCount >= 2 ? [TYPE_REFERENCE_RECORD] : [] };
+    }
+    if (sql.includes("FROM parent_markets pm")) {
+      parentRowsServed = true;
+      return { rows: parentRowsServed ? moneylineRows : [] };
+    }
+    return { rows: [] };
+  });
+
+  try {
+    const baseEnvelope = createEnvelope({
+      selectedPublishItems: [
+        { publish_key: "moneyline|0", parent_market_payload: createMoneylinePayload() },
+      ],
+    });
+    const envelope = {
+      ...baseEnvelope,
+      payload: {
+        ...baseEnvelope.payload,
+        selected_fixture: {
+          ...SELECTED_FIXTURE,
+          polymarket_event_id: "epl-bournemouth-vs-man-utd-2026-04-25",
+        },
+      },
+    };
+
+    const result = await executeCmsSelectedPublish({
+      envelope,
+      config: {},
+      vaultConfig: VAULT_CONFIG_ENABLED,
+      pool,
+      pollUntilFn: ({ fn, attempts }) => pollUntil({ fn, attempts, delayMs: 0 }),
+      createRunIdFn: () => "run-vault-success",
+      publishFixtureFn: async () => ({ ok: true }),
+      publishTypeReferenceFn: async () => ({ ok: true }),
+      publishParentMarketFn: async () => ({ ok: true }),
+      runStore: new Map(),
+      preflight: await buildCmsSelectedPreflight({
+        envelope: createEnvelope({
+          selectedPublishItems: [
+            { publish_key: "moneyline|0", parent_market_payload: createMoneylinePayload() },
+          ],
+        }),
+        config: {},
+        pool,
+        resolveFixtureCandidate: async () => createResolvedFixture(),
+      }),
+    });
+
+    assert.equal(result.runRecord.status, "completed");
+    assert.equal(result.runRecord.aggregate.published, 1);
+    // Vault sync was triggered against the configured endpoint.
+    const vaultCall = fetchCalls.find((c) => c.url.includes("/api/v1/polymarket/sync-fixture"));
+    assert.ok(vaultCall, "vault sync POST happened");
+    const body = JSON.parse(vaultCall.init.body);
+    assert.equal(
+      body.polymarket_url,
+      `https://polymarket.com/market/${encodeURIComponent("epl-bournemouth-vs-man-utd-2026-04-25")}`
+    );
+    assert.equal(body.cms_fixture_id, FIXTURE_RECORD.fixture_id);
+    assert.equal(body.vault, 1); // empty bucket → vault 1
+    assert.equal(body.dry_run, false);
+    // Run record reflects the vault sync result.
+    assert.equal(result.runRecord.vault_sync?.status, "completed");
+    assert.equal(result.runRecord.vault_sync?.vault, 1);
+    assert.equal(result.runRecord.vault_sync?.sync_posted, 2);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("vault sync is skipped when no polymarket coordinates are present", async () => {
+  const fetchCalls = [];
+  const originalFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    fetchCalls.push({ url: String(url), init });
+    return { ok: true, status: 200, headers: new Map(), text: async () => "{}" };
+  };
+
+  let fixtureLookupCount = 0;
+  let typeRefLookupCount = 0;
+  const moneylineRows = createParentMarketRows({
+    payload: createMoneylinePayload(),
+    parentMarketId: "pm-moneyline",
+    typeReferenceId: TYPE_REFERENCE_RECORD.type_reference_id,
+  });
+  const pool = createPoolWithVaultRouter(async (sql) => {
+    if (sql.includes("FROM fixtures")) {
+      fixtureLookupCount += 1;
+      return { rows: fixtureLookupCount >= 2 ? [FIXTURE_RECORD] : [] };
+    }
+    if (sql.includes("FROM type_references") && sql.includes("WHERE type_value_id")) {
+      typeRefLookupCount += 1;
+      return { rows: typeRefLookupCount >= 2 ? [TYPE_REFERENCE_RECORD] : [] };
+    }
+    if (sql.includes("FROM parent_markets pm")) return { rows: moneylineRows };
+    return { rows: [] };
+  });
+
+  try {
+    const result = await executeCmsSelectedPublish({
+      envelope: createEnvelope({
+        selectedPublishItems: [
+          { publish_key: "moneyline|0", parent_market_payload: createMoneylinePayload() },
+        ],
+      }),
+      config: {},
+      vaultConfig: VAULT_CONFIG_ENABLED,
+      pool,
+      pollUntilFn: ({ fn, attempts }) => pollUntil({ fn, attempts, delayMs: 0 }),
+      createRunIdFn: () => "run-vault-skipped",
+      publishFixtureFn: async () => ({ ok: true }),
+      publishTypeReferenceFn: async () => ({ ok: true }),
+      publishParentMarketFn: async () => ({ ok: true }),
+      runStore: new Map(),
+      preflight: await buildCmsSelectedPreflight({
+        envelope: createEnvelope({
+          selectedPublishItems: [
+            { publish_key: "moneyline|0", parent_market_payload: createMoneylinePayload() },
+          ],
+        }),
+        config: {},
+        pool,
+        resolveFixtureCandidate: async () => createResolvedFixture(),
+      }),
+    });
+
+    assert.equal(result.runRecord.status, "completed");
+    assert.equal(result.runRecord.vault_sync?.status, "skipped");
+    assert.match(result.runRecord.vault_sync?.reason || "", /polymarket/i);
+    // No vault sync POST happened.
+    assert.equal(
+      fetchCalls.filter((c) => c.url.includes("/api/v1/polymarket/sync-fixture")).length,
+      0
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("vault sync failure does NOT demote publish status", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: false,
+    status: 503,
+    headers: new Map(),
+    text: async () => JSON.stringify({ error: "vault host unreachable" }),
+  });
+
+  const moneylineRows = createParentMarketRows({
+    payload: createMoneylinePayload(),
+    parentMarketId: "pm-moneyline",
+    typeReferenceId: TYPE_REFERENCE_RECORD.type_reference_id,
+  });
+  let fixtureLookupCount = 0;
+  let typeRefLookupCount = 0;
+  const pool = createPoolWithVaultRouter(async (sql) => {
+    if (sql.includes("FROM fixtures")) {
+      fixtureLookupCount += 1;
+      return { rows: fixtureLookupCount >= 2 ? [FIXTURE_RECORD] : [] };
+    }
+    if (sql.includes("FROM type_references") && sql.includes("WHERE type_value_id")) {
+      typeRefLookupCount += 1;
+      return { rows: typeRefLookupCount >= 2 ? [TYPE_REFERENCE_RECORD] : [] };
+    }
+    if (sql.includes("FROM parent_markets pm")) return { rows: moneylineRows };
+    return { rows: [] };
+  });
+
+  try {
+    const baseEnvelope = createEnvelope({
+      selectedPublishItems: [
+        { publish_key: "moneyline|0", parent_market_payload: createMoneylinePayload() },
+      ],
+    });
+    const envelope = {
+      ...baseEnvelope,
+      payload: {
+        ...baseEnvelope.payload,
+        selected_fixture: {
+          ...SELECTED_FIXTURE,
+          polymarket_event_id: "abc-123",
+        },
+      },
+    };
+
+    const result = await executeCmsSelectedPublish({
+      envelope,
+      config: {},
+      vaultConfig: VAULT_CONFIG_ENABLED,
+      pool,
+      pollUntilFn: ({ fn, attempts }) => pollUntil({ fn, attempts, delayMs: 0 }),
+      createRunIdFn: () => "run-vault-fail",
+      publishFixtureFn: async () => ({ ok: true }),
+      publishTypeReferenceFn: async () => ({ ok: true }),
+      publishParentMarketFn: async () => ({ ok: true }),
+      runStore: new Map(),
+      preflight: await buildCmsSelectedPreflight({
+        envelope: createEnvelope({
+          selectedPublishItems: [
+            { publish_key: "moneyline|0", parent_market_payload: createMoneylinePayload() },
+          ],
+        }),
+        config: {},
+        pool,
+        resolveFixtureCandidate: async () => createResolvedFixture(),
+      }),
+    });
+
+    assert.equal(result.runRecord.status, "completed");
+    assert.equal(result.runRecord.aggregate.published, 1);
+    assert.equal(result.runRecord.vault_sync?.status, "failed");
+    assert.match(result.runRecord.vault_sync?.error || "", /vault sync failed/i);
   } finally {
     global.fetch = originalFetch;
   }
