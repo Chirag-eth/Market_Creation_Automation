@@ -27,7 +27,10 @@ import {
   publishCmsBundle,
   resolveCmsPublishBundle,
 } from "./src/backend/cmsPublisher.js";
-import { createCmsBatchRunRecord } from "./src/backend/cmsBatchPublish.js";
+import {
+  createCmsBatchRunRecord,
+  SUBMARKET_TO_PUBLISH_KEYS,
+} from "./src/backend/cmsBatchPublish.js";
 import { createDbPool, discoverSchema } from "./src/backend/dbClient.js";
 import { queryCatalogRowsFromDb } from "./src/backend/catalogDb.js";
 import {
@@ -39,6 +42,11 @@ import {
   getLeagueScheduleDefinition,
   getLeagueScheduleDefinitions,
 } from "./src/shared/leagueRegistry.js";
+import {
+  resolveBatchLeague,
+  resolveBatchTeam,
+} from "./src/server/services/batchResolutionService.js";
+import { handleDocsRoutes } from "./src/server/routes/docsRoutes.js";
 import { normalizeLeagueRows, normalizeTeamRows, buildTeamAliasIndex } from "./src/data/catalog.js";
 import {
   buildUatParentPayloads,
@@ -54,15 +62,50 @@ import {
 } from "./src/backend/cmsSelectedPublish.js";
 import { validateFixtureJson } from "./src/core/validation.js";
 import { InvalidIntegrationPayloadError } from "./src/backend/publisherCore.js";
+import {
+  executeCmsBatchRun,
+  postCmsJson,
+  pickUuidLikeValue,
+  classifyExistingBatchParentMarketRows,
+  deriveBatchFixtureStatusFromMarkets,
+  deriveBatchRunStatusFromFixtures,
+} from "./src/backend/cmsBatchExecution.js";
+import {
+  getUpcomingSchedulePayload,
+  backgroundRefreshAllSchedules,
+  getScheduleCacheSnapshot,
+  getAllSchedulesPayload,
+  getCachedLeagueCodes,
+  clearScheduleCache,
+} from "./src/backend/scheduleCache.js";
+import {
+  handleJsonPublishFixtureRequest,
+  handleJsonPublishParentMarketRequest,
+  handleJsonPreparePublishRequest,
+} from "./src/backend/cmsJsonPublishHandlers.js";
 import { normalizeForSearch } from "./src/shared/util.js";
 import {
-  createSession, getSession, deleteSession,
-  parseSessionCookie, buildSessionCookie, buildClearSessionCookie,
-  createOAuthState, validateOAuthState,
-  exchangeGoogleCode, verifyGoogleIdToken,
-  isOrgEmail, buildGoogleAuthUrl, deriveInitials,
+  createSession,
+  getSession,
+  deleteSession,
+  parseSessionCookie,
+  buildSessionCookie,
+  buildClearSessionCookie,
+  createOAuthState,
+  validateOAuthState,
+  exchangeGoogleCode,
+  verifyGoogleIdToken,
+  isOrgEmail,
+  buildGoogleAuthUrl,
+  deriveInitials,
   purgeExpiredSessions,
 } from "./src/backend/auth.js";
+import { logger, httpLogger, createScopedLogger } from "./src/shared/serverLogger.js";
+
+const serverLog = createScopedLogger("server");
+const authLog = createScopedLogger("auth");
+const schedLog = createScopedLogger("schedule");
+const batchLog = createScopedLogger("batch");
 
 const STARTUP_ENV = { ...process.env };
 const ROOT_DIR = path.resolve(process.cwd());
@@ -73,16 +116,33 @@ for (const envFile of resolveDotEnvFiles(ROOT_DIR, process.env)) {
 // Keys that must come exclusively from a profile's .env file and must not
 // bleed in from the process startup environment when profiles are built.
 const PROFILE_BOUND_KEYS = new Set([
-  "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_SSL",
-  "COMP_SERVICE_HOST", "COMP_SERVICE_INTERNAL_HOST", "MARKET_MAKING_HOST",
-  "ORDER_SERVICE_HOST", "LSPORTS_HOST", "PUBLIC_HOST",
-  "ACCESS_TOKEN", "SPORTSDATA_API_KEY",
-  "POLYMARKET_BEARER_TOKEN", "POLYMARKET_AUTH_HEADER_NAME", "POLYMARKET_AUTH_HEADER_VALUE",
-  "POLYMARKET_CLOB_BASE_URL", "POLYMARKET_DISCOVERY_BASE_URL",
-  "SPORTSDATA_SCHEDULE_BASE_URL", "SPORTSDATA_SCHEDULE_SEASON",
-  "ENABLED_INTEGRATIONS_CATALOG_ADMIN", "ENABLED_INTEGRATIONS_CMS",
-  "ENABLED_INTEGRATIONS_REDEMPTION", "ENABLED_INTEGRATIONS_SPORTSINFO",
-  "ENABLED_INTEGRATIONS_VAULT", "DEV_ALLOW_MOCK_DOWNSTREAM",
+  "DB_HOST",
+  "DB_PORT",
+  "DB_USER",
+  "DB_PASSWORD",
+  "DB_NAME",
+  "DB_SSL",
+  "COMP_SERVICE_HOST",
+  "COMP_SERVICE_INTERNAL_HOST",
+  "MARKET_MAKING_HOST",
+  "ORDER_SERVICE_HOST",
+  "LSPORTS_HOST",
+  "PUBLIC_HOST",
+  "ACCESS_TOKEN",
+  "SPORTSDATA_API_KEY",
+  "POLYMARKET_BEARER_TOKEN",
+  "POLYMARKET_AUTH_HEADER_NAME",
+  "POLYMARKET_AUTH_HEADER_VALUE",
+  "POLYMARKET_CLOB_BASE_URL",
+  "POLYMARKET_DISCOVERY_BASE_URL",
+  "SPORTSDATA_SCHEDULE_BASE_URL",
+  "SPORTSDATA_SCHEDULE_SEASON",
+  "ENABLED_INTEGRATIONS_CATALOG_ADMIN",
+  "ENABLED_INTEGRATIONS_CMS",
+  "ENABLED_INTEGRATIONS_REDEMPTION",
+  "ENABLED_INTEGRATIONS_SPORTSINFO",
+  "ENABLED_INTEGRATIONS_VAULT",
+  "DEV_ALLOW_MOCK_DOWNSTREAM",
 ]);
 
 const RUNTIME_ENV_PROFILES = createRuntimeEnvironmentProfiles(ROOT_DIR, STARTUP_ENV);
@@ -110,6 +170,8 @@ if (!RUNTIME_ENV_PROFILES[activeRuntimeEnvCode]) {
 const PORT = parsePositiveIntegerEnv(process.env.PORT, 2020, { min: 1 });
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const CATALOG_DIR = path.join(ROOT_DIR, "catalog");
+const OPENAPI_JSON_PATH = path.join(ROOT_DIR, "docs", "openapi.json");
+const OPENAPI_YAML_PATH = path.join(ROOT_DIR, "docs", "openapi.yaml");
 const DEFAULT_DOWNLOADS_LEAGUES_CSV_PATH = path.join(os.homedir(), "Downloads", "leagues.csv");
 const DEFAULT_DOWNLOADS_TEAMS_CSV_PATH = path.join(os.homedir(), "Downloads", "teams.csv");
 // Candidate pairs are tried in order; both files in a pair must exist so leagues
@@ -117,33 +179,53 @@ const DEFAULT_DOWNLOADS_TEAMS_CSV_PATH = path.join(os.homedir(), "Downloads", "t
 const DEFAULT_LOCAL_CATALOG_CANDIDATE_PAIRS = [
   {
     leagues: path.join(CATALOG_DIR, "leagues.csv"),
-    teams:   path.join(CATALOG_DIR, "teams.csv"),
+    teams: path.join(CATALOG_DIR, "teams.csv"),
   },
   {
     leagues: path.join(CATALOG_DIR, "leagues-main.csv"),
-    teams:   path.join(CATALOG_DIR, "teams-main.csv"),
+    teams: path.join(CATALOG_DIR, "teams-main.csv"),
   },
 ];
-const ALLOW_DOWNLOADS_CSV_FALLBACK = String(process.env.ALLOW_DOWNLOADS_CSV_FALLBACK || "").trim() === "1";
+const ALLOW_DOWNLOADS_CSV_FALLBACK =
+  String(process.env.ALLOW_DOWNLOADS_CSV_FALLBACK || "").trim() === "1";
 const EXTRA_LEAGUES_CSV_PATHS = parseCsvPathListEnv(process.env.EXTRA_LEAGUES_CSV_PATHS || "");
 const EXTRA_TEAMS_CSV_PATHS = parseCsvPathListEnv(process.env.EXTRA_TEAMS_CSV_PATHS || "");
 const TRUST_PROXY = String(process.env.TRUST_PROXY || "").trim() === "1";
 const API_BEARER_TOKEN = String(process.env.API_BEARER_TOKEN || "").trim();
 const APP_BASIC_AUTH_USER = String(process.env.APP_BASIC_AUTH_USER || "").trim();
 const APP_BASIC_AUTH_PASS = String(process.env.APP_BASIC_AUTH_PASS || "").trim();
-const GOOGLE_CLIENT_ID     = String(process.env.GOOGLE_CLIENT_ID     || "").trim();
+const GOOGLE_CLIENT_ID = String(process.env.GOOGLE_CLIENT_ID || "").trim();
 const GOOGLE_CLIENT_SECRET = String(process.env.GOOGLE_CLIENT_SECRET || "").trim();
-const PUBLIC_BASE_URL      = String(process.env.PUBLIC_BASE_URL      || "").trim();
-const AUTH_ORG_DOMAIN      = String(process.env.AUTH_ORG_DOMAIN      || "pred.app").trim();
-const AUTH_SESSION_TTL_MS  = parsePositiveIntegerEnv(process.env.AUTH_SESSION_TTL_MS, 86_400_000, { min: 60_000 });
+const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || "").trim();
+const AUTH_ORG_DOMAIN = String(process.env.AUTH_ORG_DOMAIN || "pred.app").trim();
+const AUTH_SESSION_TTL_MS = parsePositiveIntegerEnv(process.env.AUTH_SESSION_TTL_MS, 86_400_000, {
+  min: 60_000,
+});
 const GOOGLE_OAUTH_ENABLED = Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && PUBLIC_BASE_URL);
-const API_RATE_WINDOW_MS = parsePositiveIntegerEnv(process.env.API_RATE_WINDOW_MS, 60_000, { min: 1_000 });
-const API_RATE_MAX_REQUESTS = parsePositiveIntegerEnv(process.env.API_RATE_MAX_REQUESTS, 180, { min: 1 });
-const SCHEDULE_CACHE_TTL_MS = parsePositiveIntegerEnv(process.env.SCHEDULE_CACHE_TTL_MS, 300_000, { min: 1_000 });
-const SCHEDULE_FETCH_TIMEOUT_MS = parsePositiveIntegerEnv(process.env.SCHEDULE_FETCH_TIMEOUT_MS, 8_000, { min: 1_000 });
+const API_RATE_WINDOW_MS = parsePositiveIntegerEnv(process.env.API_RATE_WINDOW_MS, 60_000, {
+  min: 1_000,
+});
+const API_RATE_MAX_REQUESTS = parsePositiveIntegerEnv(process.env.API_RATE_MAX_REQUESTS, 180, {
+  min: 1,
+});
+const SCHEDULE_CACHE_TTL_MS = parsePositiveIntegerEnv(process.env.SCHEDULE_CACHE_TTL_MS, 300_000, {
+  min: 1_000,
+});
+const SCHEDULE_FETCH_TIMEOUT_MS = parsePositiveIntegerEnv(
+  process.env.SCHEDULE_FETCH_TIMEOUT_MS,
+  8_000,
+  { min: 1_000 }
+);
 const SPORTSDATA_API_KEY = String(process.env.SPORTSDATA_API_KEY || "").trim();
-const SPORTSDATA_SCHEDULE_BASE_URL = String(process.env.SPORTSDATA_SCHEDULE_BASE_URL || "https://api.sportsdata.io/v4/soccer/scores/json/Schedule").trim();
-const SPORTSDATA_SCHEDULE_SEASON = parsePositiveIntegerEnv(process.env.SPORTSDATA_SCHEDULE_SEASON, 2026, { min: 2000 });
+const SPORTSDATA_SCHEDULE_BASE_URL = String(
+  process.env.SPORTSDATA_SCHEDULE_BASE_URL ||
+    "https://api.sportsdata.io/v4/soccer/scores/json/Schedule"
+).trim();
+const SPORTSDATA_SCHEDULE_SEASON = parsePositiveIntegerEnv(
+  process.env.SPORTSDATA_SCHEDULE_SEASON,
+  2026,
+  { min: 2000 }
+);
 const SCHEDULE_NOW_ISO = String(process.env.SCHEDULE_NOW_ISO || "").trim();
 const LSPORTS_SCHEDULE_CSV_PATH = resolveLsportsScheduleCsvPath();
 
@@ -184,26 +266,28 @@ const SECURITY_HEADERS = {
 
 let catalogCache = null;
 const apiRateCounters = new Map();
-const scheduleCache = new Map();
 const batchRunStore = new Map();
+let OPENAPI_SPEC = null;
+let OPENAPI_YAML = null;
 
-// Maps frontend submarket IDs → CMS publish keys
-const SUBMARKET_TO_PUBLISH_KEYS = {
-  moneyline: ["moneyline|0"],
-  btts:      ["btts|0"],
-  ou_1_5:   ["totals|1.5"],
-  ou_2_5:   ["totals|2.5"],
-  ou_3_5:   ["totals|3.5"],
-  ou_4_5:   ["totals|4.5"],
-  home_1_5: ["spreads|1.5|home"],
-  away_1_5: ["spreads|1.5|away"],
-  home_2_5: ["spreads|2.5|home"],
-  away_2_5: ["spreads|2.5|away"],
-  spreads:  ["spreads|1.5|home", "spreads|1.5|away", "spreads|2.5|home", "spreads|2.5|away"],
-  totals:   ["totals|1.5", "totals|2.5", "totals|3.5", "totals|4.5"],
-};
+if (existsSync(OPENAPI_JSON_PATH)) {
+  try {
+    OPENAPI_SPEC = JSON.parse(readFileSync(OPENAPI_JSON_PATH, "utf8"));
+  } catch (err) {
+    console.warn(`[openapi] Failed to parse ${OPENAPI_JSON_PATH}: ${err.message}`);
+  }
+}
+
+if (existsSync(OPENAPI_YAML_PATH)) {
+  try {
+    OPENAPI_YAML = readFileSync(OPENAPI_YAML_PATH, "utf8");
+  } catch (err) {
+    console.warn(`[openapi] Failed to read ${OPENAPI_YAML_PATH}: ${err.message}`);
+  }
+}
 
 const server = http.createServer(async (req, res) => {
+  httpLogger(req, res);
   try {
     const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
@@ -221,6 +305,19 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (
+      handleDocsRoutes({
+        pathname: requestUrl.pathname,
+        res,
+        openApiSpec: OPENAPI_SPEC,
+        openApiYaml: OPENAPI_YAML,
+        sendJson,
+        sendText,
+      })
+    ) {
+      return;
+    }
+
     // ── Google OAuth routes (exempt from auth) ────────────────────────────────
     if (requestUrl.pathname === "/auth/google") {
       if (!GOOGLE_OAUTH_ENABLED) {
@@ -229,35 +326,60 @@ const server = http.createServer(async (req, res) => {
       }
       const state = createOAuthState();
       const redirectUri = `${PUBLIC_BASE_URL}/auth/google/callback`;
-      res.writeHead(302, { Location: buildGoogleAuthUrl(GOOGLE_CLIENT_ID, redirectUri, state), "Cache-Control": "no-store" });
+      res.writeHead(302, {
+        Location: buildGoogleAuthUrl(GOOGLE_CLIENT_ID, redirectUri, state),
+        "Cache-Control": "no-store",
+      });
       res.end();
       return;
     }
 
     if (requestUrl.pathname === "/auth/google/callback") {
-      const code  = requestUrl.searchParams.get("code");
+      const code = requestUrl.searchParams.get("code");
       const state = requestUrl.searchParams.get("state");
       const error = requestUrl.searchParams.get("error");
-      if (error || !code || !state || !validateOAuthState(state)) {
-        sendText(res, 400, `OAuth error: ${error || "invalid or expired state — please try again."}`);
+      // Always consume state first — prevents replay even when error/code is absent
+      const stateValid = state ? validateOAuthState(state) : false;
+      if (error || !code || !stateValid) {
+        sendText(
+          res,
+          400,
+          `OAuth error: ${error || "invalid or expired state — please try again."}`
+        );
         return;
       }
       try {
         const redirectUri = `${PUBLIC_BASE_URL}/auth/google/callback`;
-        const tokens  = await exchangeGoogleCode(code, redirectUri, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
+        const tokens = await exchangeGoogleCode(
+          code,
+          redirectUri,
+          GOOGLE_CLIENT_ID,
+          GOOGLE_CLIENT_SECRET
+        );
         const profile = await verifyGoogleIdToken(tokens.id_token, GOOGLE_CLIENT_ID);
         if (!isOrgEmail(profile.email, AUTH_ORG_DOMAIN)) {
-          sendText(res, 403, `Access restricted to @${AUTH_ORG_DOMAIN} accounts. You signed in as ${profile.email}.`);
+          sendText(
+            res,
+            403,
+            `Access restricted to @${AUTH_ORG_DOMAIN} accounts. You signed in as ${profile.email}.`
+          );
           return;
         }
-        const userData  = { email: profile.email, name: profile.name || profile.email.split("@")[0], initials: deriveInitials(profile.name || profile.email.split("@")[0]) };
+        const userData = {
+          email: profile.email,
+          name: profile.name || profile.email.split("@")[0],
+          initials: deriveInitials(profile.name || profile.email.split("@")[0]),
+        };
         const sessionId = createSession(userData, AUTH_SESSION_TTL_MS);
-        const isSecure  = TRUST_PROXY || PUBLIC_BASE_URL.startsWith("https://");
-        const cookie    = buildSessionCookie(sessionId, { secure: isSecure, ttlSeconds: Math.floor(AUTH_SESSION_TTL_MS / 1000) });
+        const isSecure = TRUST_PROXY || PUBLIC_BASE_URL.startsWith("https://");
+        const cookie = buildSessionCookie(sessionId, {
+          secure: isSecure,
+          ttlSeconds: Math.floor(AUTH_SESSION_TTL_MS / 1000),
+        });
         res.writeHead(302, { Location: "/", "Set-Cookie": cookie, "Cache-Control": "no-store" });
         res.end();
       } catch (err) {
-        console.error("[auth/callback]", err.message);
+        authLog.error({ err, reqId: req.id }, "google callback failed");
         sendText(res, 500, "Authentication failed. Please try again.");
       }
       return;
@@ -266,15 +388,26 @@ const server = http.createServer(async (req, res) => {
     if (requestUrl.pathname === "/auth/logout") {
       const sessionId = parseSessionCookie(req);
       if (sessionId) deleteSession(sessionId);
-      res.writeHead(302, { Location: "/", "Set-Cookie": buildClearSessionCookie(), "Cache-Control": "no-store" });
+      res.writeHead(302, {
+        Location: "/",
+        "Set-Cookie": buildClearSessionCookie(),
+        "Cache-Control": "no-store",
+      });
       res.end();
       return;
     }
 
     if (requestUrl.pathname === "/auth/me") {
+      if (!GOOGLE_OAUTH_ENABLED) {
+        sendJson(res, 200, { name: "Local Dev", email: "dev@localhost", initials: "LD" });
+        return;
+      }
       const sessionId = parseSessionCookie(req);
       const user = sessionId ? getSession(sessionId) : null;
-      if (!user) { sendJson(res, 401, { error: "Not authenticated" }); return; }
+      if (!user) {
+        sendJson(res, 401, { error: "Not authenticated" });
+        return;
+      }
       sendJson(res, 200, { name: user.name, email: user.email, initials: user.initials });
       return;
     }
@@ -313,7 +446,9 @@ const server = http.createServer(async (req, res) => {
           return;
         }
       } else if (!isAuthorizedStaticRequest(req)) {
-        sendText(res, 401, "Unauthorized", { "WWW-Authenticate": 'Basic realm="Fixture OCR Dashboard"' });
+        sendText(res, 401, "Unauthorized", {
+          "WWW-Authenticate": 'Basic realm="Fixture OCR Dashboard"',
+        });
         return;
       }
     }
@@ -410,17 +545,17 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (requestUrl.pathname === "/api/json/publish-fixture" && req.method === "POST") {
-      await handleJsonPublishFixtureRequest(req, res);
+      await handleJsonPublishFixtureRequest(req, res, jsonPublishCtx);
       return;
     }
 
     if (requestUrl.pathname === "/api/json/publish-parent-market" && req.method === "POST") {
-      await handleJsonPublishParentMarketRequest(req, res);
+      await handleJsonPublishParentMarketRequest(req, res, jsonPublishCtx);
       return;
     }
 
     if (requestUrl.pathname === "/api/json/prepare-publish" && req.method === "POST") {
-      await handleJsonPreparePublishRequest(req, res);
+      await handleJsonPreparePublishRequest(req, res, jsonPublishCtx);
       return;
     }
 
@@ -440,7 +575,7 @@ const server = http.createServer(async (req, res) => {
 
     await serveStaticFile(requestUrl.pathname, res);
   } catch (error) {
-    console.error(error);
+    (req.log || logger).error({ err: error }, "unhandled request error");
     sendJson(res, 500, { error: "Internal server error", detail: String(error?.message || error) });
   }
 });
@@ -529,7 +664,9 @@ export function resolveDotEnvFiles(rootDir, env = process.env) {
   const resolvedRoot = path.resolve(rootDir || process.cwd());
   const files = [];
   const explicitEnvFile = String(env?.ENV_FILE || "").trim();
-  const appEnv = String(env?.APP_ENV || "").trim().toLowerCase();
+  const appEnv = String(env?.APP_ENV || "")
+    .trim()
+    .toLowerCase();
 
   if (explicitEnvFile) {
     const resolvedExplicitEnvFile = path.isAbsolute(explicitEnvFile)
@@ -558,7 +695,9 @@ export function resolveRuntimeEnvironment(env = process.env) {
 }
 
 function resolveRuntimeEnvironmentCode(env = process.env) {
-  const raw = String(env?.APP_ENV || "").trim().toLowerCase();
+  const raw = String(env?.APP_ENV || "")
+    .trim()
+    .toLowerCase();
   if (raw === "mainnet") return "mainnet";
   if (raw === "uat" || !raw || raw === "local") return "uat";
   if (raw === "dev" || raw === "development") return "dev";
@@ -581,26 +720,26 @@ function formatRuntimeEnvironmentLabel(appEnv) {
 
 function createRuntimeEnvironmentProfiles(rootDir, startupEnv = {}) {
   const resolvedRoot = path.resolve(rootDir || process.cwd());
-  const mainnetEnvFile    = path.resolve(resolvedRoot, ".env");
-  const mainnetLocalFile  = path.resolve(resolvedRoot, ".env.mainnet.local");
-  const uatEnvFile        = path.resolve(resolvedRoot, ".env.uat");
-  const uatLocalFile      = path.resolve(resolvedRoot, ".env.uat.local");
-  const devEnvFile        = path.resolve(resolvedRoot, ".env.dev");
-  const devLocalFile      = path.resolve(resolvedRoot, ".env.dev.local");
-  const testnetEnvFile    = path.resolve(resolvedRoot, ".env.testnet");
-  const testnetLocalFile  = path.resolve(resolvedRoot, ".env.testnet.local");
-  const sharedLocalFile   = path.resolve(resolvedRoot, ".env.local");
+  const mainnetEnvFile = path.resolve(resolvedRoot, ".env");
+  const mainnetLocalFile = path.resolve(resolvedRoot, ".env.mainnet.local");
+  const uatEnvFile = path.resolve(resolvedRoot, ".env.uat");
+  const uatLocalFile = path.resolve(resolvedRoot, ".env.uat.local");
+  const devEnvFile = path.resolve(resolvedRoot, ".env.dev");
+  const devLocalFile = path.resolve(resolvedRoot, ".env.dev.local");
+  const testnetEnvFile = path.resolve(resolvedRoot, ".env.testnet");
+  const testnetLocalFile = path.resolve(resolvedRoot, ".env.testnet.local");
+  const sharedLocalFile = path.resolve(resolvedRoot, ".env.local");
   const sanitizedStartupEnv = sanitizeRuntimeStartupEnv(startupEnv);
 
-  const mainnetValues  = readDotEnvValues(mainnetEnvFile);
-  const mainnetLocal   = readDotEnvValues(mainnetLocalFile);
-  const uatValues      = readDotEnvValues(uatEnvFile);
-  const uatLocal       = readDotEnvValues(uatLocalFile);
-  const devValues      = readDotEnvValues(devEnvFile);
-  const devLocal       = readDotEnvValues(devLocalFile);
-  const testnetValues  = readDotEnvValues(testnetEnvFile);
-  const testnetLocal   = readDotEnvValues(testnetLocalFile);
-  const sharedLocal    = readDotEnvValues(sharedLocalFile);
+  const mainnetValues = readDotEnvValues(mainnetEnvFile);
+  const mainnetLocal = readDotEnvValues(mainnetLocalFile);
+  const uatValues = readDotEnvValues(uatEnvFile);
+  const uatLocal = readDotEnvValues(uatLocalFile);
+  const devValues = readDotEnvValues(devEnvFile);
+  const devLocal = readDotEnvValues(devLocalFile);
+  const testnetValues = readDotEnvValues(testnetEnvFile);
+  const testnetLocal = readDotEnvValues(testnetLocalFile);
+  const sharedLocal = readDotEnvValues(sharedLocalFile);
 
   return {
     mainnet: {
@@ -707,7 +846,7 @@ function setActiveRuntimeEnvironment(nextCode) {
   const profile = getRuntimeEnvironmentProfile(nextCode);
   activeRuntimeEnvCode = profile.code;
   catalogCache = null;
-  scheduleCache.clear();
+  clearScheduleCache();
   return createRuntimeEnvironmentPayload();
 }
 
@@ -731,23 +870,21 @@ function parseCsvPathListEnv(rawValue) {
 }
 
 function resolveScheduleFetchTimeoutMs(runtimeEnv = getActiveRuntimeEnvVars()) {
-  return parsePositiveIntegerEnv(
-    runtimeEnv?.SCHEDULE_FETCH_TIMEOUT_MS,
-    SCHEDULE_FETCH_TIMEOUT_MS,
-    { min: 1_000 }
-  );
+  return parsePositiveIntegerEnv(runtimeEnv?.SCHEDULE_FETCH_TIMEOUT_MS, SCHEDULE_FETCH_TIMEOUT_MS, {
+    min: 1_000,
+  });
 }
 
 function resolveScheduleCacheTtlMs(runtimeEnv = getActiveRuntimeEnvVars()) {
-  return parsePositiveIntegerEnv(
-    runtimeEnv?.SCHEDULE_CACHE_TTL_MS,
-    SCHEDULE_CACHE_TTL_MS,
-    { min: 1_000 }
-  );
+  return parsePositiveIntegerEnv(runtimeEnv?.SCHEDULE_CACHE_TTL_MS, SCHEDULE_CACHE_TTL_MS, {
+    min: 1_000,
+  });
 }
 
 function resolveSportsDataScheduleBaseUrl(runtimeEnv = getActiveRuntimeEnvVars()) {
-  return String(runtimeEnv?.SPORTSDATA_SCHEDULE_BASE_URL || SPORTSDATA_SCHEDULE_BASE_URL || "").trim();
+  return String(
+    runtimeEnv?.SPORTSDATA_SCHEDULE_BASE_URL || SPORTSDATA_SCHEDULE_BASE_URL || ""
+  ).trim();
 }
 
 function resolveSportsDataScheduleSeason(runtimeEnv = getActiveRuntimeEnvVars()) {
@@ -757,6 +894,31 @@ function resolveSportsDataScheduleSeason(runtimeEnv = getActiveRuntimeEnvVars())
     { min: 2000 }
   );
 }
+
+// Bound context passed into scheduleCache.js so it can call back into server-
+// scoped helpers without importing from server.js (which would be circular).
+const schedCtx = {
+  rootDir: ROOT_DIR,
+  csvPath: LSPORTS_SCHEDULE_CSV_PATH,
+  resolveNow: resolveScheduleNow,
+  resolveTimeoutMs: resolveScheduleFetchTimeoutMs,
+  resolveSportsDataBaseUrl: resolveSportsDataScheduleBaseUrl,
+  resolveSportsDataSeason: resolveSportsDataScheduleSeason,
+  getActiveRuntimeEnvVars,
+  getDbPoolForEnv,
+  fetchLsportsCsvFixturesForLeague,
+};
+
+// Bound context passed into cmsJsonPublishHandlers.js for the same reason.
+const jsonPublishCtx = {
+  getActiveRuntimeEnvironmentProfile,
+  getActiveRuntimeEnvVars,
+  getDbPoolForEnv,
+  readJsonRequestBody,
+  sendJson,
+  resolveTeamRecordFromDb,
+  resolveLeagueRecordFromDb,
+};
 
 function validateRuntimeConfig() {
   const hasBasicUser = Boolean(APP_BASIC_AUTH_USER);
@@ -779,41 +941,40 @@ if (IS_MAIN) {
   setInterval(() => purgeExpiredSessions(), 10 * 60 * 1000).unref();
 
   server.listen(PORT, () => {
-    console.log(`Fixture OCR Market Builder running at http://localhost:${PORT}`);
+    serverLog.info({ port: PORT, url: `http://localhost:${PORT}` }, "server listening");
     void (async () => {
       try {
         const paths = await resolveCatalogPaths();
-        console.log(`CSV source (leagues): ${paths.leagues}`);
-        console.log(`CSV source (teams):   ${paths.teams}`);
+        serverLog.info({ leagues: paths.leagues, teams: paths.teams }, "csv sources resolved");
       } catch (error) {
-        console.log(`CSV source resolution failed: ${String(error?.message || error)}`);
+        serverLog.warn({ err: error }, "csv source resolution failed");
       }
     })();
 
     // Warm up schedule cache for all leagues so the first request is instant
     void Promise.allSettled(
-      getLeagueScheduleDefinitions().map(def =>
-        getUpcomingSchedulePayload(def.code).catch(err =>
-          console.warn(`[schedule-warmup] ${def.code}: ${err.message}`)
+      getLeagueScheduleDefinitions().map((def) =>
+        getUpcomingSchedulePayload(def.code, {}, schedCtx).catch((err) =>
+          schedLog.warn({ code: def.code, err }, "warmup failed for league")
         )
       )
     ).then(() => {
-      const warm = [...scheduleCache.keys()];
-      console.log(`[schedule-warmup] ${warm.length} league(s) cached: ${warm.join(", ")}`);
+      const warm = getCachedLeagueCodes();
+      schedLog.info({ count: warm.length, leagues: warm }, "warmup complete");
     });
 
     // Background schedule refresh — runs every SCHEDULE_CACHE_TTL_MS (default 5 min)
     const bgIntervalMs = SCHEDULE_CACHE_TTL_MS;
     setInterval(() => {
-      backgroundRefreshAllSchedules().catch(err =>
-        console.warn("[schedule-bg] interval error:", err.message)
+      backgroundRefreshAllSchedules(schedCtx).catch((err) =>
+        schedLog.warn({ err }, "background refresh interval error")
       );
     }, bgIntervalMs).unref();
-    console.log(`[schedule-bg] background refresh interval: ${bgIntervalMs / 1000}s`);
+    schedLog.info({ intervalSec: bgIntervalMs / 1000 }, "background refresh scheduled");
   });
 
   const shutdown = (signal) => {
-    console.log(`Received ${signal}. Shutting down...`);
+    serverLog.info({ signal }, "shutting down");
     server.close(() => {
       process.exit(0);
     });
@@ -865,7 +1026,12 @@ async function handleRuntimeEnvironmentRequest(req, res) {
   }
 
   if (req.method !== "POST") {
-    sendJson(res, 405, { error: "Method not allowed", detail: "Use GET or POST." }, { Allow: "GET, POST" });
+    sendJson(
+      res,
+      405,
+      { error: "Method not allowed", detail: "Use GET or POST." },
+      { Allow: "GET, POST" }
+    );
     return;
   }
 
@@ -881,7 +1047,8 @@ async function handleRuntimeEnvironmentRequest(req, res) {
   if (!RUNTIME_ENV_PROFILES[requestedEnv]) {
     sendJson(res, 400, {
       error: "Unsupported environment",
-      detail: 'Pass {"app_env":"mainnet"}, {"app_env":"uat"}, {"app_env":"dev"}, or {"app_env":"testnet"}.',
+      detail:
+        'Pass {"app_env":"mainnet"}, {"app_env":"uat"}, {"app_env":"dev"}, or {"app_env":"testnet"}.',
     });
     return;
   }
@@ -975,15 +1142,24 @@ async function handleCmsFixtureCreateRequest(req, res) {
     return;
   }
 
-  const gameId       = String(payload?.game_id || "").trim();
-  const source       = String(payload?.source || "").trim();
+  const gameId = String(payload?.game_id || "").trim();
+  const source = String(payload?.source || "").trim();
   const parentMarkets = Array.isArray(payload?.parent_markets) ? payload.parent_markets : [];
-  const cname        = String(payload?.cname || "").trim();
-  const appendix     = String(payload?.appendix ?? "");
+  const cname = String(payload?.cname || "").trim();
+  const appendix = String(payload?.appendix ?? "");
 
-  if (!gameId)  { sendJson(res, 400, { error: "game_id is required" }); return; }
-  if (!source)  { sendJson(res, 400, { error: "source is required" }); return; }
-  if (!parentMarkets.length) { sendJson(res, 400, { error: "parent_markets must be a non-empty array" }); return; }
+  if (!gameId) {
+    sendJson(res, 400, { error: "game_id is required" });
+    return;
+  }
+  if (!source) {
+    sendJson(res, 400, { error: "source is required" });
+    return;
+  }
+  if (!parentMarkets.length) {
+    sendJson(res, 400, { error: "parent_markets must be a non-empty array" });
+    return;
+  }
 
   const activeProfile = getActiveRuntimeEnvironmentProfile();
   const cmsConfig = createCmsRuntimeConfig(activeProfile.env);
@@ -1007,7 +1183,13 @@ async function handleCmsFixtureCreateRequest(req, res) {
       upstream = await fetch(url, {
         method: "POST",
         headers,
-        body: JSON.stringify({ game_id: gameId, source, parent_markets: parentMarkets, cname, appendix }),
+        body: JSON.stringify({
+          game_id: gameId,
+          source,
+          parent_markets: parentMarkets,
+          cname,
+          appendix,
+        }),
         signal: controller.signal,
       });
     } finally {
@@ -1043,27 +1225,38 @@ async function handleCmsBatchPublishRequest(req, res) {
     return;
   }
 
-  const fixtures   = Array.isArray(payload?.fixtures)   ? payload.fixtures   : [];
-  const submarkets = Array.isArray(payload?.submarkets)  ? payload.submarkets : [];
+  const fixtures = Array.isArray(payload?.fixtures) ? payload.fixtures : [];
+  const submarkets = Array.isArray(payload?.submarkets) ? payload.submarkets : [];
 
-  console.log(`[batch-publish] incoming request — ${fixtures.length} fixture(s), ${submarkets.length} submarket(s)`);
-  if (fixtures.length) console.log(`[batch-publish]   fixtures:`, JSON.stringify(fixtures.map(f => ({ id: f.id, home: f.home, away: f.away, league: f.leagueCode }))));
-  if (submarkets.length) console.log(`[batch-publish]   submarkets:`, submarkets);
+  batchLog.info(
+    {
+      fixtureCount: fixtures.length,
+      submarketCount: submarkets.length,
+      fixtures: fixtures.map((f) => ({
+        id: f.id,
+        home: f.home,
+        away: f.away,
+        league: f.leagueCode,
+      })),
+      submarkets,
+    },
+    "publish request received"
+  );
 
   if (!fixtures.length) {
-    console.warn(`[batch-publish] rejected — no fixtures`);
+    batchLog.warn("publish rejected: no fixtures");
     sendJson(res, 400, { error: "No fixtures provided." });
     return;
   }
   if (!submarkets.length) {
-    console.warn(`[batch-publish] rejected — no submarkets`);
+    batchLog.warn("publish rejected: no submarkets");
     sendJson(res, 400, { error: "No submarkets provided." });
     return;
   }
 
-  const publishKeys = [...new Set(submarkets.flatMap(s => SUBMARKET_TO_PUBLISH_KEYS[s] || []))];
+  const publishKeys = [...new Set(submarkets.flatMap((s) => SUBMARKET_TO_PUBLISH_KEYS[s] || []))];
   if (!publishKeys.length) {
-    console.warn(`[batch-publish] No publish keys mapped from submarkets: ${submarkets.join(", ")}`);
+    batchLog.warn({ submarkets }, "no publish keys mapped from submarkets");
     sendJson(res, 400, { error: "None of the provided submarkets map to known CMS publish keys." });
     return;
   }
@@ -1074,11 +1267,16 @@ async function handleCmsBatchPublishRequest(req, res) {
     : getActiveRuntimeEnvironmentProfile();
   const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-  console.log(`[batch-publish] ▶ ${runId}`);
-  console.log(`[batch-publish]   env       : ${activeProfile.label} (${activeProfile.code})`);
-  console.log(`[batch-publish]   fixtures  : ${fixtures.map(f => f.id || `${f.home} vs ${f.away}`).join(", ")}`);
-  console.log(`[batch-publish]   submarkets: ${submarkets.join(", ")}`);
-  console.log(`[batch-publish]   publishKeys: ${publishKeys.join(", ")}`);
+  batchLog.info(
+    {
+      runId,
+      env: { code: activeProfile.code, label: activeProfile.label },
+      fixtures: fixtures.map((f) => f.id || `${f.home} vs ${f.away}`),
+      submarkets,
+      publishKeys,
+    },
+    "publish run started"
+  );
 
   const runRecord = createCmsBatchRunRecord({
     runId,
@@ -1091,14 +1289,18 @@ async function handleCmsBatchPublishRequest(req, res) {
   batchRunStore.set(runId, runRecord);
 
   // Kick off async without blocking the response
-  executeCmsBatchRun(runId, fixtures, publishKeys, activeProfile).catch(err => {
+  executeCmsBatchRun(runId, fixtures, publishKeys, activeProfile, {
+    runStore: batchRunStore,
+    getDbPoolForEnv,
+    getCatalogPayloadCached,
+  }).catch((err) => {
     const record = batchRunStore.get(runId);
     if (record) {
       record.status = "failed";
       record.detail = String(err?.message || err);
       record.completed_at = new Date().toISOString();
     }
-    console.error(`[batch-run] ${runId} unhandled top-level error:`, err.message);
+    batchLog.error({ runId, err }, "unhandled top-level error in batch run");
   });
 
   sendJson(res, 202, { run_id: runId, status: "queued" });
@@ -1117,470 +1319,6 @@ function handleCmsBatchRunRequest(runId, res) {
   sendJson(res, 200, record);
 }
 
-async function executeCmsBatchRun(runId, fixtures, publishKeys, activeProfile) {
-  const record = batchRunStore.get(runId);
-  if (!record) {
-    console.error(`[batch-run] ${runId} — no record found in store, aborting`);
-    return;
-  }
-
-  record.status = "running";
-  console.log(`[batch-run] ${runId} — status: running`);
-
-  const cmsConfig = createCmsRuntimeConfig(activeProfile.env);
-  console.log(`[batch-run] ${runId} — CMS enabled: ${cmsConfig.enabled}, baseUrl: ${cmsConfig.baseUrl || "(none)"}`);
-
-  if (!cmsConfig.enabled) {
-    const detail = `CMS publishing is not configured for ${activeProfile.label}. Set COMP_SERVICE_INTERNAL_HOST.`;
-    console.error(`[batch-run] ${runId} — FAILED: ${detail}`);
-    record.status = "failed";
-    record.detail = detail;
-    record.completed_at = new Date().toISOString();
-    return;
-  }
-
-  // Load leagues + teams from DB (authoritative CMS IDs); fall back to CSV if DB not configured
-  let batchLeagues, batchTeams;
-  const dbPool = getDbPoolForEnv(activeProfile.env);
-  let catalogSource = "csv";
-  if (dbPool) {
-    console.log(`[batch-run] ${runId} — loading catalog from DB`);
-    try {
-      const dbCatalog = await queryCatalogRowsFromDb(dbPool);
-      batchLeagues = normalizeLeagueRows(dbCatalog.leagues || []);
-      batchTeams   = normalizeTeamRows(dbCatalog.teams || [], batchLeagues);
-      catalogSource = "db";
-    } catch (err) {
-      console.warn(`[batch-run] ${runId} — DB catalog query failed (${err.message}), falling back to CSV`);
-    }
-  }
-  if (!batchLeagues) {
-    console.log(`[batch-run] ${runId} — loading catalog from CSV`);
-    try {
-      const catalogPayload = await getCatalogPayloadCached();
-      batchLeagues = normalizeLeagueRows(catalogPayload.leagues || []);
-      batchTeams   = normalizeTeamRows(catalogPayload.teams || [], batchLeagues);
-    } catch (err) {
-      const detail = `Catalog load failed: ${err.message}`;
-      console.error(`[batch-run] ${runId} — FAILED: ${detail}`);
-      record.status = "failed";
-      record.detail = detail;
-      record.completed_at = new Date().toISOString();
-      return;
-    }
-  }
-
-  const teamAliasIdx = buildTeamAliasIndex(batchTeams);
-  console.log(`[batch-run] ${runId} — catalog loaded: ${batchLeagues.length} leagues, ${batchTeams.length} teams (source: ${catalogSource})`);
-
-  const fixtureResults = [];
-  let anyFailed = false;
-
-  for (const fixture of fixtures) {
-    const homeName  = fixture.home  || fixture.homeTeamName  || "";
-    const awayName  = fixture.away  || fixture.awayTeamName  || "";
-    const eventName = [homeName, awayName].filter(Boolean).join(" vs ");
-
-    console.log(`\n[batch-run] ${runId} ── fixture: ${eventName}`);
-    console.log(`[batch-run] ${runId}   id=${fixture.id}  leagueCode=${fixture.leagueCode}  kickoff=${fixture.kickoff}`);
-
-    try {
-      // ── 1. Resolve league ──────────────────────────────────────────────────
-      const league = resolveBatchLeague(batchLeagues, fixture.leagueCode);
-      if (!league) throw new Error(`League not found in catalog for code "${fixture.leagueCode}"`);
-      console.log(`[batch-run] ${runId}   league → ${league.name} (${league.id})`);
-
-      // ── 2. Resolve teams ───────────────────────────────────────────────────
-      let homeTeam = resolveBatchTeam(teamAliasIdx, homeName, league.id);
-      if (!homeTeam) throw new Error(`Home team "${homeName}" not found in catalog`);
-
-      let awayTeam = resolveBatchTeam(teamAliasIdx, awayName, league.id);
-      if (!awayTeam) throw new Error(`Away team "${awayName}" not found in catalog`);
-
-      // If a team's leagueId doesn't match the fixture's league, query DB for
-      // the correct team entry (teams can have multiple DB rows across leagues).
-      if (dbPool && homeTeam.leagueId !== league.id) {
-        const fixed = await resolveTeamByLeagueFromDb(dbPool, homeTeam.name, league.id);
-        if (fixed) { homeTeam = fixed; console.log(`[batch-run] ${runId}   home team corrected from DB: ${fixed.name} (${fixed.id})`); }
-        else console.warn(`[batch-run] ${runId}   WARN: home team has no entry for league ${league.id} in DB`);
-      }
-      if (dbPool && awayTeam.leagueId !== league.id) {
-        const fixed = await resolveTeamByLeagueFromDb(dbPool, awayTeam.name, league.id);
-        if (fixed) { awayTeam = fixed; console.log(`[batch-run] ${runId}   away team corrected from DB: ${fixed.name} (${fixed.id})`); }
-        else console.warn(`[batch-run] ${runId}   WARN: away team has no entry for league ${league.id} in DB`);
-      }
-
-      console.log(`[batch-run] ${runId}   home  → ${homeTeam.name} (${homeTeam.id}) leagueId=${homeTeam.leagueId}`);
-      console.log(`[batch-run] ${runId}   away  → ${awayTeam.name} (${awayTeam.id}) leagueId=${awayTeam.leagueId}`);
-
-      // ── 3. Build fixture payload ───────────────────────────────────────────
-      const kickoffIso  = fixture.kickoff || "";
-      const kickoffDate = kickoffIso.split("T")[0] || "";
-      const kickoffTime = (kickoffIso.split("T")[1] || "").replace("Z", "").slice(0, 5);
-      const now         = new Date().toISOString();
-
-      // Use team.name (common ASCII name, no hyphens) rather than alternateName
-      // which can contain hyphens (e.g. "Paris Saint-Germain FC") that the API rejects.
-      const catalogEventName = `${homeTeam.name || homeTeam.alternateName} vs ${awayTeam.name || awayTeam.alternateName}`;
-
-      // Match the canonical UAT fixture generator shape exactly:
-      // - integer match_day / match_week
-      // - ISO kickoff with millisecond precision from Date#toISOString()
-      const parsedKickoff = kickoffIso ? new Date(kickoffIso) : null;
-      const hasValidKickoff = parsedKickoff instanceof Date && !Number.isNaN(parsedKickoff.getTime());
-      const gameStartTime = hasValidKickoff ? parsedKickoff.toISOString() : kickoffIso;
-      const parsedMatchDay = Number.parseInt(String(fixture.matchday || fixture.matchDay || "1"), 10);
-      const parsedMatchWeek = Number.parseInt(String(fixture.matchWeek || fixture.match_week || "0"), 10);
-
-      const fixturePayload = {
-        name:            catalogEventName,
-        league_id:       league.id,
-        home_team_id:    homeTeam.id,
-        away_team_id:    awayTeam.id,
-        format:          null,
-        logo_url:        "https://public-assets.pred.app/market-assets/fixture_128x128.png",
-        theme_color:     "#FFFFFF",
-        match_day:       Number.isInteger(parsedMatchDay) && parsedMatchDay > 0 ? parsedMatchDay : 1,
-        match_week:      Number.isInteger(parsedMatchWeek) && parsedMatchWeek >= 0 ? parsedMatchWeek : 0,
-        location:        "",
-        venue:           "",
-        game_start_time: gameStartTime,
-        alternate_name:  buildUatFixtureAlternateName(homeTeam, awayTeam),
-      };
-
-      // ── 4. Fixture — DB lookup first, POST only if missing ─────────────────
-      let fixtureUuid = null;
-      if (dbPool) {
-        try {
-          const gameDate = gameStartTime.slice(0, 10);
-          // Exact match: league + both team UUIDs
-          const exact = await dbPool.query(
-            `SELECT fixture_id FROM fixtures
-             WHERE league_id = $1 AND home_team_id = $2 AND away_team_id = $3
-             ORDER BY created_at DESC NULLS LAST LIMIT 1`,
-            [league.id, homeTeam.id, awayTeam.id]
-          );
-          if (exact.rows.length > 0) {
-            fixtureUuid = String(exact.rows[0].fixture_id).trim();
-            console.log(`[batch-run] ${runId}   fixture found in DB (exact): ${fixtureUuid}`);
-          } else {
-            // Fallback: league + home team + game date (away team UUID may differ in DB)
-            const byHome = await dbPool.query(
-              `SELECT fixture_id, away_team_id FROM fixtures
-               WHERE league_id = $1 AND home_team_id = $2 AND game_start_time::date = $3::date
-               ORDER BY created_at DESC NULLS LAST LIMIT 1`,
-              [league.id, homeTeam.id, gameDate]
-            );
-            if (byHome.rows.length > 0) {
-              fixtureUuid = String(byHome.rows[0].fixture_id).trim();
-              console.log(`[batch-run] ${runId}   fixture found in DB (home+date, away_uuid=${byHome.rows[0].away_team_id}): ${fixtureUuid}`);
-            } else {
-              // Fallback: league + away team + game date (home team UUID may differ in DB)
-              const byAway = await dbPool.query(
-                `SELECT fixture_id, home_team_id FROM fixtures
-                 WHERE league_id = $1 AND away_team_id = $2 AND game_start_time::date = $3::date
-                 ORDER BY created_at DESC NULLS LAST LIMIT 1`,
-                [league.id, awayTeam.id, gameDate]
-              );
-              if (byAway.rows.length > 0) {
-                fixtureUuid = String(byAway.rows[0].fixture_id).trim();
-                console.log(`[batch-run] ${runId}   fixture found in DB (away+date, home_uuid=${byAway.rows[0].home_team_id}): ${fixtureUuid}`);
-              } else {
-                console.log(`[batch-run] ${runId}   no fixture in DB for league=${league.id} on date=${gameDate}, will POST`);
-              }
-            }
-          }
-        } catch (e) {
-          console.warn(`[batch-run] ${runId}   DB fixture lookup failed (will POST): ${e.message}`);
-        }
-      }
-      if (!fixtureUuid) {
-        console.log(`[batch-run] ${runId}   POST fixture payload:`, JSON.stringify(fixturePayload));
-        const fixtureResp = await postCmsJson(cmsConfig, cmsConfig.endpoints.fixture, fixturePayload);
-        console.log(`[batch-run] ${runId}   fixture response:`, JSON.stringify(fixtureResp));
-        fixtureUuid =
-          String(
-            fixtureResp?.fixture_id ||
-            fixtureResp?.data?.fixture_id ||
-            fixtureResp?.data?.id ||
-            fixtureResp?.id ||
-            ""
-          ).trim() || null;
-        if (!fixtureUuid) throw new Error(`Fixture POST returned no ID. Response: ${JSON.stringify(fixtureResp)}`);
-        console.log(`[batch-run] ${runId}   fixture created: ${fixtureUuid}`);
-      }
-
-      // ── 5. Type reference — DB lookup first, POST only if missing ──────────
-      const typeRefPayload = {
-        type_value:     "fixture",
-        type_value_id:  fixtureUuid,
-        canonical_name: buildUatCanonicalFixtureName(catalogEventName, kickoffDate, fixture.leagueCode || league.key || league.code || ""),
-      };
-      let typeRefId = null;
-      if (dbPool) {
-        try {
-          const rows = await dbPool.query(
-            `SELECT id, type_reference_id FROM type_references WHERE type_value = 'fixture' AND type_value_id = $1 LIMIT 1`,
-            [fixtureUuid]
-          );
-          if (rows.rows.length > 0) {
-            typeRefId = pickUuidLikeValue(
-              rows.rows[0].type_reference_id,
-              rows.rows[0].id,
-            );
-            console.log(`[batch-run] ${runId}   type-ref found in DB: ${typeRefId}`);
-          }
-        } catch (e) {
-          console.warn(`[batch-run] ${runId}   DB type-ref lookup failed (will POST): ${e.message}`);
-        }
-      }
-      if (!typeRefId) {
-        console.log(`[batch-run] ${runId}   POST type-ref payload:`, JSON.stringify(typeRefPayload));
-        const typeRefResp = await postCmsJson(cmsConfig, cmsConfig.endpoints.typeReference, typeRefPayload);
-        console.log(`[batch-run] ${runId}   type-ref response:`, JSON.stringify(typeRefResp));
-        typeRefId = pickUuidLikeValue(
-          typeRefResp?.type_reference_id ||
-          typeRefResp?.meta?.type_reference_id ||
-          typeRefResp?.data?.type_reference_id,
-          typeRefResp?.id,
-          typeRefResp?.meta?.id,
-          typeRefResp?.data?.id,
-        );
-        if (!typeRefId) {
-          throw new Error(`Type reference POST returned no ID. Response: ${JSON.stringify(typeRefResp)}`);
-        }
-        console.log(`[batch-run] ${runId}   type-ref id: ${typeRefId}`);
-      }
-
-      // ── 6. Parent markets — DB lookup first, POST only if missing ──────────
-      const marketResults = [];
-      const savedParentPayloads = {};
-
-      for (const publishKey of publishKeys) {
-        const [family, line, side] = publishKey.split("|");
-        console.log(`[batch-run] ${runId}   publishKey="${publishKey}"  family=${family}  line=${line || "0"}  side=${side || "-"}`);
-
-        const parentPayloads = buildUatParentPayloads({
-          fixtureJson:     fixturePayload,
-          league:          league,
-          homeTeam:        homeTeam,
-          awayTeam:        awayTeam,
-          fixtureDateIso:  kickoffDate,
-          kickoffTimeUtc:  kickoffTime,
-          openIso:         kickoffIso,
-          createdAtIso:    now,
-          typeReferenceId: typeRefId,
-          outputProfile:   "uat",
-          marketLine:      line || "0",
-          spreadTeamSide:  side || "home",
-        });
-
-        const familyPayload = parentPayloads?.[family];
-        if (!familyPayload) {
-          console.warn(`[batch-run] ${runId}   ⚠ no payload built for family "${family}" — skipping`);
-          marketResults.push({ publish_key: publishKey, status: "skipped", reason: `No UAT payload for family "${family}"` });
-          continue;
-        }
-        savedParentPayloads[publishKey] = familyPayload;
-
-        // Check DB for existing or half-prepared parent market state for this slot.
-        let existingParentState = null;
-        if (dbPool) {
-          try {
-            const parent = familyPayload?.parent_market || {};
-            const rows = await dbPool.query(
-              `SELECT
-                  pm.parent_market_id,
-                  pm.parent_market_family,
-                  pm.market_line,
-                  pm.type_reference_id,
-                  pm.title,
-                  m.market_id,
-                  m.team_id,
-                  m.name AS market_name,
-                  m.market_code
-                 FROM parent_markets pm
-                 LEFT JOIN markets m
-                   ON m.parent_market_id = pm.parent_market_id
-                WHERE type_reference_id = $1
-                  AND parent_market_family = $2
-                  AND market_line = $3
-                  AND title = $4
-                ORDER BY pm.created_at DESC NULLS LAST, m.created_at DESC NULLS LAST`,
-              [
-                typeRefId,
-                String(parent.parent_market_family || "").trim(),
-                String(parent.market_line ?? "").trim(),
-                String(parent.title || "").trim(),
-              ]
-            );
-            if (rows.rows.length > 0) {
-              existingParentState = classifyExistingBatchParentMarketRows(rows.rows, {
-                publishKey,
-                homeTeamId: homeTeam.id,
-                awayTeamId: awayTeam.id,
-              });
-              console.log(
-                `[batch-run] ${runId}   parent-market state for key="${publishKey}": ${existingParentState.status}`
-              );
-            }
-          } catch (e) {
-            console.warn(`[batch-run] ${runId}   DB parent-market lookup failed (will POST): ${e.message}`);
-          }
-        }
-
-        if (existingParentState?.status === "existing") {
-          marketResults.push({ publish_key: publishKey, status: "exists" });
-          continue;
-        }
-
-        if (existingParentState?.status === "half_prepared") {
-          marketResults.push({
-            publish_key: publishKey,
-            status: "half_prepared",
-            reason: String(existingParentState.warnings?.join(" ") || "").trim() || "Existing parent market is half-prepared.",
-          });
-          continue;
-        }
-
-        console.log(`[batch-run] ${runId}   POST parent-market payload:`, JSON.stringify(familyPayload));
-        const pmResp = await postCmsJson(cmsConfig, cmsConfig.endpoints.parentMarket, familyPayload);
-        console.log(`[batch-run] ${runId}   parent-market response:`, JSON.stringify(pmResp));
-        marketResults.push({ publish_key: publishKey, status: "published" });
-      }
-
-      fixtureResults.push({
-        fixture_key: fixture.id || eventName,
-        event_name:  eventName,
-        fixture_id:  fixtureUuid,
-        status:      deriveBatchFixtureStatusFromMarkets(marketResults),
-        markets:     marketResults,
-        payloads: {
-          fixture:        fixturePayload,
-          type_reference: typeRefPayload,
-          parent_markets: savedParentPayloads,
-        },
-      });
-
-    } catch (err) {
-      anyFailed = true;
-      console.error(`[batch-run] ${runId}   FAILED "${eventName}": ${err.message}`);
-      fixtureResults.push({
-        fixture_key: fixture.id || eventName,
-        event_name:  eventName,
-        status:      "failed",
-        reason:      String(err?.message || err),
-        markets:     publishKeys.map(key => ({ publish_key: key, status: "failed" })),
-      });
-    }
-  }
-
-  record.fixtures     = fixtureResults;
-  record.status       = deriveBatchRunStatusFromFixtures(fixtureResults, { anyFailed });
-  record.completed_at = new Date().toISOString();
-  console.log(`\n[batch-run] ${runId} — DONE: ${record.status} (${fixtureResults.length} fixture(s))`);
-}
-
-// ── Batch publish helpers ──────────────────────────────────────────────────────
-
-function resolveBatchLeague(normalizedLeagues, leagueCode) {
-  if (!leagueCode) return null;
-  const normalizedScheduleCode = resolveLeagueScheduleCode(leagueCode) || String(leagueCode || "").trim().toLowerCase();
-  const leagueDef = getLeagueScheduleDefinition(normalizedScheduleCode);
-  const needles = new Set([
-    normalizeForSearch(leagueCode),
-    normalizeForSearch(normalizedScheduleCode),
-    normalizeForSearch(leagueDef?.label),
-    ...((Array.isArray(leagueDef?.aliases) ? leagueDef.aliases : []).map((alias) => normalizeForSearch(alias))),
-  ]);
-  return normalizedLeagues.find(l => {
-    const haystack = new Set([
-      normalizeForSearch(l.key),
-      normalizeForSearch(l.name),
-      normalizeForSearch(l.slug),
-      normalizeForSearch(l.alternateName),
-      ...((Array.isArray(l.aliases) ? l.aliases : []).map((alias) => normalizeForSearch(alias))),
-    ]);
-    for (const needle of needles) {
-      if (needle && haystack.has(needle)) {
-        return true;
-      }
-    }
-    return false;
-  }) || null;
-}
-
-function resolveBatchTeam(teamAliasIdx, teamName, leagueId) {
-  if (!teamName) return null;
-  const needle = normalizeForSearch(teamName);
-  // Prefer exact alias match within the same league
-  const candidates = teamAliasIdx.filter(e => e.alias === needle);
-  if (candidates.length === 1) return candidates[0].team;
-  const sameLeague = candidates.find(e => e.team.leagueId === leagueId);
-  if (sameLeague) return sameLeague.team;
-  if (candidates.length > 0) return candidates[0].team;
-  // Fallback: substring match — collect all, prefer same league
-  const partials = teamAliasIdx.filter(e => e.alias.includes(needle) || needle.includes(e.alias));
-  if (partials.length === 1) return partials[0].team;
-  const sameLeaguePartial = partials.find(e => e.team.leagueId === leagueId);
-  return sameLeaguePartial?.team || partials[0]?.team || null;
-}
-
-// Query DB for a team entry with the exact league_id (fallback when catalog resolution
-// picks a team from the wrong league, e.g. Liverpool with UCL league_id when EPL is needed).
-async function resolveTeamByLeagueFromDb(pool, teamName, leagueId) {
-  try {
-    const rows = await pool.query(
-      `SELECT team_id, name, alternate_name, league_id FROM teams
-       WHERE league_id = $1 AND (name ILIKE $2 OR alternate_name ILIKE $2)
-       ORDER BY name LIMIT 1`,
-      [leagueId, teamName]
-    );
-    if (!rows.rows.length) return null;
-    const r = rows.rows[0];
-    return {
-      id:            String(r.team_id || "").trim(),
-      name:          String(r.name || "").trim(),
-      alternateName: String(r.alternate_name || r.name || "").trim(),
-      leagueId:      String(r.league_id || "").trim(),
-    };
-  } catch { return null; }
-}
-
-async function postCmsJson(cmsConfig, url, payload) {
-  const headers = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  };
-  if (cmsConfig.bearerToken) {
-    headers.Authorization = `Bearer ${cmsConfig.bearerToken}`;
-  }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), cmsConfig.timeoutMs || 8000);
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    let body;
-    try { body = JSON.parse(text); } catch { body = text; }
-    if (!response.ok) {
-      const respHeaders = {};
-      for (const [k, v] of response.headers.entries()) respHeaders[k] = v;
-      console.error(`[cms-post] ${response.status} from ${url}`);
-      console.error(`[cms-post]   resp headers:`, JSON.stringify(respHeaders));
-      console.error(`[cms-post]   resp body:`, typeof body === "string" ? body : JSON.stringify(body));
-      throw new Error(`HTTP ${response.status} from ${url}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
-    }
-    return body;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 async function handleDebugDbRequest(res) {
   const pool = getDbPoolForEnv(getActiveRuntimeEnvVars());
   if (!pool) {
@@ -1589,18 +1327,32 @@ async function handleDebugDbRequest(res) {
   }
   try {
     const schema = await discoverSchema(pool);
-    const relevantTables = ["fixtures", "type_references", "parent_markets", "markets", "leagues", "teams"];
+    const relevantTables = [
+      "fixtures",
+      "type_references",
+      "parent_markets",
+      "markets",
+      "leagues",
+      "teams",
+    ];
     const samples = {};
     for (const table of relevantTables) {
       if (!schema[table]) continue;
       try {
-        const r = await pool.query(`SELECT * FROM ${table} ORDER BY created_at DESC NULLS LAST LIMIT 3`);
+        const r = await pool.query(
+          `SELECT * FROM ${table} ORDER BY created_at DESC NULLS LAST LIMIT 3`
+        );
         samples[table] = { columns: schema[table], rows: r.rows };
       } catch (e) {
         samples[table] = { columns: schema[table], error: e.message };
       }
     }
-    sendJson(res, 200, { schema: Object.fromEntries(relevantTables.filter(t => schema[t]).map(t => [t, schema[t]])), samples });
+    sendJson(res, 200, {
+      schema: Object.fromEntries(
+        relevantTables.filter((t) => schema[t]).map((t) => [t, schema[t]])
+      ),
+      samples,
+    });
   } catch (err) {
     sendJson(res, 500, { error: err.message });
   }
@@ -1646,28 +1398,30 @@ async function handleDbVerifyFixtureRequest(req, res) {
       fixtureRows = r.rows;
     }
 
-    const result = await Promise.all(fixtureRows.map(async fixture => {
-      const fid = fixture.fixture_id;
-      const typeRefRes = await pool.query(
-        `SELECT * FROM type_references WHERE type_value = 'fixture' AND type_value_id = $1 ORDER BY created_at DESC NULLS LAST`,
-        [fid]
-      );
-      const typeRefs = typeRefRes.rows;
-      const typeRefIds = typeRefs.map(r => r.type_reference_id || r.id).filter(Boolean);
-      let parentMarkets = [];
-      if (typeRefIds.length > 0) {
-        const pmRes = await pool.query(
-          `SELECT * FROM parent_markets WHERE type_reference_id = ANY($1) ORDER BY created_at DESC NULLS LAST`,
-          [typeRefIds]
+    const result = await Promise.all(
+      fixtureRows.map(async (fixture) => {
+        const fid = fixture.fixture_id;
+        const typeRefRes = await pool.query(
+          `SELECT * FROM type_references WHERE type_value = 'fixture' AND type_value_id = $1 ORDER BY created_at DESC NULLS LAST`,
+          [fid]
         );
-        parentMarkets = pmRes.rows;
-      }
-      return {
-        fixture,
-        type_references: typeRefs,
-        parent_markets:  parentMarkets,
-      };
-    }));
+        const typeRefs = typeRefRes.rows;
+        const typeRefIds = typeRefs.map((r) => r.type_reference_id || r.id).filter(Boolean);
+        let parentMarkets = [];
+        if (typeRefIds.length > 0) {
+          const pmRes = await pool.query(
+            `SELECT * FROM parent_markets WHERE type_reference_id = ANY($1) ORDER BY created_at DESC NULLS LAST`,
+            [typeRefIds]
+          );
+          parentMarkets = pmRes.rows;
+        }
+        return {
+          fixture,
+          type_references: typeRefs,
+          parent_markets: parentMarkets,
+        };
+      })
+    );
 
     sendJson(res, 200, { results: result, count: result.length });
   } catch (err) {
@@ -1760,9 +1514,7 @@ async function handleDbVerifyParentMarketRequest(req, res) {
     );
 
     const parentMarkets = parentMarketRes.rows;
-    const parentMarketIds = parentMarkets
-      .map((row) => row.parent_market_id)
-      .filter(Boolean);
+    const parentMarketIds = parentMarkets.map((row) => row.parent_market_id).filter(Boolean);
 
     let markets = [];
     if (parentMarketIds.length > 0) {
@@ -1796,21 +1548,27 @@ async function handleJsonBuildOutputsRequest(req, res) {
     return;
   }
 
-  const fixtureName    = String(body?.fixture_name      || "").trim();
-  const homeTeamName   = String(body?.home_team         || "").trim();
-  const homeTeamId     = String(body?.home_team_id      || "").trim();
-  const homeTeamAlt    = String(body?.home_team_alt     || homeTeamName).trim();
-  const awayTeamName   = String(body?.away_team         || "").trim();
-  const awayTeamId     = String(body?.away_team_id      || "").trim();
-  const awayTeamAlt    = String(body?.away_team_alt     || awayTeamName).trim();
-  const leagueName     = String(body?.league_name       || "").trim();
-  const leagueId       = String(body?.league_id         || "").trim();
-  const kickoffIso     = String(body?.kickoff_iso       || "").trim();
-  const typeRefId      = String(body?.type_reference_id || "").trim() || randomUUID();
-  const leaves         = Array.isArray(body?.leaves) ? body.leaves : [];
+  const fixtureName = String(body?.fixture_name || "").trim();
+  const homeTeamName = String(body?.home_team || "").trim();
+  const homeTeamId = String(body?.home_team_id || "").trim();
+  const homeTeamAlt = String(body?.home_team_alt || homeTeamName).trim();
+  const awayTeamName = String(body?.away_team || "").trim();
+  const awayTeamId = String(body?.away_team_id || "").trim();
+  const awayTeamAlt = String(body?.away_team_alt || awayTeamName).trim();
+  const leagueName = String(body?.league_name || "").trim();
+  const leagueId = String(body?.league_id || "").trim();
+  const kickoffIso = String(body?.kickoff_iso || "").trim();
+  const typeRefId = String(body?.type_reference_id || "").trim() || randomUUID();
+  const leaves = Array.isArray(body?.leaves) ? body.leaves : [];
 
-  if (!fixtureName) { sendJson(res, 400, { error: "fixture_name is required" }); return; }
-  if (!kickoffIso)  { sendJson(res, 400, { error: "kickoff_iso is required" });  return; }
+  if (!fixtureName) {
+    sendJson(res, 400, { error: "fixture_name is required" });
+    return;
+  }
+  if (!kickoffIso) {
+    sendJson(res, 400, { error: "kickoff_iso is required" });
+    return;
+  }
 
   const kickoffDate = kickoffIso.slice(0, 10);
   const kickoffTime = kickoffIso.slice(11, 16);
@@ -1846,41 +1604,45 @@ async function handleJsonBuildOutputsRequest(req, res) {
   };
 
   const fixturePayload = {
-    name:            fixtureName,
-    league_id:       league.id,
-    home_team_id:    homeTeam.id || null,
-    away_team_id:    awayTeam.id || null,
-    format:          null,
-    logo_url:        "https://public-assets.pred.app/market-assets/fixture_128x128.png",
-    theme_color:     "#FFFFFF",
-    match_day:       1,
-    match_week:      0,
-    location:        "",
-    venue:           "",
+    name: fixtureName,
+    league_id: league.id,
+    home_team_id: homeTeam.id || null,
+    away_team_id: awayTeam.id || null,
+    format: null,
+    logo_url: "https://public-assets.pred.app/market-assets/fixture_128x128.png",
+    theme_color: "#FFFFFF",
+    match_day: 1,
+    match_week: 0,
+    location: "",
+    venue: "",
     game_start_time: kickoffIso || null,
-    alternate_name:  buildUatFixtureAlternateName(homeTeam, awayTeam),
+    alternate_name: buildUatFixtureAlternateName(homeTeam, awayTeam),
   };
 
   const parentPayloads = [];
   for (const leaf of leaves) {
-    const marketFamily   = String(leaf?.market_family    || "").trim().toLowerCase();
-    const marketLine     = String(leaf?.market_line      || "1.5").trim();
-    const spreadTeamSide = String(leaf?.spread_team_side || "home").trim().toLowerCase();
-    const leafId         = String(leaf?.id               || "").trim();
-    const validFamilies  = ["moneyline", "spreads", "totals", "btts"];
+    const marketFamily = String(leaf?.market_family || "")
+      .trim()
+      .toLowerCase();
+    const marketLine = String(leaf?.market_line || "1.5").trim();
+    const spreadTeamSide = String(leaf?.spread_team_side || "home")
+      .trim()
+      .toLowerCase();
+    const leafId = String(leaf?.id || "").trim();
+    const validFamilies = ["moneyline", "spreads", "totals", "btts"];
     if (!validFamilies.includes(marketFamily)) continue;
 
     const payloads = buildUatParentPayloads({
-      fixtureJson:     { name: fixtureName, league_id: league.id },
+      fixtureJson: { name: fixtureName, league_id: league.id },
       league,
       homeTeam,
       awayTeam,
-      fixtureDateIso:  kickoffDate,
-      kickoffTimeUtc:  kickoffTime,
-      openIso:         kickoffIso,
-      createdAtIso:    new Date().toISOString(),
+      fixtureDateIso: kickoffDate,
+      kickoffTimeUtc: kickoffTime,
+      openIso: kickoffIso,
+      createdAtIso: new Date().toISOString(),
       typeReferenceId: typeRefId,
-      outputProfile:   "uat",
+      outputProfile: "uat",
       marketLine,
       spreadTeamSide,
     });
@@ -1892,10 +1654,10 @@ async function handleJsonBuildOutputsRequest(req, res) {
 
   sendJson(res, 200, {
     type_reference_id: typeRefId,
-    fixture_payload:   fixturePayload,
-    parent_payloads:   parentPayloads,
-    teams_resolved:    Boolean(homeTeam.id && awayTeam.id),
-    league_resolved:   Boolean(league.id),
+    fixture_payload: fixturePayload,
+    parent_payloads: parentPayloads,
+    teams_resolved: Boolean(homeTeam.id && awayTeam.id),
+    league_resolved: Boolean(league.id),
   });
 }
 
@@ -1913,11 +1675,15 @@ async function handleJsonGenerateParentMarketRequest(req, res) {
     return;
   }
 
-  const fixtureName    = String(body?.fixture_name    || "").trim();
-  const typeRefId      = String(body?.type_reference_id || "").trim();
-  const marketFamily   = String(body?.market_family   || "").trim().toLowerCase();
-  const marketLine     = String(body?.market_line     || "1.5").trim();
-  const spreadTeamSide = String(body?.spread_team_side || "home").trim().toLowerCase();
+  const fixtureName = String(body?.fixture_name || "").trim();
+  const typeRefId = String(body?.type_reference_id || "").trim();
+  const marketFamily = String(body?.market_family || "")
+    .trim()
+    .toLowerCase();
+  const marketLine = String(body?.market_line || "1.5").trim();
+  const spreadTeamSide = String(body?.spread_team_side || "home")
+    .trim()
+    .toLowerCase();
 
   const validFamilies = ["moneyline", "spreads", "totals", "btts"];
   if (!fixtureName) {
@@ -1952,16 +1718,28 @@ async function handleJsonGenerateParentMarketRequest(req, res) {
     }
 
     const row = r.rows[0];
-    const kickoffIso  = row.game_start_time ? new Date(row.game_start_time).toISOString() : "";
+    const kickoffIso = row.game_start_time ? new Date(row.game_start_time).toISOString() : "";
     const kickoffDate = kickoffIso.slice(0, 10);
     const kickoffTime = kickoffIso.slice(11, 16);
 
     const leagueName = String(row.league_name || "").trim();
-    const leagueSlug = leagueName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "league";
+    const leagueSlug =
+      leagueName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "league";
 
-    const league   = { id: String(row.league_id   || "").trim(), name: leagueName, slug: leagueSlug };
-    const homeTeam = { id: String(row.home_team_id || "").trim(), name: String(row.home_team_name || "").trim(), alternateName: String(row.home_team_alternate || row.home_team_name || "").trim() };
-    const awayTeam = { id: String(row.away_team_id || "").trim(), name: String(row.away_team_name || "").trim(), alternateName: String(row.away_team_alternate || row.away_team_name || "").trim() };
+    const league = { id: String(row.league_id || "").trim(), name: leagueName, slug: leagueSlug };
+    const homeTeam = {
+      id: String(row.home_team_id || "").trim(),
+      name: String(row.home_team_name || "").trim(),
+      alternateName: String(row.home_team_alternate || row.home_team_name || "").trim(),
+    };
+    const awayTeam = {
+      id: String(row.away_team_id || "").trim(),
+      name: String(row.away_team_name || "").trim(),
+      alternateName: String(row.away_team_alternate || row.away_team_name || "").trim(),
+    };
     const fixtureJson = { name: String(row.name || "").trim(), league_id: league.id };
 
     const parentPayloads = buildUatParentPayloads({
@@ -1969,12 +1747,12 @@ async function handleJsonGenerateParentMarketRequest(req, res) {
       league,
       homeTeam,
       awayTeam,
-      fixtureDateIso:  kickoffDate,
-      kickoffTimeUtc:  kickoffTime,
-      openIso:         kickoffIso,
-      createdAtIso:    new Date().toISOString(),
+      fixtureDateIso: kickoffDate,
+      kickoffTimeUtc: kickoffTime,
+      openIso: kickoffIso,
+      createdAtIso: new Date().toISOString(),
       typeReferenceId: typeRefId,
-      outputProfile:   "uat",
+      outputProfile: "uat",
       marketLine,
       spreadTeamSide,
     });
@@ -1991,7 +1769,7 @@ async function handleJsonGenerateParentMarketRequest(req, res) {
     }
 
     sendJson(res, 200, {
-      family:  marketFamily,
+      family: marketFamily,
       fixture: { id: row.fixture_id, name: row.name, game_start_time: row.game_start_time },
       payload: familyPayload,
     });
@@ -2042,342 +1820,6 @@ async function handleJsonTeamsRequest(res, requestUrl) {
   }
 }
 
-async function handleJsonPublishFixtureRequest(req, res) {
-  const activeProfile = getActiveRuntimeEnvironmentProfile();
-  const cmsConfig = createCmsRuntimeConfig(activeProfile.env);
-  if (!cmsConfig.enabled) {
-    sendJson(res, 503, { error: "CMS is not configured for this environment" });
-    return;
-  }
-  const pool = getDbPoolForEnv(getActiveRuntimeEnvVars());
-  if (!pool) {
-    sendJson(res, 503, { error: "DB not configured for active environment" });
-    return;
-  }
-
-  let body;
-  try {
-    body = await readJsonRequestBody(req);
-  } catch {
-    sendJson(res, 400, { error: "Invalid JSON body" });
-    return;
-  }
-
-  const fixtureName = String(body?.fixture_name || "").trim();
-  if (!fixtureName) {
-    sendJson(res, 400, { error: "fixture_name is required" });
-    return;
-  }
-  const leagueId = String(body?.league_id || "").trim();
-
-  try {
-    const params = [`%${fixtureName}%`];
-    if (leagueId) params.push(leagueId);
-    const r = await pool.query(
-      `SELECT
-         f.fixture_id, f.name, f.league_id, f.home_team_id, f.away_team_id, f.game_start_time,
-         l.name AS league_name, l.alternate_name AS league_alternate_name,
-         ht.name  AS home_team_name,  ht.alternate_name AS home_team_alternate,
-         at2.name AS away_team_name, at2.alternate_name AS away_team_alternate
-       FROM fixtures f
-       LEFT JOIN leagues l  ON l.league_id  = f.league_id
-       LEFT JOIN teams ht   ON ht.team_id   = f.home_team_id
-       LEFT JOIN teams at2  ON at2.team_id  = f.away_team_id
-       WHERE (f.name ILIKE $1 OR f.alternate_name ILIKE $1)
-         ${leagueId ? "AND f.league_id = $2" : ""}
-       ORDER BY f.game_start_time DESC NULLS LAST
-       LIMIT 5`,
-      params
-    );
-
-    if (!r.rows.length) {
-      sendJson(res, 404, { error: `No fixture found matching "${fixtureName}"` });
-      return;
-    }
-
-    const row = r.rows[0];
-    const kickoffIso  = row.game_start_time ? new Date(row.game_start_time).toISOString() : "";
-    const kickoffDate = kickoffIso.slice(0, 10);
-
-    const [resolvedHomeTeam, resolvedAwayTeam] = await Promise.all([
-      resolveTeamRecordFromDb(pool, {
-        teamId: String(row.home_team_id || "").trim(),
-        teamName: String(row.home_team_name || "").trim(),
-        leagueId: String(row.league_id || "").trim(),
-      }),
-      resolveTeamRecordFromDb(pool, {
-        teamId: String(row.away_team_id || "").trim(),
-        teamName: String(row.away_team_name || "").trim(),
-        leagueId: String(row.league_id || "").trim(),
-      }),
-    ]);
-    const homeTeam = {
-      id:            resolvedHomeTeam.id,
-      name:          resolvedHomeTeam.name || String(row.home_team_name || "").trim(),
-      alternateName: resolvedHomeTeam.alternateName || String(row.home_team_alternate || row.home_team_name || "").trim(),
-    };
-    const awayTeam = {
-      id:            resolvedAwayTeam.id,
-      name:          resolvedAwayTeam.name || String(row.away_team_name || "").trim(),
-      alternateName: resolvedAwayTeam.alternateName || String(row.away_team_alternate || row.away_team_name || "").trim(),
-    };
-    const leagueName = String(row.league_name || "").trim();
-    const league = {
-      id:   String(row.league_id || "").trim(),
-      name: leagueName,
-      slug: leagueName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "league",
-    };
-
-    const fixturePayload = {
-      name:            String(row.name || "").trim(),
-      league_id:       league.id,
-      home_team_id:    homeTeam.id,
-      away_team_id:    awayTeam.id,
-      format:          null,
-      logo_url:        "https://public-assets.pred.app/market-assets/fixture_128x128.png",
-      theme_color:     "#FFFFFF",
-      match_day:       1,
-      match_week:      0,
-      location:        "",
-      venue:           "",
-      game_start_time: kickoffIso || null,
-      alternate_name:  buildUatFixtureAlternateName(homeTeam, awayTeam),
-    };
-
-    const fixtureValidationErrors = validateFixtureJson(fixturePayload);
-    if (fixtureValidationErrors.length > 0) {
-      sendJson(res, 400, {
-        error: "Resolved fixture payload is invalid",
-        detail: fixtureValidationErrors,
-        fixture_name: String(row.name || "").trim(),
-      });
-      return;
-    }
-
-    // Use existing fixture_id from DB row if present — fixture already exists
-    let fixtureUuid = String(row.fixture_id || "").trim() || null;
-    const fixtureAlreadyExisted = Boolean(fixtureUuid);
-
-    if (!fixtureUuid) {
-      const fixtureResp = await postCmsJson(cmsConfig, cmsConfig.endpoints.fixture, fixturePayload);
-      fixtureUuid = String(
-        fixtureResp?.fixture_id  ||
-        fixtureResp?.data?.fixture_id ||
-        fixtureResp?.data?.id    ||
-        fixtureResp?.id          ||
-        ""
-      ).trim() || null;
-      if (!fixtureUuid) throw new Error(`Fixture POST returned no ID. Response: ${JSON.stringify(fixtureResp)}`);
-    }
-
-    const canonicalName = buildUatCanonicalFixtureName(
-      String(row.name || "").trim(),
-      kickoffDate,
-      league.slug
-    );
-    const typeRefPayload = {
-      type_value:     "fixture",
-      type_value_id:  fixtureUuid,
-      canonical_name: canonicalName,
-    };
-
-    let typeRefId = null;
-    let typeRefAlreadyExisted = false;
-    try {
-      const typeRefRows = await pool.query(
-        `SELECT id, type_reference_id FROM type_references WHERE type_value = 'fixture' AND type_value_id = $1 LIMIT 1`,
-        [fixtureUuid]
-      );
-      if (typeRefRows.rows.length > 0) {
-        typeRefId = pickUuidLikeValue(typeRefRows.rows[0].type_reference_id, typeRefRows.rows[0].id);
-        typeRefAlreadyExisted = Boolean(typeRefId);
-      }
-    } catch (e) {
-      console.warn(`[json-publish-fixture] DB type-ref lookup failed (will POST): ${e.message}`);
-    }
-
-    if (!typeRefId) {
-      const typeRefResp = await postCmsJson(cmsConfig, cmsConfig.endpoints.typeReference, typeRefPayload);
-      typeRefId = pickUuidLikeValue(
-        typeRefResp?.type_reference_id,
-        typeRefResp?.meta?.type_reference_id,
-        typeRefResp?.data?.type_reference_id,
-        typeRefResp?.id,
-        typeRefResp?.meta?.id,
-        typeRefResp?.data?.id,
-      );
-      if (!typeRefId) throw new Error(`Type reference POST returned no ID. Response: ${JSON.stringify(typeRefResp)}`);
-    }
-
-    sendJson(res, 200, {
-      fixture_id:          fixtureUuid,
-      fixture_existed:     fixtureAlreadyExisted,
-      type_reference_id:   typeRefId,
-      type_ref_existed:    typeRefAlreadyExisted,
-      fixture_payload:     fixturePayload,
-      type_ref_payload:    typeRefPayload,
-      fixture_db_name:     String(row.name || "").trim(),
-    });
-  } catch (err) {
-    console.error("[json-publish-fixture]", err.message);
-    sendJson(res, 500, { error: err.message });
-  }
-}
-
-async function handleJsonPublishParentMarketRequest(req, res) {
-  const activeProfile = getActiveRuntimeEnvironmentProfile();
-  const cmsConfig = createCmsRuntimeConfig(activeProfile.env);
-  if (!cmsConfig.enabled) {
-    sendJson(res, 503, { error: "CMS is not configured for this environment" });
-    return;
-  }
-
-  let body;
-  try {
-    body = await readJsonRequestBody(req);
-  } catch {
-    sendJson(res, 400, { error: "Invalid JSON body" });
-    return;
-  }
-
-  const payload = body?.payload;
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    sendJson(res, 400, { error: "payload (object) is required" });
-    return;
-  }
-
-  try {
-    const pmResp = await postCmsJson(cmsConfig, cmsConfig.endpoints.parentMarket, payload);
-    sendJson(res, 200, { success: true, response: pmResp });
-  } catch (err) {
-    console.error("[json-publish-parent-market]", err.message);
-    sendJson(res, 500, { error: err.message });
-  }
-}
-
-async function handleJsonPreparePublishRequest(req, res) {
-  const activeProfile = getActiveRuntimeEnvironmentProfile();
-  const cmsConfig = createCmsRuntimeConfig(activeProfile.env);
-  if (!cmsConfig.enabled) {
-    sendJson(res, 503, { error: "CMS is not configured for this environment" });
-    return;
-  }
-  const pool = getDbPoolForEnv(getActiveRuntimeEnvVars());
-
-  let body;
-  try {
-    body = await readJsonRequestBody(req);
-  } catch {
-    sendJson(res, 400, { error: "Invalid JSON body" });
-    return;
-  }
-
-  const rawFixturePayload = body?.fixture_payload;
-  if (!rawFixturePayload || typeof rawFixturePayload !== "object" || Array.isArray(rawFixturePayload)) {
-    sendJson(res, 400, { error: "fixture_payload (object) is required" });
-    return;
-  }
-  const leagueSlug    = String(body?.league_slug    || "").trim();
-  const homeTeamName  = String(body?.home_team_name || "").trim();
-  const awayTeamName  = String(body?.away_team_name || "").trim();
-
-  try {
-    const fixturePayload = {
-      ...rawFixturePayload,
-    };
-    const resolvedLeague = await resolveLeagueRecordFromDb(pool, {
-      leagueId: String(fixturePayload.league_id || "").trim(),
-      leagueSlug,
-      leagueName: "",
-    });
-    if (!String(fixturePayload.league_id || "").trim() && resolvedLeague.id) {
-      fixturePayload.league_id = resolvedLeague.id;
-    }
-
-    const [resolvedHomeTeam, resolvedAwayTeam] = await Promise.all([
-      resolveTeamRecordFromDb(pool, {
-        teamId: String(fixturePayload.home_team_id || "").trim(),
-        teamName: homeTeamName,
-        leagueId: resolvedLeague.id || String(fixturePayload.league_id || "").trim(),
-      }),
-      resolveTeamRecordFromDb(pool, {
-        teamId: String(fixturePayload.away_team_id || "").trim(),
-        teamName: awayTeamName,
-        leagueId: resolvedLeague.id || String(fixturePayload.league_id || "").trim(),
-      }),
-    ]);
-    if (!String(fixturePayload.home_team_id || "").trim() && resolvedHomeTeam.id) {
-      fixturePayload.home_team_id = resolvedHomeTeam.id;
-    }
-    if (!String(fixturePayload.away_team_id || "").trim() && resolvedAwayTeam.id) {
-      fixturePayload.away_team_id = resolvedAwayTeam.id;
-    }
-
-    const fixtureValidationErrors = validateFixtureJson(fixturePayload);
-    if (fixtureValidationErrors.length > 0) {
-      sendJson(res, 400, {
-        error: "Resolved fixture payload is invalid",
-        detail: fixtureValidationErrors,
-      });
-      return;
-    }
-
-    const fixtureResp = await postCmsJson(cmsConfig, cmsConfig.endpoints.fixture, fixturePayload);
-    const fixtureUuid = String(
-      fixtureResp?.fixture_id  ||
-      fixtureResp?.data?.fixture_id ||
-      fixtureResp?.data?.id    ||
-      fixtureResp?.id          ||
-      ""
-    ).trim();
-    if (!fixtureUuid) throw new Error(`Fixture POST returned no ID: ${JSON.stringify(fixtureResp)}`);
-
-    let typeRefId = null;
-    if (pool) {
-      try {
-        const typeRefRows = await pool.query(
-          `SELECT id, type_reference_id FROM type_references WHERE type_value = 'fixture' AND type_value_id = $1 LIMIT 1`,
-          [fixtureUuid]
-        );
-        if (typeRefRows.rows.length > 0) {
-          typeRefId = pickUuidLikeValue(typeRefRows.rows[0].type_reference_id, typeRefRows.rows[0].id);
-        }
-      } catch (e) {
-        console.warn("[json-prepare-publish] DB type-ref lookup failed:", e.message);
-      }
-    }
-
-    if (!typeRefId) {
-      const kickoffDate = String(fixturePayload.game_start_time || "").slice(0, 10);
-      const canonicalName = buildUatCanonicalFixtureName(
-        String(fixturePayload.name || "").trim(),
-        kickoffDate,
-        leagueSlug
-      );
-      const typeRefPayload = {
-        type_value:     "fixture",
-        type_value_id:  fixtureUuid,
-        canonical_name: canonicalName,
-      };
-      const typeRefResp = await postCmsJson(cmsConfig, cmsConfig.endpoints.typeReference, typeRefPayload);
-      typeRefId = pickUuidLikeValue(
-        typeRefResp?.type_reference_id,
-        typeRefResp?.meta?.type_reference_id,
-        typeRefResp?.data?.type_reference_id,
-        typeRefResp?.id,
-        typeRefResp?.meta?.id,
-        typeRefResp?.data?.id,
-      );
-      if (!typeRefId) throw new Error(`Type reference POST returned no ID: ${JSON.stringify(typeRefResp)}`);
-    }
-
-    sendJson(res, 200, { fixture_id: fixtureUuid, type_reference_id: typeRefId });
-  } catch (err) {
-    console.error("[json-prepare-publish]", err.message);
-    sendJson(res, 500, { error: err.message });
-  }
-}
-
 async function handleReadyRequest(res) {
   try {
     const paths = await resolveCatalogPaths();
@@ -2417,11 +1859,15 @@ async function handleCatalogMetaRequest(res) {
 }
 
 async function handleUpcomingScheduleRequest(requestUrl, res) {
-  const requestedLeague = String(requestUrl.searchParams.get("league") || "").trim().toLowerCase();
+  const requestedLeague = String(requestUrl.searchParams.get("league") || "")
+    .trim()
+    .toLowerCase();
   const leagueCode = normalizeScheduleLeagueCode(requestedLeague);
   const requestedNow = String(requestUrl.searchParams.get("now") || "").trim();
   if (!leagueCode) {
-    const supportedLeagues = getLeagueScheduleDefinitions().map((definition) => `?league=${definition.code}`);
+    const supportedLeagues = getLeagueScheduleDefinitions().map(
+      (definition) => `?league=${definition.code}`
+    );
     const supportedLeagueDetail =
       supportedLeagues.length > 1
         ? `${supportedLeagues.slice(0, -1).join(", ")}, or ${supportedLeagues.at(-1)}`
@@ -2447,10 +1893,14 @@ async function handleUpcomingScheduleRequest(requestUrl, res) {
   }
 
   try {
-    const payload = await getUpcomingSchedulePayload(leagueCode, {
-      refresh: requestUrl.searchParams.get("refresh") === "1",
-      now: referenceNow,
-    });
+    const payload = await getUpcomingSchedulePayload(
+      leagueCode,
+      {
+        refresh: requestUrl.searchParams.get("refresh") === "1",
+        now: referenceNow,
+      },
+      schedCtx
+    );
     sendJson(res, 200, payload, {
       "Cache-Control": "no-store",
     });
@@ -2463,165 +1913,13 @@ async function handleUpcomingScheduleRequest(requestUrl, res) {
   }
 }
 
-async function getUpcomingSchedulePayload(leagueCode, { refresh = false, now = null } = {}) {
-  const hasCustomNow = now instanceof Date && !Number.isNaN(now.getTime());
-  const resolvedNow = hasCustomNow ? new Date(now.getTime()) : resolveScheduleNow();
-  const cacheKey = String(leagueCode || "").trim().toLowerCase();
-
-  // Serve from stable cache unless refresh forced or a custom ?now= is given (test/debug only)
-  if (!refresh && !hasCustomNow) {
-    const cacheRecord = scheduleCache.get(cacheKey);
-    if (cacheRecord) return cacheRecord.payload;
-  }
-
-  let payload = null;
-  payload = await resolveSchedulePayloadWithFallback({
-    loadSportsData: async () => {
-      const sportsDataAdapter = getBackendFixtureSourceAdapter("sportsdata");
-      const rawRows = await sportsDataAdapter.fetchRawRows({
-        leagueCode,
-        env: getActiveRuntimeEnvVars(),
-        rootDir: ROOT_DIR,
-        timeoutMs: resolveScheduleFetchTimeoutMs(),
-        baseUrl: resolveSportsDataScheduleBaseUrl(),
-        season: resolveSportsDataScheduleSeason(),
-      });
-      return sportsDataAdapter.createFixtureWindowPayload({
-        leagueCode,
-        rawRows,
-        now: resolvedNow,
-        fetchedAt: new Date().toISOString(),
-      });
-    },
-    loadLsportsDb: async () => {
-      const dbPool = getDbPoolForEnv(getActiveRuntimeEnvVars());
-      const leagueDef = getLeagueScheduleDefinition(leagueCode);
-      const leagueNameLike = leagueDef?.lsportsLeagueNameLike || "";
-      if (!dbPool || !leagueNameLike) {
-        return null;
-      }
-      const lsportsDbAdapter = getBackendFixtureSourceAdapter("lsports-db");
-      const rawRows = await lsportsDbAdapter.fetchRawRows({
-        leagueCode,
-        pool: dbPool,
-        leagueNameLike,
-        now: resolvedNow,
-      });
-      return lsportsDbAdapter.createFixtureWindowPayload({
-        leagueCode,
-        rawRows,
-        now: resolvedNow,
-        fetchedAt: new Date().toISOString(),
-      });
-    },
-    loadGammaPolymarket: async () => {
-      const gammaAdapter = getBackendFixtureSourceAdapter("gamma-polymarket");
-      if (!gammaAdapter) {
-        return null;
-      }
-      const rawRows = await gammaAdapter.fetchRawRows({
-        leagueCode,
-        env: getActiveRuntimeEnvVars(),
-        timeoutMs: resolveScheduleFetchTimeoutMs(),
-        fetchImpl: fetch,
-      });
-      return gammaAdapter.createFixtureWindowPayload({
-        leagueCode,
-        rawRows,
-        now: resolvedNow,
-        fetchedAt: new Date().toISOString(),
-      });
-    },
-    loadPolymarket: async () => {
-      const polymarketAdapter = getBackendFixtureSourceAdapter("polymarket");
-      if (!polymarketAdapter) return null;
-      const rawRows = await polymarketAdapter.fetchRawRows({
-        leagueCode,
-        env: getActiveRuntimeEnvVars(),
-        timeoutMs: resolveScheduleFetchTimeoutMs(),
-        fetchImpl: fetch,
-      });
-      return polymarketAdapter.createFixtureWindowPayload({
-        leagueCode,
-        rawRows,
-        now: resolvedNow,
-        fetchedAt: new Date().toISOString(),
-      });
-    },
-    loadLsportsCsv: async () => {
-      const csvPath = LSPORTS_SCHEDULE_CSV_PATH;
-      if (!csvPath) {
-        return null;
-      }
-      return fetchLsportsCsvFixturesForLeague({
-        csvFilePath: csvPath,
-        leagueCode,
-        now: resolvedNow,
-      });
-    },
-  });
-
-  // Compute version: bump only when genuinely new fixture IDs appear
-  const newIds = new Set((payload?.fixtures || []).map(f => f.providerFixtureId).filter(Boolean));
-  const existing = scheduleCache.get(cacheKey);
-  const hasNewFixtures = !existing || [...newIds].some(id => !existing.fixtureIds?.has(id));
-  const version = (existing?.version ?? 0) + (hasNewFixtures ? 1 : 0);
-
-  // Don't write custom-now responses to the stable per-league cache
-  if (!hasCustomNow) {
-    const enriched = payload ? { ...payload, version } : null;
-    scheduleCache.set(cacheKey, { payload: enriched, version, fetchedAt: new Date().toISOString(), fixtureIds: newIds });
-    return enriched;
-  }
-
-  return payload;
-}
-
 function handleScheduleStatusRequest(res) {
-  const leagues = {};
-  for (const [code, record] of scheduleCache.entries()) {
-    leagues[code] = {
-      version:   record.version,
-      fetchedAt: record.fetchedAt,
-      count:     record.payload?.fixtures?.length ?? 0,
-    };
-  }
-  sendJson(res, 200, { leagues });
+  sendJson(res, 200, { leagues: getScheduleCacheSnapshot() });
 }
 
 async function handleAllSchedulesRequest(res) {
-  const definitions = getLeagueScheduleDefinitions();
-  const results = await Promise.allSettled(
-    definitions.map(def => getUpcomingSchedulePayload(def.code))
-  );
-
-  const schedules = {};
-  const leagues = [];
-  results.forEach((r, i) => {
-    const def = definitions[i];
-    const payload = r.status === "fulfilled" ? r.value : null;
-    schedules[def.code] = payload ?? { fixtures: [], source: "none" };
-    leagues.push({ code: def.code, label: def.label, version: payload?.version ?? 0 });
-  });
-
-  sendJson(res, 200, { leagues, schedules });
-}
-
-async function backgroundRefreshAllSchedules() {
-  const codes = [...scheduleCache.keys()];
-  if (!codes.length) return;
-  console.log(`[schedule-bg] refreshing ${codes.length} league(s): ${codes.join(", ")}`);
-  await Promise.allSettled(
-    codes.map(async (code) => {
-      try {
-        await getUpcomingSchedulePayload(code, { refresh: true });
-        const r = scheduleCache.get(code);
-        console.log(`[schedule-bg] ${code} — version=${r?.version} fixtures=${r?.payload?.fixtures?.length ?? 0}`);
-      } catch (err) {
-        console.warn(`[schedule-bg] refresh failed for "${code}": ${err.message}`);
-      }
-    })
-  );
+  const payload = await getAllSchedulesPayload(schedCtx);
+  sendJson(res, 200, payload);
 }
 
 async function fetchRawScheduleRows(leagueCode) {
@@ -2742,13 +2040,12 @@ async function handleScheduleLeaguesRequest(res) {
     support = createSportsDataScheduleSupportMetadata({ env });
   }
 
-  const supportLeagueMap = new Map((support.leagues || []).map(l => [l.code, l]));
-  const leagues = getLeagueScheduleDefinitions()
-    .map((def) => ({
-      code: def.code,
-      label: def.label,
-      source: supportLeagueMap.get(def.code)?.config_source || "gamma-polymarket",
-    }));
+  const supportLeagueMap = new Map((support.leagues || []).map((l) => [l.code, l]));
+  const leagues = getLeagueScheduleDefinitions().map((def) => ({
+    code: def.code,
+    label: def.label,
+    source: supportLeagueMap.get(def.code)?.config_source || "gamma-polymarket",
+  }));
 
   sendJson(res, 200, { leagues });
 }
@@ -2773,7 +2070,9 @@ function getSportsDataScheduleConfig(leagueCode) {
 }
 
 function resolveScheduleNow() {
-  const scheduleNowIso = String(getActiveRuntimeEnvVars()?.SCHEDULE_NOW_ISO || SCHEDULE_NOW_ISO || "").trim();
+  const scheduleNowIso = String(
+    getActiveRuntimeEnvVars()?.SCHEDULE_NOW_ISO || SCHEDULE_NOW_ISO || ""
+  ).trim();
   if (scheduleNowIso) {
     const parsed = new Date(scheduleNowIso);
     if (!Number.isNaN(parsed.getTime())) {
@@ -2855,7 +2154,15 @@ async function serveStaticFile(urlPathname, res) {
   const ext = path.extname(safePath).toLowerCase();
   const contentType = MIME_TYPES[ext] || "application/octet-stream";
   const fileBuffer = await fs.readFile(safePath);
-  res.writeHead(200, buildResponseHeaders(contentType, fileBuffer.length, {}, { cacheControl: resolveStaticCacheControl(ext) }));
+  res.writeHead(
+    200,
+    buildResponseHeaders(
+      contentType,
+      fileBuffer.length,
+      {},
+      { cacheControl: resolveStaticCacheControl(ext) }
+    )
+  );
   res.end(fileBuffer);
 }
 
@@ -2953,7 +2260,10 @@ function allowApiRequest(req) {
   }
 
   if (record.count >= API_RATE_MAX_REQUESTS) {
-    const retryAfterSeconds = Math.max(1, Math.ceil((API_RATE_WINDOW_MS - (now - record.windowStart)) / 1000));
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((API_RATE_WINDOW_MS - (now - record.windowStart)) / 1000)
+    );
     return { ok: false, retryAfterSeconds };
   }
 
@@ -2974,15 +2284,15 @@ function resolveClientIp(req, { trustProxy = TRUST_PROXY } = {}) {
 }
 
 function isAuthorizedApiRequest(req) {
-  // Session cookie from Google OAuth satisfies API auth for browser-originated calls
-  if (GOOGLE_OAUTH_ENABLED) {
-    const sessionId = parseSessionCookie(req);
-    if (sessionId && getSession(sessionId)) return true;
-  }
-  if (!API_BEARER_TOKEN) {
-    return !isBasicAuthEnabled() || hasValidBasicAuth(req);
-  }
-  return hasValidBearerAuth(req);
+  // When OAuth is disabled (local dev), allow all API requests without credentials
+  if (!GOOGLE_OAUTH_ENABLED) return true;
+  // Valid session cookie (browser-originated calls)
+  const sessionId = parseSessionCookie(req);
+  if (sessionId && getSession(sessionId)) return true;
+  // Bearer token (programmatic / server-to-server calls)
+  if (API_BEARER_TOKEN) return hasValidBearerAuth(req);
+  // In OAuth mode: no session and no bearer token configured → deny
+  return false;
 }
 
 function isAuthorizedStaticRequest(req) {
@@ -3060,7 +2370,8 @@ async function resolveCatalogPaths() {
   }
 
   const allowDownloadsCsvFallback =
-    String(runtimeEnv.ALLOW_DOWNLOADS_CSV_FALLBACK || ALLOW_DOWNLOADS_CSV_FALLBACK || "").trim() === "1";
+    String(runtimeEnv.ALLOW_DOWNLOADS_CSV_FALLBACK || ALLOW_DOWNLOADS_CSV_FALLBACK || "").trim() ===
+    "1";
   if (allowDownloadsCsvFallback) {
     const downloadPaths = {
       leagues: DEFAULT_DOWNLOADS_LEAGUES_CSV_PATH,
@@ -3092,7 +2403,10 @@ async function resolvePreferredLocalCatalogPaths() {
   return null;
 }
 
-async function resolveSupplementalCatalogPaths(primaryPaths, runtimeEnv = getActiveRuntimeEnvVars()) {
+async function resolveSupplementalCatalogPaths(
+  primaryPaths,
+  runtimeEnv = getActiveRuntimeEnvVars()
+) {
   const requestedExtraLeagues = dedupePaths(
     parseCsvPathListEnv(runtimeEnv.EXTRA_LEAGUES_CSV_PATHS || EXTRA_LEAGUES_CSV_PATHS.join(","))
   );
@@ -3154,18 +2468,24 @@ async function getCatalogPayloadCached() {
   const runtimeProfile = getActiveRuntimeEnvironmentProfile();
   const runtimeEnv = runtimeProfile.env;
   const paths = await resolveCatalogPaths();
-  const leagueFiles = [paths.leagues, ...(Array.isArray(paths.extraLeagues) ? paths.extraLeagues : [])];
+  const leagueFiles = [
+    paths.leagues,
+    ...(Array.isArray(paths.extraLeagues) ? paths.extraLeagues : []),
+  ];
   const teamFiles = [paths.teams, ...(Array.isArray(paths.extraTeams) ? paths.extraTeams : [])];
   const allFiles = [...leagueFiles, ...teamFiles];
   const allStats = await Promise.all(allFiles.map((filePath) => fs.stat(filePath)));
-  const cacheKey = [runtimeProfile.code, ...allFiles
-    .map((filePath, index) => `${filePath}:${allStats[index]?.mtimeMs || 0}`)
+  const cacheKey = [
+    runtimeProfile.code,
+    ...allFiles.map((filePath, index) => `${filePath}:${allStats[index]?.mtimeMs || 0}`),
   ].join("|");
   if (catalogCache && catalogCache.key === cacheKey) {
     // Re-normalize with the current time on every hit — normalizeLeagueStartWindows is
     // time-sensitive (it advances past start dates), so the cached raw leagues must be
     // re-evaluated rather than serving the frozen normalized slice.
-    const normalizedLeagues = normalizeLeagueStartWindows(catalogCache.rawLeagues, { now: new Date() });
+    const normalizedLeagues = normalizeLeagueStartWindows(catalogCache.rawLeagues, {
+      now: new Date(),
+    });
     return {
       ...catalogCache.payload,
       leagues: normalizedLeagues,
@@ -3214,10 +2534,11 @@ async function getCatalogPayloadCached() {
 }
 
 function describeCatalogSourceLabel(sourceKind) {
-  const baseKind = typeof sourceKind === "string" ? sourceKind : String(sourceKind?.sourceKind || "");
+  const baseKind =
+    typeof sourceKind === "string" ? sourceKind : String(sourceKind?.sourceKind || "");
   const hasSupplemental =
-    Array.isArray(sourceKind?.extraLeagues) && sourceKind.extraLeagues.length > 0 ||
-    Array.isArray(sourceKind?.extraTeams) && sourceKind.extraTeams.length > 0;
+    (Array.isArray(sourceKind?.extraLeagues) && sourceKind.extraLeagues.length > 0) ||
+    (Array.isArray(sourceKind?.extraTeams) && sourceKind.extraTeams.length > 0);
   let label = "Downloads CSV files";
   if (baseKind === "env") {
     label = "CSV files (env override)";
@@ -3237,7 +2558,9 @@ async function getCatalogSourceMetaSafe() {
       source_kind: paths.sourceKind,
       leagues_file: path.basename(paths.leagues),
       teams_file: path.basename(paths.teams),
-      supplemental_leagues_files: (paths.extraLeagues || []).map((filePath) => path.basename(filePath)),
+      supplemental_leagues_files: (paths.extraLeagues || []).map((filePath) =>
+        path.basename(filePath)
+      ),
       supplemental_teams_files: (paths.extraTeams || []).map((filePath) => path.basename(filePath)),
       environment: resolveRuntimeEnvironment(runtimeEnv),
     };
@@ -3282,7 +2605,10 @@ function slugifyLookupValue(value) {
     .replace(/^-+|-+$/g, "");
 }
 
-async function resolveLeagueRecordFromDb(pool, { leagueId = "", leagueName = "", leagueSlug = "" } = {}) {
+async function resolveLeagueRecordFromDb(
+  pool,
+  { leagueId = "", leagueName = "", leagueSlug = "" } = {}
+) {
   const fallbackSlug = slugifyLookupValue(leagueSlug || leagueName) || "league";
   const fallback = {
     id: String(leagueId || "").trim(),
@@ -3420,7 +2746,12 @@ async function resolveTeamRecordFromDb(pool, { teamId = "", teamName = "", leagu
   };
 }
 
-function buildResponseHeaders(contentType, contentLength, extraHeaders = {}, { cacheControl = "no-store" } = {}) {
+function buildResponseHeaders(
+  contentType,
+  contentLength,
+  extraHeaders = {},
+  { cacheControl = "no-store" } = {}
+) {
   const headers = {
     ...SECURITY_HEADERS,
     "Content-Type": contentType,
@@ -3528,66 +2859,6 @@ function stripBom(value) {
   return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
 }
 
-function pickUuidLikeValue(...values) {
-  for (const value of values) {
-    const normalized = String(value || "").trim();
-    if (isUuidLike(normalized)) {
-      return normalized;
-    }
-  }
-  return null;
-}
-
-function isUuidLike(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || "").trim());
-}
-
-function deriveBatchFixtureStatusFromMarkets(marketResults = []) {
-  const statuses = (Array.isArray(marketResults) ? marketResults : [])
-    .map((entry) => String(entry?.status || "").trim().toLowerCase())
-    .filter(Boolean);
-
-  if (statuses.some((status) => ["failed", "half_prepared", "blocked"].includes(status))) {
-    return "partial";
-  }
-  if (statuses.length > 0 && statuses.every((status) => ["exists", "existing", "skipped"].includes(status))) {
-    return "existing";
-  }
-  return "completed";
-}
-
-function deriveBatchRunStatusFromFixtures(fixtures = [], { anyFailed = false } = {}) {
-  const statuses = (Array.isArray(fixtures) ? fixtures : [])
-    .map((fixture) => String(fixture?.status || "").trim().toLowerCase())
-    .filter(Boolean);
-
-  if (statuses.some((status) => status === "partial")) {
-    return "partial";
-  }
-  if (anyFailed) {
-    return statuses.some((status) => ["completed", "existing"].includes(status)) ? "partial" : "failed";
-  }
-  return "completed";
-}
-
-function classifyExistingBatchParentMarketRows(rows = [], {
-  publishKey = "",
-  homeTeamId = "",
-  awayTeamId = "",
-} = {}) {
-  return classifyParentStatusFromRows(rows, {
-    selectedFixture: {
-      home_team_id: String(homeTeamId || "").trim(),
-      away_team_id: String(awayTeamId || "").trim(),
-    },
-    fixtureRecord: {
-      home_team_id: String(homeTeamId || "").trim(),
-      away_team_id: String(awayTeamId || "").trim(),
-    },
-    expectedMarketCount: getExpectedMarketCountForPublishKey(publishKey),
-  });
-}
-
 function sortCmsBatchFixturesByKickoff(fixtures) {
   if (!Array.isArray(fixtures) || !fixtures.length) return [];
   return [...fixtures].sort((a, b) => {
@@ -3630,7 +2901,9 @@ function _matchRowsToPublishKey(allRows, publishKey) {
 async function buildCmsSelectedPreflight({ envelope, config = {}, pool, resolveFixtureCandidate }) {
   const payload = envelope?.payload || {};
   const providedTypeReferenceId = String(payload.type_reference_id || "").trim();
-  const selectedPublishItems = Array.isArray(payload.selected_publish_items) ? payload.selected_publish_items : [];
+  const selectedPublishItems = Array.isArray(payload.selected_publish_items)
+    ? payload.selected_publish_items
+    : [];
   const forceRepublish = Boolean(payload.force_republish);
 
   const resolvedFixture = await resolveFixtureCandidate(payload);
@@ -3703,15 +2976,34 @@ async function buildCmsSelectedPreflight({ envelope, config = {}, pool, resolveF
     const matchingRows = rowsByPublishKey.get(publishKey) || [];
 
     if (!matchingRows.length) {
-      return { publish_key: publishKey, parent_market_payload: parentMarketPayload, status: "selectable" };
+      return {
+        publish_key: publishKey,
+        parent_market_payload: parentMarketPayload,
+        status: "selectable",
+      };
     }
     if (matchingRows.some((r) => r.market_id == null)) {
-      return { publish_key: publishKey, parent_market_payload: parentMarketPayload, status: "half_prepared", existingRows: matchingRows };
+      return {
+        publish_key: publishKey,
+        parent_market_payload: parentMarketPayload,
+        status: "half_prepared",
+        existingRows: matchingRows,
+      };
     }
     if (forceRepublish) {
-      return { publish_key: publishKey, parent_market_payload: parentMarketPayload, status: "blocked", existingRows: matchingRows };
+      return {
+        publish_key: publishKey,
+        parent_market_payload: parentMarketPayload,
+        status: "blocked",
+        existingRows: matchingRows,
+      };
     }
-    return { publish_key: publishKey, parent_market_payload: parentMarketPayload, status: "existing", existingRows: matchingRows };
+    return {
+      publish_key: publishKey,
+      parent_market_payload: parentMarketPayload,
+      status: "existing",
+      existingRows: matchingRows,
+    };
   });
 
   return {
@@ -3818,7 +3110,10 @@ async function executeCmsSelectedPublish({
         if (found?.type_reference_id) resolvedTypeRefId = found.type_reference_id;
       }
     } catch (err) {
-      runRecord.step_results.type_reference = { status: "failed", error: String(err?.message || err) };
+      runRecord.step_results.type_reference = {
+        status: "failed",
+        error: String(err?.message || err),
+      };
       runRecord.status = "failed";
       runRecord.completed_at = new Date().toISOString();
       return { runRecord };
@@ -3840,7 +3135,9 @@ async function executeCmsSelectedPublish({
     if (itemStatus === "blocked") {
       const existingRows = item.existingRows || [];
       const existingReconstructed = reconstructParentMarketPayloadFromRows(existingRows);
-      const providedCanonical = canonicalizeParentMarketComparisonPayload(item.parent_market_payload);
+      const providedCanonical = canonicalizeParentMarketComparisonPayload(
+        item.parent_market_payload
+      );
       const existingCanonical = canonicalizeParentMarketComparisonPayload(existingReconstructed);
 
       if (providedCanonical === existingCanonical) {
@@ -3878,7 +3175,10 @@ async function executeCmsSelectedPublish({
         runRecord.parent_market_results[publishKey] = { status: "published" };
         runRecord.aggregate.published++;
       } catch (err) {
-        runRecord.parent_market_results[publishKey] = { status: "failed", error: String(err?.message || err) };
+        runRecord.parent_market_results[publishKey] = {
+          status: "failed",
+          error: String(err?.message || err),
+        };
         runRecord.aggregate.failed++;
       }
       continue;
@@ -3909,7 +3209,10 @@ async function executeCmsSelectedPublish({
       runRecord.parent_market_results[publishKey] = { status: "published" };
       runRecord.aggregate.published++;
     } catch (err) {
-      runRecord.parent_market_results[publishKey] = { status: "failed", error: String(err?.message || err) };
+      runRecord.parent_market_results[publishKey] = {
+        status: "failed",
+        error: String(err?.message || err),
+      };
       runRecord.aggregate.failed++;
     }
   }

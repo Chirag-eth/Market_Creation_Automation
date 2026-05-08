@@ -10,10 +10,39 @@ export const CMS_BATCH_ALLOWED_ENVIRONMENTS = Object.freeze(["dev", "uat", "test
 export const CMS_BATCH_FRONTEND_MAX_FIXTURES = 15;
 export const CMS_BATCH_BACKEND_MAX_FIXTURES = 30;
 
-export function ensureCmsBatchEnvironmentAllowed(environment = {}, allowedCodes = CMS_BATCH_ALLOWED_ENVIRONMENTS) {
-  const code = String(environment?.code || "").trim().toLowerCase();
+// Maps frontend submarket IDs → internal CMS publish keys (pipe-delimited).
+// Used by /api/cms/batch-publish to expand a compact submarket selection
+// into the per-family/line/side keys consumed by executeCmsBatchRun.
+export const SUBMARKET_TO_PUBLISH_KEYS = Object.freeze({
+  moneyline: ["moneyline|0"],
+  btts: ["btts|0"],
+  ou_1_5: ["totals|1.5"],
+  ou_2_5: ["totals|2.5"],
+  ou_3_5: ["totals|3.5"],
+  ou_4_5: ["totals|4.5"],
+  home_1_5: ["spreads|1.5|home"],
+  away_1_5: ["spreads|1.5|away"],
+  home_2_5: ["spreads|2.5|home"],
+  away_2_5: ["spreads|2.5|away"],
+  spreads: ["spreads|1.5|home", "spreads|1.5|away", "spreads|2.5|home", "spreads|2.5|away"],
+  totals: ["totals|1.5", "totals|2.5", "totals|3.5", "totals|4.5"],
+});
+
+export function ensureCmsBatchEnvironmentAllowed(
+  environment = {},
+  allowedCodes = CMS_BATCH_ALLOWED_ENVIRONMENTS
+) {
+  const code = String(environment?.code || "")
+    .trim()
+    .toLowerCase();
   const allowlist = Array.isArray(allowedCodes)
-    ? allowedCodes.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+    ? allowedCodes
+        .map((value) =>
+          String(value || "")
+            .trim()
+            .toLowerCase()
+        )
+        .filter(Boolean)
     : [];
   if (!allowlist.includes(code)) {
     throw new InvalidIntegrationPayloadError(
@@ -29,18 +58,26 @@ export function getCmsBatchFixtureKey(value = {}) {
   if (gameId) {
     return gameId;
   }
-  const leagueCode = String(fixture.league_code || fixture.leagueCode || "").trim().toLowerCase();
+  const leagueCode = String(fixture.league_code || fixture.leagueCode || "")
+    .trim()
+    .toLowerCase();
   const fixtureDate = String(fixture.fixture_date || fixture.fixtureDate || "").trim();
   const kickoffTimeUtc = String(fixture.kickoff_time_utc || fixture.kickoffTimeUtc || "").trim();
-  const eventName = String(fixture.event_name || fixture.eventName || "").trim().toLowerCase();
+  const eventName = String(fixture.event_name || fixture.eventName || "")
+    .trim()
+    .toLowerCase();
   return [leagueCode, fixtureDate, kickoffTimeUtc, eventName].filter(Boolean).join("|");
 }
 
 export function normalizeCmsBatchEnvelope(payload = {}) {
   const source = payload && typeof payload === "object" ? payload : {};
   const selectedFixtures = dedupeBatchFixtures(source.selected_fixtures || source.selectedFixtures);
-  const selectedPublishKeys = dedupePublishKeys(source.selected_publish_keys || source.selectedPublishKeys);
-  const perFixtureExclusions = normalizePerFixtureExclusions(source.per_fixture_exclusions || source.perFixtureExclusions);
+  const selectedPublishKeys = dedupePublishKeys(
+    source.selected_publish_keys || source.selectedPublishKeys
+  );
+  const perFixtureExclusions = normalizePerFixtureExclusions(
+    source.per_fixture_exclusions || source.perFixtureExclusions
+  );
   const confirmation = normalizeBatchConfirmation(source.confirmation);
   return {
     selectedFixtures,
@@ -48,18 +85,24 @@ export function normalizeCmsBatchEnvelope(payload = {}) {
     perFixtureExclusions,
     retryFailedOnly:
       source.retry_failed_only === true ||
-      String(source.retry_failed_only || source.retryFailedOnly || "").trim().toLowerCase() === "true",
+      String(source.retry_failed_only || source.retryFailedOnly || "")
+        .trim()
+        .toLowerCase() === "true",
     lastRunId: String(source.last_run_id || source.lastRunId || "").trim(),
     dryRun:
       source.dry_run === true ||
-      String(source.dry_run || source.dryRun || "").trim().toLowerCase() === "true",
+      String(source.dry_run || source.dryRun || "")
+        .trim()
+        .toLowerCase() === "true",
     confirmation,
   };
 }
 
 export function validateCmsBatchEnvelope(envelope = {}, { publishing = false } = {}) {
   const issues = [];
-  const fixtureCount = Array.isArray(envelope.selectedFixtures) ? envelope.selectedFixtures.length : 0;
+  const fixtureCount = Array.isArray(envelope.selectedFixtures)
+    ? envelope.selectedFixtures.length
+    : 0;
   if (fixtureCount === 0) {
     issues.push("payload.selected_fixtures");
   }
@@ -71,7 +114,10 @@ export function validateCmsBatchEnvelope(envelope = {}, { publishing = false } =
   }
   if (publishing) {
     const operatorName = String(envelope.confirmation?.operator_name || "").trim();
-    const fixtureCountConfirmed = Number.parseInt(String(envelope.confirmation?.fixture_count || "").trim(), 10);
+    const fixtureCountConfirmed = Number.parseInt(
+      String(envelope.confirmation?.fixture_count || "").trim(),
+      10
+    );
     if (!operatorName) {
       issues.push("payload.confirmation.operator_name");
     }
@@ -88,16 +134,32 @@ export function validateCmsBatchEnvelope(envelope = {}, { publishing = false } =
   return issues;
 }
 
-export function applyCmsBatchExclusions(selectedPublishKeys = [], perFixtureExclusions = {}, fixture = {}) {
+export function applyCmsBatchExclusions(
+  selectedPublishKeys = [],
+  perFixtureExclusions = {},
+  fixture = {}
+) {
   const fixtureKey = getCmsBatchFixtureKey(fixture);
   const exclusion = fixtureKey ? perFixtureExclusions[fixtureKey] || null : null;
   const excludedPublishKeys = new Set(
     Array.isArray(exclusion?.excluded_publish_keys)
-      ? exclusion.excluded_publish_keys.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+      ? exclusion.excluded_publish_keys
+          .map((value) =>
+            String(value || "")
+              .trim()
+              .toLowerCase()
+          )
+          .filter(Boolean)
       : []
   );
   const selected = Array.isArray(selectedPublishKeys)
-    ? selectedPublishKeys.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+    ? selectedPublishKeys
+        .map((value) =>
+          String(value || "")
+            .trim()
+            .toLowerCase()
+        )
+        .filter(Boolean)
     : [];
   const publishKeys = selected.filter((value) => !excludedPublishKeys.has(value));
   return {
@@ -183,7 +245,9 @@ export function summarizeCmsBatchAggregate(fixtures = []) {
 
   for (const fixture of Array.isArray(fixtures) ? fixtures : []) {
     aggregate.fixtures_total += 1;
-    const fixtureStatus = String(fixture?.status || "").trim().toLowerCase();
+    const fixtureStatus = String(fixture?.status || "")
+      .trim()
+      .toLowerCase();
     if (fixtureStatus === "excluded") aggregate.fixtures_excluded += 1;
     else if (fixtureStatus === "failed") aggregate.fixtures_failed += 1;
     else if (fixtureStatus === "partial") aggregate.fixtures_partial += 1;
@@ -192,7 +256,9 @@ export function summarizeCmsBatchAggregate(fixtures = []) {
 
     for (const market of Array.isArray(fixture?.markets) ? fixture.markets : []) {
       aggregate.markets_total += 1;
-      const status = String(market?.status || "").trim().toLowerCase();
+      const status = String(market?.status || "")
+        .trim()
+        .toLowerCase();
       if (status === "ready") aggregate.markets_ready += 1;
       else if (status === "existing") aggregate.markets_existing += 1;
       else if (status === "missing") aggregate.markets_missing += 1;
@@ -208,7 +274,12 @@ export function summarizeCmsBatchAggregate(fixtures = []) {
 }
 
 export function buildCmsBatchRunSummary(runRecord = {}) {
-  const isStopRelated = ["stopped", "stopping"].includes(String(runRecord?.status || "").trim().toLowerCase()) || Boolean(runRecord?.stop_requested);
+  const isStopRelated =
+    ["stopped", "stopping"].includes(
+      String(runRecord?.status || "")
+        .trim()
+        .toLowerCase()
+    ) || Boolean(runRecord?.stop_requested);
   if (isStopRelated) {
     const fixturesTotal = Number((runRecord?.aggregate || {}).fixtures_total || 0);
     const published = Number((runRecord?.aggregate || {}).markets_published || 0);
@@ -229,7 +300,14 @@ export function buildCmsBatchRunSummary(runRecord = {}) {
   const excluded = Number(aggregate.markets_excluded || 0);
   const halfPrepared = Number(aggregate.markets_half_prepared || 0);
 
-  if (published === 0 && failed === 0 && blocked === 0 && halfPrepared === 0 && marketsTotal > 0 && existing + excluded === marketsTotal) {
+  if (
+    published === 0 &&
+    failed === 0 &&
+    blocked === 0 &&
+    halfPrepared === 0 &&
+    marketsTotal > 0 &&
+    existing + excluded === marketsTotal
+  ) {
     return {
       summary: "No new markets to publish in DEV.",
       detail: `All ${marketsTotal} selected market slot(s) already existed or were excluded.`,
@@ -251,7 +329,9 @@ export function buildCmsBatchRunSummary(runRecord = {}) {
 }
 
 export function buildCmsBatchFixtureRowMessage(fixture = {}) {
-  const status = String(fixture?.status || "").trim().toLowerCase();
+  const status = String(fixture?.status || "")
+    .trim()
+    .toLowerCase();
   const fixtureName = String(fixture?.event_name || fixture?.eventName || "Fixture").trim();
   if (status === "failed_precheck") {
     return {
@@ -330,7 +410,9 @@ function dedupePublishKeys(value) {
   const out = [];
   const seen = new Set();
   for (const item of items) {
-    const normalized = String(item || "").trim().toLowerCase();
+    const normalized = String(item || "")
+      .trim()
+      .toLowerCase();
     if (!normalized || seen.has(normalized) || !isSupportedCmsPublishKey(normalized)) {
       continue;
     }
@@ -350,7 +432,9 @@ function normalizePerFixtureExclusions(value) {
       if (!fixtureKey) continue;
       out[fixtureKey] = {
         excluded_fixture: Boolean(item?.excluded_fixture || item?.excludedFixture),
-        excluded_publish_keys: dedupePublishKeys(item?.excluded_publish_keys || item?.excludedPublishKeys),
+        excluded_publish_keys: dedupePublishKeys(
+          item?.excluded_publish_keys || item?.excludedPublishKeys
+        ),
       };
     }
     return out;
@@ -362,7 +446,9 @@ function normalizePerFixtureExclusions(value) {
     const valueObject = rawValue && typeof rawValue === "object" ? rawValue : {};
     out[fixtureKey] = {
       excluded_fixture: Boolean(valueObject.excluded_fixture || valueObject.excludedFixture),
-      excluded_publish_keys: dedupePublishKeys(valueObject.excluded_publish_keys || valueObject.excludedPublishKeys),
+      excluded_publish_keys: dedupePublishKeys(
+        valueObject.excluded_publish_keys || valueObject.excludedPublishKeys
+      ),
     };
   }
   return out;
@@ -375,7 +461,9 @@ function normalizeBatchConfirmation(value) {
     fixture_count: String(source.fixture_count || source.fixtureCount || "").trim(),
     confirmed:
       source.confirmed === true ||
-      String(source.confirmed || "").trim().toLowerCase() === "true",
+      String(source.confirmed || "")
+        .trim()
+        .toLowerCase() === "true",
   };
 }
 
@@ -396,8 +484,18 @@ export function extractRetryKeysFromRunRecord(lastRunRecord = null) {
   if (!lastRunRecord) return result;
   for (const fixture of Array.isArray(lastRunRecord.fixtures) ? lastRunRecord.fixtures : []) {
     const failedKeys = (Array.isArray(fixture?.markets) ? fixture.markets : [])
-      .filter((item) => ["failed", "half_prepared"].includes(String(item?.status || "").trim().toLowerCase()))
-      .map((item) => String(item?.publish_key || "").trim().toLowerCase())
+      .filter((item) =>
+        ["failed", "half_prepared"].includes(
+          String(item?.status || "")
+            .trim()
+            .toLowerCase()
+        )
+      )
+      .map((item) =>
+        String(item?.publish_key || "")
+          .trim()
+          .toLowerCase()
+      )
       .filter(Boolean);
     const fixtureKey = String(fixture.fixture_key || "").trim();
     if (fixtureKey && failedKeys.length) {
