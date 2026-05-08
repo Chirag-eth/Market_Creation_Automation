@@ -99,10 +99,7 @@ function buildFixtureAndParent() {
     catalog
   );
 
-  const parent = buildParentMarketPayload(
-    bundle.meta,
-    "4b57bb5d-c292-4d3d-ab05-9f19e2b77aaf"
-  );
+  const parent = buildParentMarketPayload(bundle.meta, "4b57bb5d-c292-4d3d-ab05-9f19e2b77aaf");
 
   return {
     fixture: bundle.fixtureJson,
@@ -212,12 +209,30 @@ test("verifyParentMarketJsonStrict rejects non-future parent times and status fl
 
   const result = verifyParentMarketJsonStrict(tampered, catalog, { fixture });
   assert.equal(result.ok, false);
-  assert.ok(result.errors.some((line) => line.includes("markets_open_time must be greater than current UTC time")));
-  assert.ok(result.errors.some((line) => line.includes("markets_close_time must be greater than current UTC time")));
-  assert.ok(result.errors.some((line) => line.includes("payout_time must be greater than current UTC time")));
-  assert.ok(result.errors.some((line) => line.includes("time_remaining must be greater than current UTC time")));
-  assert.ok(result.errors.some((line) => line.includes("parent_market.status must be \"active\"")));
-  assert.ok(result.errors.some((line) => line.includes("parent_market.is_cross_matching_enabled must be true")));
+  assert.ok(
+    result.errors.some((line) =>
+      line.includes("markets_open_time must be greater than current UTC time")
+    )
+  );
+  assert.ok(
+    result.errors.some((line) =>
+      line.includes("markets_close_time must be greater than current UTC time")
+    )
+  );
+  assert.ok(
+    result.errors.some((line) => line.includes("payout_time must be greater than current UTC time"))
+  );
+  assert.ok(
+    result.errors.some((line) =>
+      line.includes("time_remaining must be greater than current UTC time")
+    )
+  );
+  assert.ok(result.errors.some((line) => line.includes('parent_market.status must be "active"')));
+  assert.ok(
+    result.errors.some((line) =>
+      line.includes("parent_market.is_cross_matching_enabled must be true")
+    )
+  );
 });
 
 test("verifyBundleConsistency passes for generated fixture + parent payload", () => {
@@ -378,9 +393,7 @@ test("generateFromEventInput emits UAT type reference payloads when a type refer
       now: new Date("2099-03-01T00:00:00Z"),
     },
     {
-      leagues: [
-        ...catalog.leagues,
-      ],
+      leagues: [...catalog.leagues],
       teams: [
         ...catalog.teams,
         {
@@ -442,9 +455,7 @@ test("generateFromEventInput emits UAT parent-market family payloads when reques
       now: new Date("2099-03-01T00:00:00Z"),
     },
     {
-      leagues: [
-        ...catalog.leagues,
-      ],
+      leagues: [...catalog.leagues],
       teams: [
         ...catalog.teams,
         {
@@ -475,7 +486,12 @@ test("generateFromEventInput emits UAT parent-market family payloads when reques
 
   assert.equal(result.ok, true);
   assert.ok(result.uatParentPayloads);
-  assert.deepEqual(Object.keys(result.uatParentPayloads).sort(), ["btts", "moneyline", "spreads", "totals"]);
+  assert.deepEqual(Object.keys(result.uatParentPayloads).sort(), [
+    "btts",
+    "moneyline",
+    "spreads",
+    "totals",
+  ]);
   assert.equal(result.uatParentPayloads.moneyline.parent_market.parent_market_family, "moneyline");
   assert.equal(result.uatParentPayloads.moneyline.parent_market.title, "Hungary vs Greece");
   assert.equal(result.uatParentPayloads.moneyline.parent_market.market_line, "0");
@@ -493,15 +509,15 @@ test("generateFromEventInput emits UAT parent-market family payloads when reques
   assert.equal(result.uatParentPayloads.moneyline.markets[2].market_code, "DRAW");
   assert.equal(
     result.uatParentPayloads.moneyline.markets[0].rules,
-    'In the Hungary vs Greece game scheduled for March 31, 2099, if Hungary wins, this market will resolve to "Long" ($1 for Hungary). Otherwise, this market will resolve to "Short" ($0 for Hungary). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Short" ($0 for Hungary). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. This market was created on March 1, 2099 at 12 AM UTC.'
+    'In the upcoming FIFA Friendlies game between Hungary and Greece, scheduled for March 31, 2099, if Hungary wins, this market will resolve to "Long" ($1 for Hungary). Otherwise, this market will resolve to "Short" ($0 for Hungary). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Short" ($0 for Hungary). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. This market was created on March 1, 2099 at 12 AM UTC.'
   );
   assert.equal(
     result.uatParentPayloads.moneyline.markets[1].rules,
-    'In the Hungary vs Greece game scheduled for March 31, 2099, if Greece wins, this market will resolve to "Long" ($1 for Greece). Otherwise, this market will resolve to "Short" ($0 for Greece). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Short" ($0 for Greece). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. This market was created on March 1, 2099 at 12 AM UTC.'
+    'In the upcoming FIFA Friendlies game between Hungary and Greece, scheduled for March 31, 2099, if Greece wins, this market will resolve to "Long" ($1 for Greece). Otherwise, this market will resolve to "Short" ($0 for Greece). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Short" ($0 for Greece). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. This market was created on March 1, 2099 at 12 AM UTC.'
   );
   assert.equal(
     result.uatParentPayloads.moneyline.markets[2].rules,
-    'In the Hungary vs Greece game scheduled for March 31, 2099, if the game ends in a draw, this market will resolve to "Long" ($1 for Draw). Otherwise, this market will resolve to "Short" ($0 for Draw). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Long" ($1 for Draw). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. This market was created on March 1, 2099 at 12 AM UTC.'
+    'In the upcoming FIFA Friendlies game between Hungary and Greece, scheduled for March 31, 2099, if the game ends in a draw, this market will resolve to "Long" ($1 for Draw). Otherwise, this market will resolve to "Short" ($0 for Draw). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Long" ($1 for Draw). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. This market was created on March 1, 2099 at 12 AM UTC.'
   );
   assert.ok(!("team_id" in result.uatParentPayloads.moneyline.markets[2]));
   assert.equal(result.uatParentPayloads.spreads.parent_market.parent_market_family, "spreads");
@@ -519,10 +535,13 @@ test("generateFromEventInput emits UAT parent-market family payloads when reques
   assert.ok(!("market_display_name" in result.uatParentPayloads.spreads.markets[0]));
   assert.equal(
     result.uatParentPayloads.spreads.markets[0].rules,
-    'In the upcoming FIFA Friendlies game, scheduled for March 31 at 1:00 PM ET: This market will resolve to "Greece" if Greece win the game by 3 or more goals. Otherwise, this market will resolve to "Hungary". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. This market will resolve according to the official final score published on fifa.com. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. This market was created on March 1, 2099 at 12 AM UTC.'
+    'In the upcoming FIFA Friendlies game, scheduled for March 31 at 1:00 PM ET: This market will resolve to "Long" if Greece win the game by 3 or more goals. Otherwise, this market will resolve to "Short". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. This market will resolve according to the official final score published on fifa.com. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. This market was created on March 1, 2099 at 12 AM UTC.'
   );
   assert.equal(result.uatParentPayloads.spreads.markets[0].market_code, "Over 2.5");
-  assert.equal(result.uatParentPayloads.spreads.markets[0].team_id, "98571e85-7646-499c-b6bd-6cb55fbefbf7");
+  assert.equal(
+    result.uatParentPayloads.spreads.markets[0].team_id,
+    "98571e85-7646-499c-b6bd-6cb55fbefbf7"
+  );
   assert.equal(result.uatParentPayloads.totals.parent_market.parent_market_family, "totals");
   assert.equal(result.uatParentPayloads.totals.parent_market.title, "Total Over 2.5 Goals");
   assert.equal(result.uatParentPayloads.totals.parent_market.market_line, "2.5");
@@ -552,7 +571,7 @@ test("generateFromEventInput emits UAT parent-market family payloads when reques
   assert.equal(result.uatParentPayloads.btts.markets[0].market_code, "Both Teams To Score");
   assert.equal(
     result.uatParentPayloads.btts.markets[0].rules,
-    'In the upcoming FIFA Friendlies game between Hungary and Greece, scheduled for March 31 at 1:00 PM ET: This market will resolve to "Yes" if both Hungary and Greece each score at least one goal during the game. This market will resolve to "No" if either team fails to score (i.e., if one or both teams finish with zero goals). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on fifa.com. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. This market was created on March 1, 2099 at 12 AM UTC.'
+    'In the upcoming FIFA Friendlies game between Hungary and Greece, scheduled for March 31 at 1:00 PM ET: This market will resolve to "Long" if both Hungary and Greece each score at least one goal during the game. This market will resolve to "Short" if either team fails to score (i.e., if one or both teams finish with zero goals). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on fifa.com. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. This market was created on March 1, 2099 at 12 AM UTC.'
   );
 });
 
@@ -576,7 +595,9 @@ test("generateFromEventInput hardcodes a future kickoff when the selected timing
   assert.equal(result.ok, true);
   assert.ok(
     result.warnings.some((line) =>
-      line.includes("Kickoff was hardcoded to 2026-03-27 08:41 UTC because the selected/manual kickoff was behind current UTC")
+      line.includes(
+        "Kickoff was hardcoded to 2026-03-27 08:41 UTC because the selected/manual kickoff was behind current UTC"
+      )
     )
   );
   assert.ok(result.parentPayload);
@@ -639,7 +660,11 @@ test("generateFromEventInput enforces the selected SportsData fixture", () => {
   );
 
   assert.equal(result.ok, true);
-  assert.ok(result.info.some((line) => line.includes("Selected SportsData fixture verified against the current event setup.")));
+  assert.ok(
+    result.info.some((line) =>
+      line.includes("Selected SportsData fixture verified against the current event setup.")
+    )
+  );
 });
 
 test("generateFromEventInput fails when edited metadata drifts from the selected SportsData fixture", () => {
@@ -660,7 +685,11 @@ test("generateFromEventInput fails when edited metadata drifts from the selected
   );
 
   assert.equal(result.ok, false);
-  assert.ok(result.errors.some((line) => line.includes("Kickoff Time (UTC) must match the selected SportsData fixture time")));
+  assert.ok(
+    result.errors.some((line) =>
+      line.includes("Kickoff Time (UTC) must match the selected SportsData fixture time")
+    )
+  );
 });
 
 test("generateFromEventInput fails when event team is not in CSV", () => {
@@ -836,18 +865,17 @@ test("verifyBundleConsistency fails when parent timing drifts from the selected 
     })),
   };
 
-  const result = verifyBundleConsistency(
-    fixture,
-    driftedParent,
-    catalog,
-    {
-      now: new Date("2099-03-01T00:00:00Z"),
-      selectedScheduleFixture: buildSelectedScheduleFixture(),
-    }
-  );
+  const result = verifyBundleConsistency(fixture, driftedParent, catalog, {
+    now: new Date("2099-03-01T00:00:00Z"),
+    selectedScheduleFixture: buildSelectedScheduleFixture(),
+  });
 
   assert.equal(result.ok, false);
-  assert.ok(result.parentCheck.errors.some((line) => line.includes("Kickoff Time (UTC) must match the selected SportsData fixture time")));
+  assert.ok(
+    result.parentCheck.errors.some((line) =>
+      line.includes("Kickoff Time (UTC) must match the selected SportsData fixture time")
+    )
+  );
 });
 
 test("generateVaultPayloadFromInput builds naming format and payload shape", () => {
@@ -867,8 +895,14 @@ test("generateVaultPayloadFromInput builds naming format and payload shape", () 
   assert.ok(result.payload);
   assert.equal(result.payload.market_name, `DRAW_GAL_vs_LIV_UCL_${year}`);
   assert.equal(result.payload.market.question, `DRAW_GAL_vs_LIV_UCL_${year}`);
-  assert.equal(result.payload.market.outcomes.YES.token_id, "72390989656394092723709285047039935596255450081364429237891273051103304153527");
-  assert.equal(result.payload.market.outcomes.NO.token_id, "8975346952598897262687996252702979373792093357160517170366933722560510069626");
+  assert.equal(
+    result.payload.market.outcomes.YES.token_id,
+    "72390989656394092723709285047039935596255450081364429237891273051103304153527"
+  );
+  assert.equal(
+    result.payload.market.outcomes.NO.token_id,
+    "8975346952598897262687996252702979373792093357160517170366933722560510069626"
+  );
   assert.ok(/^0x[0-9a-f]{64}$/i.test(result.payload.market.pred_mapping.market_id));
 });
 
@@ -923,7 +957,9 @@ test("generateVaultPayloadFromInput rejects invalid optional market id", () => {
   );
 
   assert.equal(result.ok, false);
-  assert.ok(result.errors.some((line) => line.includes("Market ID must be a 0x-prefixed 64-hex string")));
+  assert.ok(
+    result.errors.some((line) => line.includes("Market ID must be a 0x-prefixed 64-hex string"))
+  );
 });
 
 test("generateVaultPayloadFromInput supports short team codes in fixture name", () => {
@@ -1005,7 +1041,9 @@ test("generateBulkVaultPayloadsFromInput reports row-level errors for invalid to
   );
 
   assert.equal(result.ok, false);
-  assert.ok(result.errors.some((line) => line.includes("Row 2 (NEW vs FCB): YES token ID is required")));
+  assert.ok(
+    result.errors.some((line) => line.includes("Row 2 (NEW vs FCB): YES token ID is required"))
+  );
 });
 
 test("generateBulkVaultPayloadsFromInput recognizes vault API JSON shape and explains missing naming fields", () => {
@@ -1019,8 +1057,10 @@ test("generateBulkVaultPayloadsFromInput recognizes vault API JSON shape and exp
             {
               MarketID: "0xabc",
               ParentMarketID: "0xparent",
-              PolyTokenID: "72390989656394092723709285047039935596255450081364429237891273051103304153527",
-              PolyNoTokenID: "8975346952598897262687996252702979373792093357160517170366933722560510069626",
+              PolyTokenID:
+                "72390989656394092723709285047039935596255450081364429237891273051103304153527",
+              PolyNoTokenID:
+                "8975346952598897262687996252702979373792093357160517170366933722560510069626",
             },
           ],
         },
@@ -1031,7 +1071,9 @@ test("generateBulkVaultPayloadsFromInput recognizes vault API JSON shape and exp
 
   assert.equal(result.ok, false);
   assert.ok(result.info.some((line) => line.includes("JSON response payload")));
-  assert.ok(result.errors.some((line) => line.includes("does not include fixture_name or league_code")));
+  assert.ok(
+    result.errors.some((line) => line.includes("does not include fixture_name or league_code"))
+  );
 });
 
 test("generateBulkVaultPayloadsFromInput applies supplemental market_id mapping to vault API JSON rows", () => {
@@ -1047,8 +1089,10 @@ test("generateBulkVaultPayloadsFromInput applies supplemental market_id mapping 
             {
               MarketID: marketId,
               ParentMarketID: marketId,
-              PolyTokenID: "72390989656394092723709285047039935596255450081364429237891273051103304153527",
-              PolyNoTokenID: "8975346952598897262687996252702979373792093357160517170366933722560510069626",
+              PolyTokenID:
+                "72390989656394092723709285047039935596255450081364429237891273051103304153527",
+              PolyNoTokenID:
+                "8975346952598897262687996252702979373792093357160517170366933722560510069626",
             },
           ],
         },
@@ -1079,8 +1123,10 @@ test("generateBulkVaultPayloadsFromInput rejects unmatched supplemental vault ma
             {
               MarketID: "0xabc",
               ParentMarketID: "0xparent",
-              PolyTokenID: "72390989656394092723709285047039935596255450081364429237891273051103304153527",
-              PolyNoTokenID: "8975346952598897262687996252702979373792093357160517170366933722560510069626",
+              PolyTokenID:
+                "72390989656394092723709285047039935596255450081364429237891273051103304153527",
+              PolyNoTokenID:
+                "8975346952598897262687996252702979373792093357160517170366933722560510069626",
             },
           ],
         },
@@ -1094,5 +1140,9 @@ test("generateBulkVaultPayloadsFromInput rejects unmatched supplemental vault ma
   );
 
   assert.equal(result.ok, false);
-  assert.ok(result.errors.some((line) => line.includes('market_id "0xdef" did not match any vault bulk row')));
+  assert.ok(
+    result.errors.some((line) =>
+      line.includes('market_id "0xdef" did not match any vault bulk row')
+    )
+  );
 });

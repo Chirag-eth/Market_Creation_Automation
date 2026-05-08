@@ -14,8 +14,18 @@ export const UAT_MARKET_LINE_OPTIONS = Object.freeze(
 export const UAT_SPREAD_MARKET_LINE_OPTIONS = Object.freeze(UAT_MARKET_LINE_OPTIONS.slice(0, 2));
 export const DEFAULT_UAT_MARKET_LINE = UAT_MARKET_LINE_OPTIONS[0]?.key || "1.5";
 
-export function buildUatTypeReferencePayloads({ fixtureName = "", fixtureDateIso = "", typeReferenceId = "", outputProfile = "", leagueCode = "" } = {}) {
-  if (String(outputProfile || "").trim().toLowerCase() !== OUTPUT_PROFILE_UAT) {
+export function buildUatTypeReferencePayloads({
+  fixtureName = "",
+  fixtureDateIso = "",
+  typeReferenceId = "",
+  outputProfile = "",
+  leagueCode = "",
+} = {}) {
+  if (
+    String(outputProfile || "")
+      .trim()
+      .toLowerCase() !== OUTPUT_PROFILE_UAT
+  ) {
     return null;
   }
 
@@ -23,7 +33,11 @@ export function buildUatTypeReferencePayloads({ fixtureName = "", fixtureDateIso
     return null;
   }
 
-  const fixtureCanonicalName = buildUatCanonicalFixtureName(fixtureName, fixtureDateIso, leagueCode);
+  const fixtureCanonicalName = buildUatCanonicalFixtureName(
+    fixtureName,
+    fixtureDateIso,
+    leagueCode
+  );
   const genericCanonicalName = buildUatGenericCanonicalName(fixtureName, fixtureDateIso);
   if (!fixtureCanonicalName || !genericCanonicalName) {
     return null;
@@ -57,13 +71,18 @@ export function buildUatParentPayloads({
   marketLine = "",
   spreadTeamSide = "",
 } = {}) {
-  if (String(outputProfile || "").trim().toLowerCase() !== OUTPUT_PROFILE_UAT) {
+  if (
+    String(outputProfile || "")
+      .trim()
+      .toLowerCase() !== OUTPUT_PROFILE_UAT
+  ) {
     return null;
   }
 
   const fixtureTitle = formatUatFixtureTitle(String(fixtureJson?.name || ""));
   const fixtureName = formatUatFixtureName(String(fixtureJson?.name || ""));
-  const marketsOpenTime = normalizeIsoSecondPrecision(openIso) || normalizeKickoffIso(fixtureDateIso, kickoffTimeUtc);
+  const marketsOpenTime =
+    normalizeIsoSecondPrecision(openIso) || normalizeKickoffIso(fixtureDateIso, kickoffTimeUtc);
   const selectedTotalsLine = getUatLineDefinition(marketLine);
   const selectedSpreadLine = getUatSpreadLineDefinition(marketLine);
   if (!fixtureTitle || !fixtureName || !league?.id || !fixtureDateIso || !marketsOpenTime) {
@@ -73,8 +92,18 @@ export function buildUatParentPayloads({
   const creationDate = formatUatUtcMomentFromIso(createdAtIso || marketsOpenTime);
   const homeCode = normalizeTeamCode(homeTeam);
   const awayCode = normalizeTeamCode(awayTeam);
-  const spreadTeam = String(spreadTeamSide || "").trim().toLowerCase() === "away" ? awayTeam : homeTeam;
-  const nonSpreadTeam = String(spreadTeamSide || "").trim().toLowerCase() === "away" ? homeTeam : awayTeam;
+  const spreadTeam =
+    String(spreadTeamSide || "")
+      .trim()
+      .toLowerCase() === "away"
+      ? awayTeam
+      : homeTeam;
+  const nonSpreadTeam =
+    String(spreadTeamSide || "")
+      .trim()
+      .toLowerCase() === "away"
+      ? homeTeam
+      : awayTeam;
   const ruleLeagueLabel = getUatRuleLeagueLabel(league);
   const resolutionSourceDomain = getUatResolutionSourceDomain(league);
   const fixtureScheduleEt = formatUatFixtureKickoffForEtRules(fixtureDateIso, kickoffTimeUtc);
@@ -105,8 +134,9 @@ export function buildUatParentPayloads({
           tick_size: "0.01",
           market_code: homeCode,
           rules: buildUatMoneylineTeamRule({
-            fixtureName,
-            fixtureTitle,
+            leagueLabel: ruleLeagueLabel,
+            homeTeamName: homeTeam.name,
+            awayTeamName: awayTeam.name,
             fixtureDateIso,
             teamName: homeTeam.name,
             creationDate,
@@ -118,8 +148,9 @@ export function buildUatParentPayloads({
           tick_size: "0.01",
           market_code: awayCode,
           rules: buildUatMoneylineTeamRule({
-            fixtureName,
-            fixtureTitle,
+            leagueLabel: ruleLeagueLabel,
+            homeTeamName: homeTeam.name,
+            awayTeamName: awayTeam.name,
             fixtureDateIso,
             teamName: awayTeam.name,
             creationDate,
@@ -131,8 +162,9 @@ export function buildUatParentPayloads({
           tick_size: "0.01",
           market_code: "DRAW",
           rules: buildUatMoneylineDrawRule({
-            fixtureTitle,
-            fixtureName,
+            leagueLabel: ruleLeagueLabel,
+            homeTeamName: homeTeam.name,
+            awayTeamName: awayTeam.name,
             fixtureDateIso,
             creationDate,
           }),
@@ -146,7 +178,12 @@ export function buildUatParentPayloads({
         title: `${spreadTeam.name} Over ${selectedSpreadLine.line} Goals`,
         parent_market_family: "spreads",
         market_line: `-${selectedSpreadLine.line}`,
-        rules: buildUatLegacyParentRules({ fixtureName, fixtureDateIso, kickoffTimeUtc, creationDate }),
+        rules: buildUatLegacyParentRules({
+          fixtureName,
+          fixtureDateIso,
+          kickoffTimeUtc,
+          creationDate,
+        }),
         order_delay_enabled: true,
         markets_open_time: marketsOpenTime,
       },
@@ -231,11 +268,15 @@ export function buildUatCanonicalFixtureName(fixtureName, fixtureDateIso, league
 }
 
 export function formatUatFixtureTitle(value) {
-  return String(value || "").trim().replace(/\s+vs\s+/gi, " vs ");
+  return String(value || "")
+    .trim()
+    .replace(/\s+vs\s+/gi, " vs ");
 }
 
 export function formatUatFixtureName(value) {
-  return String(value || "").trim().replace(/\s+vs\s+/gi, " vs ");
+  return String(value || "")
+    .trim()
+    .replace(/\s+vs\s+/gi, " vs ");
 }
 
 export function buildUatFixtureAlternateName(homeTeam, awayTeam) {
@@ -249,7 +290,9 @@ export function buildUatFixtureAlternateName(homeTeam, awayTeam) {
 
 function buildUatGenericCanonicalName(fixtureName, fixtureDateIso) {
   const normalizedFixture = normalizeFixtureNameToSlug(fixtureName);
-  const year = String(fixtureDateIso || "").trim().slice(0, 4);
+  const year = String(fixtureDateIso || "")
+    .trim()
+    .slice(0, 4);
   if (!normalizedFixture || !year) {
     return "";
   }
@@ -288,11 +331,20 @@ function normalizeIsoSecondPrecision(value) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString().replace(".000Z", "Z") : "";
 }
 
-function buildUatParentRules({ familyLabel, marketLine, fixtureName, fixtureDateIso, kickoffTimeUtc, creationDate }) {
+function buildUatParentRules({
+  familyLabel,
+  marketLine,
+  fixtureName,
+  fixtureDateIso,
+  kickoffTimeUtc,
+  creationDate,
+}) {
   const fixtureMoment = formatUatFixtureKickoffForRules(fixtureDateIso, kickoffTimeUtc);
   const normalizedLine = String(marketLine ?? "").trim();
   const familySegment =
-    String(familyLabel || "").trim().toLowerCase() === "moneyline" && normalizedLine === "0"
+    String(familyLabel || "")
+      .trim()
+      .toLowerCase() === "moneyline" && normalizedLine === "0"
       ? `${familyLabel}`
       : normalizedLine
         ? `${familyLabel} (${normalizedLine})`
@@ -342,22 +394,22 @@ function buildUatTotalsPayload({
       markets_open_time: marketsOpenTime,
     },
     markets: [
-        {
-          name: `Over ${selectedLine.line} Goals`,
-          tick_size: "0.01",
-          market_code: `Over ${selectedLine.line}`,
-          rules: buildUatTotalsMarketRule({
-            leagueLabel,
-            fixtureScheduleEt: formatUatFixtureKickoffForEtRules(fixtureDateIso, kickoffTimeUtc),
-            homeTeamName,
-            awayTeamName,
-            threshold: selectedLine.threshold,
-            sourceDomain,
-            creationDate,
-          }),
-        },
-      ],
-    };
+      {
+        name: `Over ${selectedLine.line} Goals`,
+        tick_size: "0.01",
+        market_code: `Over ${selectedLine.line}`,
+        rules: buildUatTotalsMarketRule({
+          leagueLabel,
+          fixtureScheduleEt: formatUatFixtureKickoffForEtRules(fixtureDateIso, kickoffTimeUtc),
+          homeTeamName,
+          awayTeamName,
+          threshold: selectedLine.threshold,
+          sourceDomain,
+          creationDate,
+        }),
+      },
+    ],
+  };
 }
 
 function getUatLineDefinition(value) {
@@ -367,18 +419,33 @@ function getUatLineDefinition(value) {
 
 function getUatSpreadLineDefinition(value) {
   const normalized = String(value || "").trim();
-  return UAT_TOTAL_LINES.slice(0, 2).find((entry) => entry.line === normalized) || UAT_TOTAL_LINES[0];
+  return (
+    UAT_TOTAL_LINES.slice(0, 2).find((entry) => entry.line === normalized) || UAT_TOTAL_LINES[0]
+  );
 }
 
-function buildUatMoneylineTeamRule({ fixtureName, fixtureTitle, fixtureDateIso, teamName, creationDate }) {
+function buildUatMoneylineTeamRule({
+  leagueLabel,
+  homeTeamName,
+  awayTeamName,
+  fixtureDateIso,
+  teamName,
+  creationDate,
+}) {
   const formattedDate = formatUatLongDate(fixtureDateIso);
   const name = String(teamName || "").trim();
-  return `In the ${fixtureName} game scheduled for ${formattedDate}, if ${name} wins, this market will resolve to "Long" ($1 for ${name}). Otherwise, this market will resolve to "Short" ($0 for ${name}). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Short" ($0 for ${name}). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. ${buildCreationSentence(creationDate)}`;
+  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${formattedDate}, if ${name} wins, this market will resolve to "Long" ($1 for ${name}). Otherwise, this market will resolve to "Short" ($0 for ${name}). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Short" ($0 for ${name}). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. ${buildCreationSentence(creationDate)}`;
 }
 
-function buildUatMoneylineDrawRule({ fixtureTitle, fixtureName, fixtureDateIso, creationDate }) {
+function buildUatMoneylineDrawRule({
+  leagueLabel,
+  homeTeamName,
+  awayTeamName,
+  fixtureDateIso,
+  creationDate,
+}) {
   const formattedDate = formatUatLongDate(fixtureDateIso);
-  return `In the ${fixtureName} game scheduled for ${formattedDate}, if the game ends in a draw, this market will resolve to "Long" ($1 for Draw). Otherwise, this market will resolve to "Short" ($0 for Draw). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Long" ($1 for Draw). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. ${buildCreationSentence(creationDate)}`;
+  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${formattedDate}, if the game ends in a draw, this market will resolve to "Long" ($1 for Draw). Otherwise, this market will resolve to "Short" ($0 for Draw). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Long" ($1 for Draw). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. ${buildCreationSentence(creationDate)}`;
 }
 
 function buildUatSpreadsMarketRule({
@@ -390,7 +457,7 @@ function buildUatSpreadsMarketRule({
   sourceDomain = "",
   creationDate = "",
 }) {
-  return `In the upcoming ${leagueLabel} game, scheduled for ${fixtureScheduleEt}: This market will resolve to "${selectedTeamName}" if ${selectedTeamName} win the game by ${threshold} or more goals. Otherwise, this market will resolve to "${otherTeamName}". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. This market will resolve according to the official final score published on ${sourceDomain}. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. ${buildCreationSentence(creationDate)}`;
+  return `In the upcoming ${leagueLabel} game, scheduled for ${fixtureScheduleEt}: This market will resolve to "Long" if ${selectedTeamName} win the game by ${threshold} or more goals. Otherwise, this market will resolve to "Short". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. This market will resolve according to the official final score published on ${sourceDomain}. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. ${buildCreationSentence(creationDate)}`;
 }
 
 function buildUatTotalsMarketRule({
@@ -413,7 +480,7 @@ function buildUatBttsMarketRule({
   sourceDomain = "",
   creationDate = "",
 }) {
-  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${fixtureScheduleEt}: This market will resolve to "Yes" if both ${homeTeamName} and ${awayTeamName} each score at least one goal during the game. This market will resolve to "No" if either team fails to score (i.e., if one or both teams finish with zero goals). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on ${sourceDomain}. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. ${buildCreationSentence(creationDate)}`;
+  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${fixtureScheduleEt}: This market will resolve to "Long" if both ${homeTeamName} and ${awayTeamName} each score at least one goal during the game. This market will resolve to "Short" if either team fails to score (i.e., if one or both teams finish with zero goals). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on ${sourceDomain}. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. ${buildCreationSentence(creationDate)}`;
 }
 
 function buildCreationSentence(creationDate) {
@@ -421,7 +488,9 @@ function buildCreationSentence(creationDate) {
 }
 
 function getUatRuleLeagueLabel(league) {
-  const key = String(league?.key || "").trim().toLowerCase();
+  const key = String(league?.key || "")
+    .trim()
+    .toLowerCase();
   switch (key) {
     case "epl":
       return "Premier League";
@@ -439,7 +508,9 @@ function getUatRuleLeagueLabel(league) {
 }
 
 function getUatResolutionSourceDomain(league) {
-  const key = String(league?.key || "").trim().toLowerCase();
+  const key = String(league?.key || "")
+    .trim()
+    .toLowerCase();
   switch (key) {
     case "epl":
       return "premierleague.com";
@@ -544,7 +615,10 @@ function formatUatUtcMomentFromIso(value) {
 }
 
 function normalizeTeamCode(team) {
-  const explicitCode = String(team?.code || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const explicitCode = String(team?.code || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
   if (explicitCode.length === 3) {
     return explicitCode;
   }
