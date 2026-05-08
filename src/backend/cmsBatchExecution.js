@@ -190,7 +190,7 @@ export function publishKeyToParentMarketKey(publishKey, homeName, awayName) {
   return null;
 }
 
-async function postCmsFixtureCreate(cmsConfig, body, log) {
+export async function postCmsFixtureCreate(cmsConfig, body, log) {
   const url = `${cmsConfig.baseUrl}/api/v1/cms/internal/fixtures/create`;
   const headers = { "Content-Type": "application/json" };
   if (cmsConfig.bearerToken) headers.Authorization = `Bearer ${cmsConfig.bearerToken}`;

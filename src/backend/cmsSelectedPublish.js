@@ -28,7 +28,11 @@ const CMS_PARENT_MARKET_EXPECTED_COUNTS = Object.freeze({
 });
 
 export function isSupportedCmsPublishKey(value) {
-  return CMS_SELECTED_PUBLISHABLE_KEY_SET.has(String(value || "").trim().toLowerCase());
+  return CMS_SELECTED_PUBLISHABLE_KEY_SET.has(
+    String(value || "")
+      .trim()
+      .toLowerCase()
+  );
 }
 
 export function normalizeCmsSelectedFixture(value = {}) {
@@ -38,7 +42,15 @@ export function normalizeCmsSelectedFixture(value = {}) {
     event_name: String(source.event_name || source.eventName || "").trim(),
     fixture_date: String(source.fixture_date || source.fixtureDate || "").trim(),
     kickoff_time_utc: String(source.kickoff_time_utc || source.kickoffTimeUtc || "").trim(),
-    league_code: String(source.league_code || source.leagueCode || "").trim().toLowerCase(),
+    league_code: String(source.league_code || source.leagueCode || "")
+      .trim()
+      .toLowerCase(),
+    // Schedule-provider key (e.g. "sportsdata", "lsports-db", "polymarket"). Optional.
+    // When set to a value that mapProviderToCmsSource recognizes, executeCmsSelectedPublish
+    // collapses the legacy 3-step + 2-poll publish flow into a single fixtures/create call.
+    provider: String(source.provider || source.source || "")
+      .trim()
+      .toLowerCase(),
   };
 }
 
@@ -46,12 +58,18 @@ export function normalizeCmsSelectedPublishEnvelope(payload = {}) {
   const data = payload && typeof payload === "object" ? payload : {};
   const selectedFixture = normalizeCmsSelectedFixture(data.selected_fixture);
   const manualQuery = String(data.manual_query || data.manualQuery || "").trim();
-  const providedTypeReferenceId = String(data.type_reference_id || data.typeReferenceId || "").trim();
+  const providedTypeReferenceId = String(
+    data.type_reference_id || data.typeReferenceId || ""
+  ).trim();
   const fixturePayload = normalizeObject(data.fixture_payload || data.fixturePayload);
-  const typeReferencePayload = normalizeObject(data.type_reference_payload || data.typeReferencePayload);
+  const typeReferencePayload = normalizeObject(
+    data.type_reference_payload || data.typeReferencePayload
+  );
   const forceRepublish =
     data.force_republish === true ||
-    String(data.force_republish || "").trim().toLowerCase() === "true";
+    String(data.force_republish || "")
+      .trim()
+      .toLowerCase() === "true";
   const selectedPublishItems = normalizeSelectedPublishItems(
     data.selected_publish_items || data.selectedPublishItems,
     { selectedFixture, fixturePayload }
@@ -68,7 +86,10 @@ export function normalizeCmsSelectedPublishEnvelope(payload = {}) {
   };
 }
 
-export function normalizeSelectedPublishItems(value, { selectedFixture = {}, fixturePayload = null } = {}) {
+export function normalizeSelectedPublishItems(
+  value,
+  { selectedFixture = {}, fixturePayload = null } = {}
+) {
   const items = Array.isArray(value) ? value : [];
   const out = [];
   for (const item of items) {
@@ -77,7 +98,9 @@ export function normalizeSelectedPublishItems(value, { selectedFixture = {}, fix
       normalizedItem.parent_market_payload || normalizedItem.parentMarketPayload
     );
     const publishKey =
-      String(normalizedItem.publish_key || normalizedItem.publishKey || "").trim().toLowerCase() ||
+      String(normalizedItem.publish_key || normalizedItem.publishKey || "")
+        .trim()
+        .toLowerCase() ||
       deriveCmsPublishKeyFromParentPayload(parentMarketPayload, {
         selectedFixture,
         fixturePayload,
@@ -97,7 +120,9 @@ export function dedupeSelectedPublishItems(items = []) {
   const seen = new Set();
   const out = [];
   for (const item of Array.isArray(items) ? items : []) {
-    const key = String(item?.publish_key || "").trim().toLowerCase();
+    const key = String(item?.publish_key || "")
+      .trim()
+      .toLowerCase();
     if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(item);
@@ -105,13 +130,18 @@ export function dedupeSelectedPublishItems(items = []) {
   return out;
 }
 
-export function deriveCmsPublishKeyFromParentPayload(parentMarketPayload, { selectedFixture = {}, fixturePayload = null } = {}) {
+export function deriveCmsPublishKeyFromParentPayload(
+  parentMarketPayload,
+  { selectedFixture = {}, fixturePayload = null } = {}
+) {
   const payload = normalizeObject(parentMarketPayload);
   const parentMarket = normalizeObject(payload?.parent_market);
   if (!parentMarket) {
     return "";
   }
-  const family = String(parentMarket.parent_market_family || "").trim().toLowerCase();
+  const family = String(parentMarket.parent_market_family || "")
+    .trim()
+    .toLowerCase();
   const line = normalizeMarketLine(parentMarket.market_line);
   if (family === "moneyline") {
     return "moneyline|0";
@@ -132,13 +162,20 @@ export function deriveCmsPublishKeyFromParentPayload(parentMarketPayload, { sele
   return "";
 }
 
-export function inferSpreadSideFromParentPayload(parentMarketPayload, { selectedFixture = {}, fixturePayload = null } = {}) {
+export function inferSpreadSideFromParentPayload(
+  parentMarketPayload,
+  { selectedFixture = {}, fixturePayload = null } = {}
+) {
   const payload = normalizeObject(parentMarketPayload);
   const markets = Array.isArray(payload?.markets) ? payload.markets : [];
   const spreadMarket = normalizeObject(markets[0]);
   const marketTeamId = String(spreadMarket?.team_id || "").trim();
-  const homeTeamId = String(selectedFixture.home_team_id || fixturePayload?.home_team_id || "").trim();
-  const awayTeamId = String(selectedFixture.away_team_id || fixturePayload?.away_team_id || "").trim();
+  const homeTeamId = String(
+    selectedFixture.home_team_id || fixturePayload?.home_team_id || ""
+  ).trim();
+  const awayTeamId = String(
+    selectedFixture.away_team_id || fixturePayload?.away_team_id || ""
+  ).trim();
   if (marketTeamId && homeTeamId && marketTeamId === homeTeamId) {
     return "home";
   }
@@ -157,13 +194,18 @@ export function inferSpreadSideFromParentPayload(parentMarketPayload, { selected
   return "";
 }
 
-export function buildExistingPublishKeyFromRows(rows = [], { selectedFixture = {}, fixtureRecord = null } = {}) {
+export function buildExistingPublishKeyFromRows(
+  rows = [],
+  { selectedFixture = {}, fixtureRecord = null } = {}
+) {
   const groupRows = Array.isArray(rows) ? rows : [];
   if (!groupRows.length) {
     return "";
   }
   const head = groupRows[0] || {};
-  const family = String(head.parent_market_family || "").trim().toLowerCase();
+  const family = String(head.parent_market_family || "")
+    .trim()
+    .toLowerCase();
   const line = normalizeMarketLine(head.market_line);
   if (family === "moneyline") {
     return "moneyline|0";
@@ -175,8 +217,12 @@ export function buildExistingPublishKeyFromRows(rows = [], { selectedFixture = {
     return `totals|${line}`;
   }
   if (family === "spreads" && line) {
-    const homeTeamId = String(selectedFixture.home_team_id || fixtureRecord?.home_team_id || "").trim();
-    const awayTeamId = String(selectedFixture.away_team_id || fixtureRecord?.away_team_id || "").trim();
+    const homeTeamId = String(
+      selectedFixture.home_team_id || fixtureRecord?.home_team_id || ""
+    ).trim();
+    const awayTeamId = String(
+      selectedFixture.away_team_id || fixtureRecord?.away_team_id || ""
+    ).trim();
     const teamId = String(groupRows.find((row) => row?.team_id)?.team_id || "").trim();
     if (teamId && homeTeamId && teamId === homeTeamId) return `spreads|${line}|home`;
     if (teamId && awayTeamId && teamId === awayTeamId) return `spreads|${line}|away`;
@@ -209,7 +255,9 @@ export function reconstructParentMarketPayloadFromRows(rows = []) {
       market_line: String(head.market_line ?? ""),
       rules: head.parent_rules,
       is_cross_matching_enabled:
-        typeof head.is_cross_matching_enabled === "boolean" ? head.is_cross_matching_enabled : undefined,
+        typeof head.is_cross_matching_enabled === "boolean"
+          ? head.is_cross_matching_enabled
+          : undefined,
       order_delay_enabled:
         typeof head.order_delay_enabled === "boolean" ? head.order_delay_enabled : undefined,
       markets_open_time: head.markets_open_time,
@@ -219,7 +267,9 @@ export function reconstructParentMarketPayloadFromRows(rows = []) {
 }
 
 export function getExpectedMarketCountForPublishKey(publishKey = "") {
-  const normalized = String(publishKey || "").trim().toLowerCase();
+  const normalized = String(publishKey || "")
+    .trim()
+    .toLowerCase();
   return CMS_PARENT_MARKET_EXPECTED_COUNTS[normalized] || 0;
 }
 
@@ -295,7 +345,9 @@ export function summarizeParentPublishCounts(parentResults = {}) {
   };
   for (const entry of Object.values(parentResults || {})) {
     aggregate.total += 1;
-    const status = String(entry?.status || "").trim().toLowerCase();
+    const status = String(entry?.status || "")
+      .trim()
+      .toLowerCase();
     if (status && Object.prototype.hasOwnProperty.call(aggregate, status)) {
       aggregate[status] += 1;
     }
@@ -308,7 +360,10 @@ export function validateCmsSelectedPublishEnvelope(envelope = {}) {
   if (!envelope?.selectedFixture?.game_id && !envelope?.manualQuery) {
     issues.push("payload.selected_fixture.game_id");
   }
-  if (!Array.isArray(envelope?.selectedPublishItems) || envelope.selectedPublishItems.length === 0) {
+  if (
+    !Array.isArray(envelope?.selectedPublishItems) ||
+    envelope.selectedPublishItems.length === 0
+  ) {
     issues.push("payload.selected_publish_items");
   }
   if (!envelope?.fixturePayload) {
@@ -320,15 +375,23 @@ export function validateCmsSelectedPublishEnvelope(envelope = {}) {
   return issues;
 }
 
-export function classifyParentStatusFromRows(rows = [], { selectedFixture = {}, fixtureRecord = null, expectedMarketCount = 0 } = {}) {
+export function classifyParentStatusFromRows(
+  rows = [],
+  { selectedFixture = {}, fixtureRecord = null, expectedMarketCount = 0 } = {}
+) {
   const groupRows = Array.isArray(rows) ? rows : [];
   if (!groupRows.length) {
     return { status: "missing", warnings: [] };
   }
   const publishKey = buildExistingPublishKeyFromRows(groupRows, { selectedFixture, fixtureRecord });
-  const parentIds = new Set(groupRows.map((row) => String(row.parent_market_id || "").trim()).filter(Boolean));
-  const marketIds = new Set(groupRows.map((row) => String(row.market_id || "").trim()).filter(Boolean));
-  const expectedCount = Number(expectedMarketCount || 0) || getExpectedMarketCountForPublishKey(publishKey);
+  const parentIds = new Set(
+    groupRows.map((row) => String(row.parent_market_id || "").trim()).filter(Boolean)
+  );
+  const marketIds = new Set(
+    groupRows.map((row) => String(row.market_id || "").trim()).filter(Boolean)
+  );
+  const expectedCount =
+    Number(expectedMarketCount || 0) || getExpectedMarketCountForPublishKey(publishKey);
   const warnings = [];
   let status = "existing";
   if (!publishKey) {
@@ -342,13 +405,25 @@ export function classifyParentStatusFromRows(rows = [], { selectedFixture = {}, 
     warnings.push("Parent market exists without any market rows.");
   } else if (expectedCount > 0 && marketIds.size < expectedCount) {
     status = "half_prepared";
-    warnings.push(`Parent market is missing expected child market rows (${marketIds.size}/${expectedCount}).`);
+    warnings.push(
+      `Parent market is missing expected child market rows (${marketIds.size}/${expectedCount}).`
+    );
   }
-  return { status, warnings, publishKey, expected_count: expectedCount, confirmed_count: marketIds.size };
+  return {
+    status,
+    warnings,
+    publishKey,
+    expected_count: expectedCount,
+    confirmed_count: marketIds.size,
+  };
 }
 
 export function ensureUatOnly(environment = {}) {
-  if (String(environment?.code || "").trim().toLowerCase() !== "uat") {
+  if (
+    String(environment?.code || "")
+      .trim()
+      .toLowerCase() !== "uat"
+  ) {
     throw new InvalidIntegrationPayloadError("This route is available only for UAT.", {
       issues: ["environment"],
     });
@@ -356,7 +431,9 @@ export function ensureUatOnly(environment = {}) {
 }
 
 export function formatCmsPublishKeyLabel(publishKey = "") {
-  const normalized = String(publishKey || "").trim().toLowerCase();
+  const normalized = String(publishKey || "")
+    .trim()
+    .toLowerCase();
   if (!normalized) return "Unknown market";
   if (normalized === "moneyline|0") return "Moneyline";
   if (normalized === "btts|0") return "BTTS";
@@ -370,8 +447,14 @@ export function formatCmsPublishKeyLabel(publishKey = "") {
   return normalized;
 }
 
-export function buildCmsParentResultMessage(status = "", publishKey = "", { warnings = [], error = "" } = {}) {
-  const normalized = String(status || "").trim().toLowerCase();
+export function buildCmsParentResultMessage(
+  status = "",
+  publishKey = "",
+  { warnings = [], error = "" } = {}
+) {
+  const normalized = String(status || "")
+    .trim()
+    .toLowerCase();
   const chipLabel = formatCmsPublishKeyLabel(publishKey);
   switch (normalized) {
     case "selectable":
@@ -380,43 +463,95 @@ export function buildCmsParentResultMessage(status = "", publishKey = "", { warn
     case "publishing":
       return { label: "Publishing", detail: `Publishing ${chipLabel}.`, tone: "working" };
     case "waiting_for_db":
-      return { label: "Waiting For DB", detail: `${chipLabel} publish succeeded. Waiting for DB confirmation.`, tone: "working" };
+      return {
+        label: "Waiting For DB",
+        detail: `${chipLabel} publish succeeded. Waiting for DB confirmation.`,
+        tone: "working",
+      };
     case "published":
-      return { label: "Created", detail: `${chipLabel} created and confirmed in DB.`, tone: "success" };
+      return {
+        label: "Created",
+        detail: `${chipLabel} created and confirmed in DB.`,
+        tone: "success",
+      };
     case "existing":
-      return { label: "Already Exists", detail: `${chipLabel} already exists and is skipped by default.`, tone: "warn" };
+      return {
+        label: "Already Exists",
+        detail: `${chipLabel} already exists and is skipped by default.`,
+        tone: "warn",
+      };
     case "skipped":
       return { label: "Skipped", detail: `${chipLabel} was skipped.`, tone: "neutral" };
     case "half_prepared":
-      return { label: "Half-prepared", detail: `${chipLabel} has a parent market record but is missing expected child market rows.`, tone: "warn" };
+      return {
+        label: "Half-prepared",
+        detail: `${chipLabel} has a parent market record but is missing expected child market rows.`,
+        tone: "warn",
+      };
     case "blocked":
-      if (Array.isArray(warnings) && warnings.some((value) => /matches the existing/i.test(String(value || "")))) {
-        return { label: "Blocked", detail: `${chipLabel} matches the existing market JSON. Update the parent market JSON before republishing.`, tone: "error" };
+      if (
+        Array.isArray(warnings) &&
+        warnings.some((value) => /matches the existing/i.test(String(value || "")))
+      ) {
+        return {
+          label: "Blocked",
+          detail: `${chipLabel} matches the existing market JSON. Update the parent market JSON before republishing.`,
+          tone: "error",
+        };
       }
       return { label: "Blocked", detail: `${chipLabel} is invalid for publish.`, tone: "error" };
     case "failed":
-      return { label: "Failed", detail: `${chipLabel} failed to publish.${error ? ` ${String(error).trim()}` : ""}`.trim(), tone: "error" };
+      return {
+        label: "Failed",
+        detail: `${chipLabel} failed to publish.${error ? ` ${String(error).trim()}` : ""}`.trim(),
+        tone: "error",
+      };
     default:
       return { label: "Pending", detail: `${chipLabel} has not started yet.`, tone: "neutral" };
   }
 }
 
-export function buildCmsStepResultMessage(kind = "", status = "", fixtureName = "", { providedTypeReference = false } = {}) {
-  const normalizedKind = String(kind || "").trim().toLowerCase();
-  const normalizedStatus = String(status || "").trim().toLowerCase();
+export function buildCmsStepResultMessage(
+  kind = "",
+  status = "",
+  fixtureName = "",
+  { providedTypeReference = false } = {}
+) {
+  const normalizedKind = String(kind || "")
+    .trim()
+    .toLowerCase();
+  const normalizedStatus = String(status || "")
+    .trim()
+    .toLowerCase();
   if (normalizedKind === "fixture") {
     switch (normalizedStatus) {
       case "publishing":
         return { label: "Publishing", detail: "Publishing fixture JSON to CMS.", tone: "working" };
       case "waiting_for_db":
-        return { label: "Waiting For DB", detail: "Fixture publish succeeded. Waiting for fixture row to appear in DB.", tone: "working" };
+        return {
+          label: "Waiting For DB",
+          detail: "Fixture publish succeeded. Waiting for fixture row to appear in DB.",
+          tone: "working",
+        };
       case "created":
       case "existing":
-        return { label: "Created", detail: "Fixture created and confirmed in DB.", tone: "success" };
+        return {
+          label: "Created",
+          detail: "Fixture created and confirmed in DB.",
+          tone: "success",
+        };
       case "skipped":
-        return { label: "Skipped", detail: "Fixture publish skipped because an existing type reference was provided.", tone: "neutral" };
+        return {
+          label: "Skipped",
+          detail: "Fixture publish skipped because an existing type reference was provided.",
+          tone: "neutral",
+        };
       case "failed":
-        return { label: "Failed", detail: "Fixture publish failed or fixture row was not confirmed in DB.", tone: "error" };
+        return {
+          label: "Failed",
+          detail: "Fixture publish failed or fixture row was not confirmed in DB.",
+          tone: "error",
+        };
       default:
         return { label: "Pending", detail: "Fixture publish has not started.", tone: "neutral" };
     }
@@ -424,35 +559,73 @@ export function buildCmsStepResultMessage(kind = "", status = "", fixtureName = 
   if (normalizedKind === "type_reference") {
     switch (normalizedStatus) {
       case "publishing":
-        return { label: "Publishing", detail: "Publishing type reference JSON to CMS.", tone: "working" };
+        return {
+          label: "Publishing",
+          detail: "Publishing type reference JSON to CMS.",
+          tone: "working",
+        };
       case "waiting_for_db":
-        return { label: "Waiting For DB", detail: "Type reference publish succeeded. Waiting for type reference row to appear in DB.", tone: "working" };
+        return {
+          label: "Waiting For DB",
+          detail:
+            "Type reference publish succeeded. Waiting for type reference row to appear in DB.",
+          tone: "working",
+        };
       case "created":
       case "existing":
-        return { label: "Created", detail: "Type reference created and confirmed in DB.", tone: "success" };
+        return {
+          label: "Created",
+          detail: "Type reference created and confirmed in DB.",
+          tone: "success",
+        };
       case "skipped":
-        return { label: "Skipped", detail: "Type reference publish skipped because an existing type reference was provided.", tone: "neutral" };
+        return {
+          label: "Skipped",
+          detail: "Type reference publish skipped because an existing type reference was provided.",
+          tone: "neutral",
+        };
       case "blocked":
-        return { label: "Blocked", detail: "The entered type reference does not belong to the selected fixture.", tone: "error" };
+        return {
+          label: "Blocked",
+          detail: "The entered type reference does not belong to the selected fixture.",
+          tone: "error",
+        };
       case "failed":
-        return { label: "Failed", detail: "Type reference publish failed or type reference row was not confirmed in DB.", tone: "error" };
+        return {
+          label: "Failed",
+          detail: "Type reference publish failed or type reference row was not confirmed in DB.",
+          tone: "error",
+        };
       default:
-        return { label: "Pending", detail: "Type reference publish has not started.", tone: "neutral" };
+        return {
+          label: "Pending",
+          detail: "Type reference publish has not started.",
+          tone: "neutral",
+        };
     }
   }
   return { label: "Pending", detail: `${fixtureName || "Step"} has not started.`, tone: "neutral" };
 }
 
 export function buildCmsPublishRunSummary(runRecord = {}) {
-  const fixtureName = String(runRecord?.fixture?.event_name || runRecord?.fixture?.name || "selected fixture").trim();
+  const fixtureName = String(
+    runRecord?.fixture?.event_name || runRecord?.fixture?.name || "selected fixture"
+  ).trim();
   const aggregate = runRecord?.aggregate || {};
   const published = Number(aggregate.published || 0);
   const existing = Number(aggregate.existing || 0);
   const failed = Number(aggregate.failed || 0);
   const halfPrepared = Number(aggregate.half_prepared || 0);
   const requested = Number(aggregate.total || 0);
-  const typeRefSkipped = Array.isArray(runRecord?.skipped_steps) && runRecord.skipped_steps.includes("type_reference");
-  if (requested > 0 && published === 0 && existing === requested && failed === 0 && halfPrepared === 0) {
+  const typeRefSkipped =
+    Array.isArray(runRecord?.skipped_steps) && runRecord.skipped_steps.includes("type_reference");
+  if (
+    requested > 0 &&
+    published === 0 &&
+    existing === requested &&
+    failed === 0 &&
+    halfPrepared === 0
+  ) {
     return {
       summary: `No new markets to publish for ${fixtureName}.`,
       detail: "All selected markets already exist in UAT.",
@@ -549,7 +722,11 @@ export function buildCmsDbResultSnapshot({
   const halfPreparedMarkets = [];
   const selectedKeys = new Set(
     (Array.isArray(selectedPublishItems) ? selectedPublishItems : [])
-      .map((item) => String(item?.publish_key || "").trim().toLowerCase())
+      .map((item) =>
+        String(item?.publish_key || "")
+          .trim()
+          .toLowerCase()
+      )
       .filter(Boolean)
   );
   const seenKeys = new Set();
@@ -559,7 +736,9 @@ export function buildCmsDbResultSnapshot({
       selectedFixture,
       fixtureRecord,
     });
-    const publishKey = String(classification.publishKey || "").trim().toLowerCase();
+    const publishKey = String(classification.publishKey || "")
+      .trim()
+      .toLowerCase();
     if (!publishKey) {
       continue;
     }
@@ -571,11 +750,12 @@ export function buildCmsDbResultSnapshot({
       label: formatCmsPublishKeyLabel(publishKey),
       parent_market_id: String(head.parent_market_id || "").trim() || null,
       title: String(head.title || "").trim() || null,
-      parent_market_family: String(head.parent_market_family || "").trim().toLowerCase() || null,
+      parent_market_family:
+        String(head.parent_market_family || "")
+          .trim()
+          .toLowerCase() || null,
       market_line: normalizeMarketLine(head.market_line),
-      market_ids: rows
-        .map((row) => String(row.market_id || "").trim())
-        .filter(Boolean),
+      market_ids: rows.map((row) => String(row.market_id || "").trim()).filter(Boolean),
       markets: rows
         .filter((row) => String(row.market_id || "").trim())
         .map((row) => ({
@@ -658,7 +838,9 @@ function normalizeForCompare(value) {
 }
 
 function splitEventName(value = "") {
-  const parts = String(value || "").trim().split(/\s+vs\s+/i);
+  const parts = String(value || "")
+    .trim()
+    .split(/\s+vs\s+/i);
   if (parts.length >= 2) {
     return [parts[0].trim(), parts.slice(1).join(" vs ").trim()];
   }

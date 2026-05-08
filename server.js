@@ -69,6 +69,10 @@ import {
   classifyExistingBatchParentMarketRows,
   deriveBatchFixtureStatusFromMarkets,
   deriveBatchRunStatusFromFixtures,
+  mapProviderToCmsSource,
+  publishKeyToParentMarketKey,
+  buildFixtureCreateCname,
+  postCmsFixtureCreate,
 } from "./src/backend/cmsBatchExecution.js";
 import {
   getUpcomingSchedulePayload,
@@ -106,6 +110,7 @@ const serverLog = createScopedLogger("server");
 const authLog = createScopedLogger("auth");
 const schedLog = createScopedLogger("schedule");
 const batchLog = createScopedLogger("batch");
+const cmsLog = createScopedLogger("cms");
 
 const STARTUP_ENV = { ...process.env };
 const ROOT_DIR = path.resolve(process.cwd());
@@ -3059,6 +3064,109 @@ async function executeCmsSelectedPublish({
   if (runStore) runStore.set(runId, runRecord);
 
   const preflightItems = preflight?.preflightItems || [];
+
+  // ── New combined fixtures/create endpoint shortcut ──────────────────────────
+  // When the schedule provider is sportsdata or lsports, collapse the legacy
+  // fixture → type-ref → parent-market flow into a single fixtures/create call.
+  const selectedFixtureForShortcut = envelope?.payload?.selected_fixture || {};
+  const newCmsSource = mapProviderToCmsSource(
+    selectedFixtureForShortcut.provider || selectedFixtureForShortcut.source
+  );
+  if (newCmsSource) {
+    const gameId = String(
+      selectedFixtureForShortcut.game_id || selectedFixtureForShortcut.gameId || ""
+    ).trim();
+    const eventName = String(selectedFixtureForShortcut.event_name || "").trim();
+    const [homeNameRaw = "", awayNameRaw = ""] = eventName.split(/\s+vs\s+/i);
+    const homeName = homeNameRaw.trim();
+    const awayName = awayNameRaw.trim();
+    const leagueCode = String(selectedFixtureForShortcut.league_code || "")
+      .trim()
+      .toLowerCase();
+    const fixtureLike = {
+      home: homeName,
+      away: awayName,
+      kickoff: String(selectedFixtureForShortcut.fixture_date || "").trim(),
+      leagueCode,
+    };
+    const cname = buildFixtureCreateCname(fixtureLike, null, null);
+    const parentMarkets = [
+      ...new Set(
+        preflightItems
+          .filter((item) => String(item?.status || "") !== "existing")
+          .map((item) =>
+            publishKeyToParentMarketKey(String(item?.publish_key || ""), homeName, awayName)
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+    runRecord.step_results.fixture = { status: "skipped" };
+    runRecord.step_results.type_reference = { status: "skipped" };
+
+    if (!gameId) {
+      runRecord.status = "failed";
+      runRecord.summary = "Publish failed.";
+      runRecord.detail = "Fixture has no game_id; cannot use fixtures/create.";
+      runRecord.completed_at = new Date().toISOString();
+      return { runRecord };
+    }
+
+    const log = cmsLog.child({ runId, source: newCmsSource });
+    log.info(
+      { gameId, eventName, cname, parentMarkets },
+      "publishing via fixtures/create shortcut"
+    );
+
+    try {
+      const resp = await postCmsFixtureCreate(
+        config,
+        {
+          game_id: gameId,
+          source: newCmsSource,
+          parent_markets: parentMarkets,
+          cname,
+          appendix: "",
+        },
+        log
+      );
+      for (const item of preflightItems) {
+        const publishKey = String(item?.publish_key || "").trim();
+        if (String(item?.status || "") === "existing") {
+          runRecord.parent_market_results[publishKey] = { status: "existing" };
+          runRecord.aggregate.existing++;
+        } else {
+          runRecord.parent_market_results[publishKey] = { status: "published" };
+          runRecord.aggregate.published++;
+        }
+      }
+      runRecord.response = resp ?? null;
+      runRecord.status = "completed";
+      runRecord.summary = "Publish completed.";
+      runRecord.detail = `Created fixture, type reference, and ${runRecord.aggregate.published} selected market${runRecord.aggregate.published !== 1 ? "s" : ""} via fixtures/create.`;
+    } catch (err) {
+      const errorMessage = String(err?.message || err);
+      for (const item of preflightItems) {
+        const publishKey = String(item?.publish_key || "").trim();
+        if (String(item?.status || "") === "existing") {
+          runRecord.parent_market_results[publishKey] = { status: "existing" };
+          runRecord.aggregate.existing++;
+        } else {
+          runRecord.parent_market_results[publishKey] = {
+            status: "failed",
+            error: errorMessage,
+          };
+          runRecord.aggregate.failed++;
+        }
+      }
+      runRecord.status = "failed";
+      runRecord.summary = "Publish failed.";
+      runRecord.detail = errorMessage;
+    }
+    runRecord.completed_at = new Date().toISOString();
+    return { runRecord };
+  }
+
   const skipFixtureAndTypeRef = Boolean(providedTypeReferenceId);
   let resolvedTypeRefId = providedTypeReferenceId || preflight?.resolvedTypeRefId || "";
   let resolvedFixtureRecord = preflight?.fixtureRecord || null;

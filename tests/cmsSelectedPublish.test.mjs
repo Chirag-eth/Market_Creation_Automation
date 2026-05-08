@@ -9,11 +9,7 @@ import {
   ensureUatOnly,
 } from "../src/backend/cmsSelectedPublish.js";
 import { InvalidIntegrationPayloadError } from "../src/backend/publisherCore.js";
-import {
-  buildCmsSelectedPreflight,
-  executeCmsSelectedPublish,
-  pollUntil,
-} from "../server.js";
+import { buildCmsSelectedPreflight, executeCmsSelectedPublish, pollUntil } from "../server.js";
 
 const SELECTED_FIXTURE = {
   game_id: "900003",
@@ -173,7 +169,11 @@ function createPool(queryImpl) {
   };
 }
 
-function createParentMarketRows({ payload, parentMarketId = "pm-1", typeReferenceId = "tr-1" } = {}) {
+function createParentMarketRows({
+  payload,
+  parentMarketId = "pm-1",
+  typeReferenceId = "tr-1",
+} = {}) {
   const normalized = payload || createMoneylinePayload();
   return (Array.isArray(normalized.markets) ? normalized.markets : []).map((market, index) => ({
     parent_market_id: parentMarketId,
@@ -496,7 +496,9 @@ test("executeCmsSelectedPublish runs full publish from scratch in sequence and w
     publishParentMarketFn: async ({ parentMarketPayload }) => {
       publishedParentCount += 1;
       parentPayloads.push(parentMarketPayload);
-      steps.push(`parent:${parentMarketPayload.parent_market.parent_market_family}:${parentMarketPayload.parent_market.market_line}`);
+      steps.push(
+        `parent:${parentMarketPayload.parent_market.parent_market_family}:${parentMarketPayload.parent_market.market_line}`
+      );
       return { ok: true, steps: [{ key: "parent_market" }] };
     },
     runStore: new Map(),
@@ -530,7 +532,10 @@ test("executeCmsSelectedPublish runs full publish from scratch in sequence and w
   assert.equal(result.runRecord.parent_market_results["moneyline|0"]?.status, "published");
   assert.equal(result.runRecord.parent_market_results["totals|2.5"]?.status, "published");
   assert.match(String(result.runRecord.summary || ""), /Publish completed/i);
-  assert.match(String(result.runRecord.detail || ""), /Created fixture, type reference, and 2 selected market/i);
+  assert.match(
+    String(result.runRecord.detail || ""),
+    /Created fixture, type reference, and 2 selected market/i
+  );
 });
 
 test("executeCmsSelectedPublish skips fixture and type-reference publishes when type_reference_id is provided", async () => {
@@ -627,8 +632,14 @@ test("executeCmsSelectedPublish blocks unchanged force republish and allows chan
 
   // UAT republish stubs: fixture exists in DB so the republish path re-POSTs with match_day+1.
   // FIXTURE_RECORD has no match_day so uatRepublishMatchDay = 0 + 1 = 1.
-  const stubFixtureFn = async () => ({ ok: true, steps: [{ key: "fixture", response: { fixture_id: "fixture-republish" } }] });
-  const stubTypeRefFn = async () => ({ ok: true, steps: [{ key: "type_reference", response: { type_reference_id: "tr-republish" } }] });
+  const stubFixtureFn = async () => ({
+    ok: true,
+    steps: [{ key: "fixture", response: { fixture_id: "fixture-republish" } }],
+  });
+  const stubTypeRefFn = async () => ({
+    ok: true,
+    steps: [{ key: "type_reference", response: { type_reference_id: "tr-republish" } }],
+  });
 
   const unchangedResult = await executeCmsSelectedPublish({
     envelope: createEnvelope({
@@ -835,6 +846,137 @@ test("executeCmsSelectedPublish waits through transient half-prepared parent-mar
   assert.equal(result.runRecord.parent_market_results["moneyline|0"]?.status, "published");
 });
 
+test("executeCmsSelectedPublish takes the fixtures/create shortcut when provider maps to a CMS source", async () => {
+  const fetchCalls = [];
+  const originalFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    fetchCalls.push({ url: String(url), init });
+    return {
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      text: async () => JSON.stringify({ fixture_id: "fx-shortcut" }),
+    };
+  };
+
+  try {
+    const baseEnvelope = createEnvelope({
+      selectedPublishItems: [
+        { publish_key: "moneyline|0", parent_market_payload: createMoneylinePayload() },
+        { publish_key: "totals|2.5", parent_market_payload: createTotalsPayload("2.5") },
+      ],
+    });
+    const envelope = {
+      ...baseEnvelope,
+      payload: {
+        ...baseEnvelope.payload,
+        selected_fixture: { ...SELECTED_FIXTURE, provider: "sportsdata" },
+      },
+    };
+
+    const result = await executeCmsSelectedPublish({
+      envelope,
+      config: {
+        baseUrl: "https://cms.test",
+        bearerToken: "tok-123",
+        timeoutMs: 5000,
+      },
+      runStore: new Map(),
+      createRunIdFn: () => "run-shortcut",
+      preflight: {
+        preflightItems: [
+          {
+            publish_key: "moneyline|0",
+            status: "selectable",
+            parent_market_payload: createMoneylinePayload(),
+          },
+          {
+            publish_key: "totals|2.5",
+            status: "selectable",
+            parent_market_payload: createTotalsPayload("2.5"),
+          },
+        ],
+      },
+    });
+
+    assert.equal(fetchCalls.length, 1);
+    const call = fetchCalls[0];
+    assert.equal(call.url, "https://cms.test/api/v1/cms/internal/fixtures/create");
+    assert.equal(call.init.method, "POST");
+    assert.equal(call.init.headers.Authorization, "Bearer tok-123");
+    assert.equal(call.init.headers["Content-Type"], "application/json");
+
+    const body = JSON.parse(call.init.body);
+    assert.equal(body.game_id, "900003");
+    assert.equal(body.source, "sports_data");
+    assert.deepEqual([...body.parent_markets].sort(), ["moneyline", "totals_2.5"]);
+    assert.equal(body.cname, "epl-afc-bournemouth-manchester-united-fc-2026-04-25");
+    assert.equal(body.appendix, "");
+
+    assert.equal(result.runRecord.status, "completed");
+    assert.equal(result.runRecord.step_results.fixture?.status, "skipped");
+    assert.equal(result.runRecord.step_results.type_reference?.status, "skipped");
+    assert.equal(result.runRecord.parent_market_results["moneyline|0"]?.status, "published");
+    assert.equal(result.runRecord.parent_market_results["totals|2.5"]?.status, "published");
+    assert.equal(result.runRecord.aggregate.published, 2);
+    assert.equal(result.runRecord.aggregate.failed, 0);
+    assert.match(String(result.runRecord.detail || ""), /via fixtures\/create/i);
+    assert.deepEqual(result.runRecord.response, { fixture_id: "fx-shortcut" });
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("executeCmsSelectedPublish marks all selectable items failed when fixtures/create errors", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: false,
+    status: 500,
+    headers: new Map(),
+    text: async () => JSON.stringify({ error: "boom" }),
+  });
+
+  try {
+    const baseEnvelope = createEnvelope({
+      selectedPublishItems: [
+        { publish_key: "moneyline|0", parent_market_payload: createMoneylinePayload() },
+      ],
+    });
+    const envelope = {
+      ...baseEnvelope,
+      payload: {
+        ...baseEnvelope.payload,
+        selected_fixture: { ...SELECTED_FIXTURE, provider: "lsports-db" },
+      },
+    };
+
+    const result = await executeCmsSelectedPublish({
+      envelope,
+      config: { baseUrl: "https://cms.test", bearerToken: "tok", timeoutMs: 5000 },
+      runStore: new Map(),
+      createRunIdFn: () => "run-shortcut-fail",
+      preflight: {
+        preflightItems: [
+          {
+            publish_key: "moneyline|0",
+            status: "selectable",
+            parent_market_payload: createMoneylinePayload(),
+          },
+        ],
+      },
+    });
+
+    assert.equal(result.runRecord.status, "failed");
+    assert.equal(result.runRecord.step_results.fixture?.status, "skipped");
+    assert.equal(result.runRecord.step_results.type_reference?.status, "skipped");
+    assert.equal(result.runRecord.parent_market_results["moneyline|0"]?.status, "failed");
+    assert.equal(result.runRecord.aggregate.failed, 1);
+    assert.equal(result.runRecord.aggregate.published, 0);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("manual-query preflight uses the resolved schedule fixture and surfaces missing lookups", async () => {
   const seenManualQueries = [];
   const pool = createPool(async (sql) => {
@@ -880,9 +1022,12 @@ test("manual-query preflight uses the resolved schedule fixture and surfaces mis
         config: {},
         pool,
         resolveFixtureCandidate: async () => {
-          throw new InvalidIntegrationPayloadError("Fixture not found in the current schedule sources.", {
-            issues: ["payload.manual_query"],
-          });
+          throw new InvalidIntegrationPayloadError(
+            "Fixture not found in the current schedule sources.",
+            {
+              issues: ["payload.manual_query"],
+            }
+          );
         },
       }),
     (error) => {
@@ -895,10 +1040,7 @@ test("manual-query preflight uses the resolved schedule fixture and surfaces mis
 
 test("UAT-only guard rejects non-UAT environments", () => {
   ensureUatOnly({ code: "uat" });
-  assert.throws(
-    () => ensureUatOnly({ code: "mainnet" }),
-    /available only for UAT/i
-  );
+  assert.throws(() => ensureUatOnly({ code: "mainnet" }), /available only for UAT/i);
 });
 
 test("parent status classification marks half-prepared rows when markets are missing", () => {
