@@ -5,14 +5,21 @@ export async function resolveSchedulePayloadWithFallback({
   loadPolymarket,
   loadLsportsCsv,
 } = {}) {
+  const errors = [];
+  const recordError = (err) => {
+    if (err) errors.push(err);
+  };
+
   // Phase 1: fire both primary sources in parallel — eliminates serial timeout penalty
   const [sdResult, lsResult] = await Promise.allSettled([
     loadSportsData ? loadSportsData() : Promise.resolve(null),
-    loadLsportsDb  ? loadLsportsDb()  : Promise.resolve(null),
+    loadLsportsDb ? loadLsportsDb() : Promise.resolve(null),
   ]);
 
   const sdPayload = sdResult.status === "fulfilled" ? sdResult.value : null;
   const lsPayload = lsResult.status === "fulfilled" ? lsResult.value : null;
+  if (sdResult.status === "rejected") recordError(sdResult.reason);
+  if (lsResult.status === "rejected") recordError(lsResult.reason);
   const sdOk = hasSchedulePayload(sdPayload);
   const lsOk = hasSchedulePayload(lsPayload);
 
@@ -24,18 +31,31 @@ export async function resolveSchedulePayloadWithFallback({
   try {
     const p = await loadGammaPolymarket?.();
     if (hasSchedulePayload(p)) return p;
-  } catch {}
+  } catch (err) {
+    recordError(err);
+  }
 
   try {
     const p = await loadPolymarket?.();
     if (hasSchedulePayload(p)) return p;
-  } catch {}
+  } catch (err) {
+    recordError(err);
+  }
 
-  const csvPayload = await loadLsportsCsv?.();
-  if (hasSchedulePayload(csvPayload)) return csvPayload;
+  try {
+    const csvPayload = await loadLsportsCsv?.();
+    if (hasSchedulePayload(csvPayload)) return csvPayload;
+  } catch (err) {
+    recordError(err);
+  }
 
-  // All sources exhausted with no data — return empty payload so callers get 200 + [] fixtures
-  // (502 is reserved for actual upstream failures, not "no data for this league")
+  // No source produced data. If any source actively errored, surface the first
+  // (preferring SportsData since it is the primary provider) so the API can
+  // return 502 with the upstream cause. Only when all sources cleanly returned
+  // empty/null do we fall through to the empty payload.
+  if (errors.length > 0) {
+    throw errors[0];
+  }
   return { fixtures: [], source: "none", selectionMode: "none", selectedLabel: null };
 }
 
@@ -49,7 +69,7 @@ export async function resolveRawScheduleRowsWithFallback({
   // Phase 1: fire both primary sources in parallel
   const [sdResult, lsResult] = await Promise.allSettled([
     loadSportsData ? loadSportsData() : Promise.resolve(null),
-    loadLsportsDb  ? loadLsportsDb()  : Promise.resolve(null),
+    loadLsportsDb ? loadLsportsDb() : Promise.resolve(null),
   ]);
 
   const sdRows = sdResult.status === "fulfilled" ? sdResult.value : null;
@@ -137,8 +157,17 @@ function mergeRawRows(primary, secondary) {
 }
 
 function fixtureDedupeKey(f) {
-  const home = String(f.homeTeamName || f.home_team_name || "").toLowerCase().replace(/\s+/g, " ").trim();
-  const away = String(f.awayTeamName || f.away_team_name || "").toLowerCase().replace(/\s+/g, " ").trim();
-  const date = String(f.fixtureDate || f.fixture_date || f.kickoffIso || f.kickoff_iso || "").slice(0, 10);
+  const home = String(f.homeTeamName || f.home_team_name || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  const away = String(f.awayTeamName || f.away_team_name || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  const date = String(f.fixtureDate || f.fixture_date || f.kickoffIso || f.kickoff_iso || "").slice(
+    0,
+    10
+  );
   return `${home}|${away}|${date}`;
 }

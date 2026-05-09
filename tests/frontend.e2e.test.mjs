@@ -62,6 +62,21 @@ const MOCK_FIXTURES_LALIGA = {
   ],
 };
 
+const MOCK_ALL_SCHEDULES = {
+  leagues: [
+    { code: "epl", label: "EPL" },
+    { code: "laliga", label: "La Liga" },
+  ],
+  schedules: {
+    epl: { version: 1, fixtures: MOCK_FIXTURES_EPL.fixtures },
+    laliga: { version: 1, fixtures: MOCK_FIXTURES_LALIGA.fixtures },
+  },
+};
+
+const MOCK_SCHEDULE_STATUS = {
+  leagues: { epl: { version: 1 }, laliga: { version: 1 } },
+};
+
 // -------------------------------------------------------------------------
 
 function nextPort() {
@@ -116,30 +131,30 @@ async function launchFrontendApp(t, { serverEnv = {} } = {}) {
   const context = await browser.newContext();
   const page = await context.newPage();
 
-  // Stub /api/schedules/leagues
-  await page.route("**/api/schedules/leagues", (route) => {
+  // Bypass Google OAuth gate — return a mock session user
+  await page.route("**/auth/me", (route) => {
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ leagues: MOCK_LEAGUES }),
+      body: JSON.stringify({ name: "Test User", email: "test@pred.app", initials: "TU" }),
     });
   });
 
-  // Stub /api/schedules/upcoming?league=epl
-  await page.route("**/api/schedules/upcoming?league=epl", (route) => {
+  // All schedules in one request (replaces per-league /upcoming calls)
+  await page.route("**/api/schedules/all", (route) => {
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(MOCK_FIXTURES_EPL),
+      body: JSON.stringify(MOCK_ALL_SCHEDULES),
     });
   });
 
-  // Stub /api/schedules/upcoming?league=laliga
-  await page.route("**/api/schedules/upcoming?league=laliga", (route) => {
+  // Version-poll endpoint (background interval — prevent unhandled 401 noise)
+  await page.route("**/api/schedules/status", (route) => {
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(MOCK_FIXTURES_LALIGA),
+      body: JSON.stringify(MOCK_SCHEDULE_STATUS),
     });
   });
 
@@ -192,18 +207,27 @@ test("frontend e2e: filter by league reduces visible fixtures", async (t) => {
   await page.locator(".fbar__sel").first().selectOption({ label: "EPL" });
 
   // After filtering for EPL, only EPL fixtures should appear
-  await page.waitForFunction(() => {
-    const rows = document.querySelectorAll(".frow");
-    return rows.length > 0 && rows.length < 3;
-  }, { timeout: 5_000 });
+  await page.waitForFunction(
+    () => {
+      const rows = document.querySelectorAll(".frow");
+      return rows.length > 0 && rows.length < 3;
+    },
+    { timeout: 5_000 }
+  );
 
   const totalAfter = await page.locator(".frow").count();
-  assert.ok(totalAfter < totalBefore, `Filter should reduce rows: before=${totalBefore} after=${totalAfter}`);
+  assert.ok(
+    totalAfter < totalBefore,
+    `Filter should reduce rows: before=${totalBefore} after=${totalAfter}`
+  );
   assert.ok(totalAfter >= 1, "Expected at least 1 EPL row after filtering");
 
   // Barcelona (La Liga) should not be visible
   const tableText = await page.locator(".ftable").innerText();
-  assert.ok(!tableText.includes("Barcelona"), "Barcelona (La Liga) should not appear when EPL filter is active");
+  assert.ok(
+    !tableText.includes("Barcelona"),
+    "Barcelona (La Liga) should not appear when EPL filter is active"
+  );
 });
 
 // -------------------------------------------------------------------------
@@ -221,7 +245,10 @@ test("frontend e2e: clicking a fixture opens the submarket panel", async (t) => 
   await page.waitForSelector(".frow", { timeout: 15_000 });
 
   // Submarket panel should not be visible before selection
-  const panelBeforeVisible = await page.locator(".spanel").isVisible().catch(() => false);
+  const panelBeforeVisible = await page
+    .locator(".spanel")
+    .isVisible()
+    .catch(() => false);
   assert.ok(!panelBeforeVisible, "Submarket panel should be hidden before any fixture is selected");
 
   // Click the first fixture row
@@ -258,12 +285,12 @@ test("frontend e2e: selection bar appears after selecting fixture and submarket"
   await submarketCheckbox.click();
 
   // Selection bar should appear
-  await page.waitForSelector(".sbar", { timeout: 5_000 });
-  const selBarVisible = await page.locator(".sbar").isVisible();
+  await page.waitForSelector(".selbar", { timeout: 5_000 });
+  const selBarVisible = await page.locator(".selbar").isVisible();
   assert.ok(selBarVisible, "Selection bar should appear when a fixture and submarket are selected");
 
   // Verify it shows at least 1 fixture selected
-  const sbarText = await page.locator(".sbar").innerText();
+  const sbarText = await page.locator(".selbar").innerText();
   assert.match(sbarText, /1\s*(fixture|selected)/i, "Selection bar should mention 1 fixture");
 });
 
@@ -284,24 +311,28 @@ test("frontend e2e: review overlay opens showing selected fixtures", async (t) =
   // Select first fixture
   await page.locator(".frow").first().click();
 
-  // Wait for submarket panel and select a submarket
+  // Wait for submarket panel and select a real market checkbox (not the
+  // group-header indeterminate, which is a presentation-only no-op).
   await page.waitForSelector(".spanel", { timeout: 5_000 });
-  await page.locator(".spanel input[type=checkbox]").first().click();
+  await page.locator(".sitem input[type=checkbox]").first().click();
 
   // Wait for selection bar and click Review
-  await page.waitForSelector(".sbar", { timeout: 5_000 });
-  const reviewBtn = page.locator(".sbar button", { hasText: /review/i });
+  await page.waitForSelector(".selbar", { timeout: 5_000 });
+  const reviewBtn = page.locator(".selbar button", { hasText: /review/i });
   await reviewBtn.waitFor({ timeout: 5_000 });
   await reviewBtn.click();
 
   // Review overlay should open
-  await page.waitForSelector(".overlay", { timeout: 5_000 });
-  const overlayVisible = await page.locator(".overlay").isVisible();
+  await page.waitForSelector(".review", { timeout: 5_000 });
+  const overlayVisible = await page.locator(".review").isVisible();
   assert.ok(overlayVisible, "Review overlay should be visible after clicking Review");
 
   // It should show at least one fixture name
-  const overlayText = await page.locator(".overlay").innerText();
-  const hasFixtureName = overlayText.includes("Arsenal") || overlayText.includes("Liverpool") || overlayText.includes("Barcelona");
+  const overlayText = await page.locator(".review").innerText();
+  const hasFixtureName =
+    overlayText.includes("Arsenal") ||
+    overlayText.includes("Liverpool") ||
+    overlayText.includes("Barcelona");
   assert.ok(hasFixtureName, "Review overlay should display a fixture name");
 });
 
@@ -352,15 +383,27 @@ test("frontend e2e: publish flow reaches done screen via mocked batch endpoints"
   const context = await browser.newContext();
   const page = await context.newPage();
 
-  // Stub leagues and fixture endpoints
-  await page.route("**/api/schedules/leagues", (route) => {
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ leagues: MOCK_LEAGUES }) });
+  // Auth bypass + fixture stubs
+  await page.route("**/auth/me", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ name: "Test User", email: "test@pred.app", initials: "TU" }),
+    });
   });
-  await page.route("**/api/schedules/upcoming?league=epl", (route) => {
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(MOCK_FIXTURES_EPL) });
+  await page.route("**/api/schedules/all", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(MOCK_ALL_SCHEDULES),
+    });
   });
-  await page.route("**/api/schedules/upcoming?league=laliga", (route) => {
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(MOCK_FIXTURES_LALIGA) });
+  await page.route("**/api/schedules/status", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(MOCK_SCHEDULE_STATUS),
+    });
   });
 
   const TEST_RUN_ID = "run-test-abc123";
@@ -379,7 +422,11 @@ test("frontend e2e: publish flow reaches done screen via mocked batch endpoints"
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ run_id: TEST_RUN_ID, status: "completed", completed_at: new Date().toISOString() }),
+      body: JSON.stringify({
+        run_id: TEST_RUN_ID,
+        status: "completed",
+        completed_at: new Date().toISOString(),
+      }),
     });
   });
 
@@ -387,33 +434,41 @@ test("frontend e2e: publish flow reaches done screen via mocked batch endpoints"
   await switchToFixturesTab(page);
   await page.waitForSelector(".frow", { timeout: 15_000 });
 
-  // Select a fixture and submarket
+  // Select a fixture and a real submarket checkbox (not the group-header
+  // indeterminate, which is a presentation-only no-op).
   await page.locator(".frow").first().click();
   await page.waitForSelector(".spanel", { timeout: 5_000 });
-  await page.locator(".spanel input[type=checkbox]").first().click();
-  await page.waitForSelector(".sbar", { timeout: 5_000 });
+  await page.locator(".sitem input[type=checkbox]").first().click();
+  await page.waitForSelector(".selbar", { timeout: 5_000 });
 
   // Open review overlay
-  const reviewBtn = page.locator(".sbar button", { hasText: /review/i });
+  const reviewBtn = page.locator(".selbar button", { hasText: /review/i });
   await reviewBtn.waitFor({ timeout: 5_000 });
   await reviewBtn.click();
-  await page.waitForSelector(".overlay", { timeout: 5_000 });
+  await page.waitForSelector(".review", { timeout: 5_000 });
 
   // Click "Publish now" button in the overlay
-  const publishBtn = page.locator(".overlay button", { hasText: /publish now/i });
+  const publishBtn = page.locator(".review button", { hasText: /publish now/i });
   await publishBtn.waitFor({ timeout: 5_000 });
   await publishBtn.click();
 
   // Wait for done view — the overlay should show a success/done state
-  await page.waitForFunction(() => {
-    const overlay = document.querySelector(".overlay");
-    if (!overlay) return false;
-    const text = overlay.textContent || "";
-    return /done|published|success/i.test(text);
-  }, { timeout: 15_000 });
+  await page.waitForFunction(
+    () => {
+      const overlay = document.querySelector(".review");
+      if (!overlay) return false;
+      const text = overlay.textContent || "";
+      return /done|published|success/i.test(text);
+    },
+    { timeout: 15_000 }
+  );
 
-  const overlayText = await page.locator(".overlay").innerText();
-  assert.match(overlayText, /done|published|success/i, "Expected done/success state in overlay after publish");
+  const overlayText = await page.locator(".review").innerText();
+  assert.match(
+    overlayText,
+    /done|published|success/i,
+    "Expected done/success state in overlay after publish"
+  );
 });
 
 // -------------------------------------------------------------------------
@@ -432,10 +487,17 @@ test("frontend e2e: theme toggle adds light class to html element", async (t) =>
   await page.waitForSelector(".hdr", { timeout: 10_000 });
 
   // Check initial theme class (defaults to dark — no 'light' class expected)
-  const lightBefore = await page.evaluate(() => document.documentElement.classList.contains("light"));
+  const lightBefore = await page.evaluate(() =>
+    document.documentElement.classList.contains("light")
+  );
 
   // Click the theme toggle button in the header
-  const themeBtn = page.locator(".hdr button[aria-label*=theme], .hdr button[title*=theme], .hdr .theme-btn, .hdr button").filter({ hasText: /theme|light|dark|☀|🌙/i }).first();
+  const themeBtn = page
+    .locator(
+      ".hdr button[aria-label*=theme], .hdr button[title*=theme], .hdr .theme-btn, .hdr button"
+    )
+    .filter({ hasText: /theme|light|dark|☀|🌙/i })
+    .first();
   await themeBtn.waitFor({ timeout: 5_000 }).catch(async () => {
     // Fallback: any button in header area with relevant aria
     await page.locator(".hdr button").last().waitFor({ timeout: 5_000 });
@@ -447,7 +509,7 @@ test("frontend e2e: theme toggle adds light class to html element", async (t) =>
   for (const btn of headerButtons) {
     const label = await btn.getAttribute("aria-label").catch(() => "");
     const title = await btn.getAttribute("title").catch(() => "");
-    const text  = await btn.innerText().catch(() => "");
+    const text = await btn.innerText().catch(() => "");
     if (/theme|light|dark|toggle/i.test(`${label}${title}${text}`)) {
       await btn.click();
       toggled = true;
@@ -464,6 +526,8 @@ test("frontend e2e: theme toggle adds light class to html element", async (t) =>
   assert.ok(toggled, "Should have found and clicked a header button to toggle theme");
 
   // After toggle, the html element's class set should differ from before
-  const lightAfter = await page.evaluate(() => document.documentElement.classList.contains("light"));
+  const lightAfter = await page.evaluate(() =>
+    document.documentElement.classList.contains("light")
+  );
   assert.notEqual(lightBefore, lightAfter, "Theme toggle should flip the html.light class");
 });

@@ -123,6 +123,14 @@ for (const envFile of resolveDotEnvFiles(ROOT_DIR, process.env)) {
 
 // Keys that must come exclusively from a profile's .env file and must not
 // bleed in from the process startup environment when profiles are built.
+//
+// A few keys are intentionally NOT bound here so that a value supplied via the
+// startup environment (test harness, operator override, or shell export) wins
+// over the per-profile .env. This is the deterministic test/ops override path:
+//   - COMP_SERVICE_INTERNAL_HOST / _BEARER_TOKEN — point CMS at a stub or
+//     ad-hoc host without editing .env files.
+//   - SPORTSDATA_API_KEY — let tests run with the upstream provider disabled
+//     even when a real key exists in .env.
 const PROFILE_BOUND_KEYS = new Set([
   "DB_HOST",
   "DB_PORT",
@@ -131,13 +139,11 @@ const PROFILE_BOUND_KEYS = new Set([
   "DB_NAME",
   "DB_SSL",
   "COMP_SERVICE_HOST",
-  "COMP_SERVICE_INTERNAL_HOST",
   "MARKET_MAKING_HOST",
   "ORDER_SERVICE_HOST",
   "LSPORTS_HOST",
   "PUBLIC_HOST",
   "ACCESS_TOKEN",
-  "SPORTSDATA_API_KEY",
   "POLYMARKET_BEARER_TOKEN",
   "POLYMARKET_AUTH_HEADER_NAME",
   "POLYMARKET_AUTH_HEADER_VALUE",
@@ -2296,14 +2302,20 @@ function resolveClientIp(req, { trustProxy = TRUST_PROXY } = {}) {
 }
 
 function isAuthorizedApiRequest(req) {
-  // When OAuth is disabled (local dev), allow all API requests without credentials
+  // Bearer token gate applies regardless of OAuth mode: if a token is
+  // configured, every API call must present it (sessions still pass below).
+  if (API_BEARER_TOKEN) {
+    if (hasValidBearerAuth(req)) return true;
+    if (GOOGLE_OAUTH_ENABLED) {
+      const sessionId = parseSessionCookie(req);
+      if (sessionId && getSession(sessionId)) return true;
+    }
+    return false;
+  }
+  // No bearer configured: fall back to OAuth/session, or open access in local dev.
   if (!GOOGLE_OAUTH_ENABLED) return true;
-  // Valid session cookie (browser-originated calls)
   const sessionId = parseSessionCookie(req);
   if (sessionId && getSession(sessionId)) return true;
-  // Bearer token (programmatic / server-to-server calls)
-  if (API_BEARER_TOKEN) return hasValidBearerAuth(req);
-  // In OAuth mode: no session and no bearer token configured → deny
   return false;
 }
 

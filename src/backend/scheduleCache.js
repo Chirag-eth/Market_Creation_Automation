@@ -66,8 +66,16 @@ export async function getUpcomingSchedulePayload(leagueCode, opts = {}, ctx = {}
       });
     },
     loadLsportsDb: async () => {
-      const dbPool = getDbPoolForEnv(getActiveRuntimeEnvVars());
+      const runtimeEnv = getActiveRuntimeEnvVars();
       const leagueDef = getLeagueScheduleDefinition(leagueCode);
+      const fixturePathOverride = leagueDef?.fixturePathEnvName
+        ? String(runtimeEnv?.[leagueDef.fixturePathEnvName] || "").trim()
+        : "";
+      // When a deterministic fixture-path override is configured for this
+      // league (tests, ops bypass), the SportsData fixture file is the sole
+      // source of truth — skip the LSports DB so its rows do not bleed in.
+      if (fixturePathOverride) return null;
+      const dbPool = getDbPoolForEnv(runtimeEnv);
       const leagueNameLike = leagueDef?.lsportsLeagueNameLike || "";
       if (!dbPool || !leagueNameLike) return null;
       const adapter = getBackendFixtureSourceAdapter("lsports-db");
