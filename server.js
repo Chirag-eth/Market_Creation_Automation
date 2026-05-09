@@ -497,6 +497,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestUrl.pathname.startsWith("/api/integrations/cms/")) {
+      await handleIntegrationsCmsRequest(req, res, requestUrl);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/catalog/meta") {
       await handleCatalogMetaRequest(res);
       return;
@@ -716,8 +721,11 @@ function resolveRuntimeEnvironmentCode(env = process.env) {
   const raw = String(env?.APP_ENV || "")
     .trim()
     .toLowerCase();
-  if (raw === "mainnet") return "mainnet";
-  if (raw === "uat" || !raw || raw === "local") return "uat";
+  // Unset / unknown values default to mainnet — the safest production-leaning
+  // choice. Pre-existing aliases ("local") also resolve to mainnet so they
+  // don't silently route through the UAT profile.
+  if (!raw || raw === "mainnet" || raw === "local") return "mainnet";
+  if (raw === "uat") return "uat";
   if (raw === "dev" || raw === "development") return "dev";
   if (raw === "testnet") return "testnet";
   return raw;
@@ -1335,6 +1343,138 @@ function handleCmsBatchRunRequest(runId, res) {
     return;
   }
   sendJson(res, 200, record);
+}
+
+// ─── /api/integrations/cms/* — envelope-style batch routes ───────────────────
+//
+// Wraps the legacy /api/cms/batch-* surface in the operator envelope contract:
+//   { environment, action, request_id, requested_by, payload }
+// The integrations envelope adds two guarantees the legacy routes never had:
+//   1. Confirmation gate — `payload.confirmation.confirmed === true` is required
+//      before a batch-publish can run, surfaced as a 400 with `extras.issues`.
+//   2. Method gate — `/batch-runs/:id/stop` is POST-only; GET returns 405.
+//
+// Mainnet/UAT/DEV all pass the env gate; only an unknown environment string is
+// reported as the "environment" issue.
+
+const INTEGRATIONS_BATCH_ENV_ALLOWLIST = new Set(["mainnet", "uat", "dev", "testnet"]);
+
+async function handleIntegrationsCmsRequest(req, res, requestUrl) {
+  const pathname = requestUrl.pathname;
+
+  if (pathname === "/api/integrations/cms/batch-preflight") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+      return;
+    }
+    await handleIntegrationsBatchEnvelope(req, res, { kind: "preflight" });
+    return;
+  }
+
+  if (pathname === "/api/integrations/cms/batch-publish") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+      return;
+    }
+    await handleIntegrationsBatchEnvelope(req, res, { kind: "publish" });
+    return;
+  }
+
+  const stopMatch = pathname.match(/^\/api\/integrations\/cms\/batch-runs\/([^/]+)\/stop$/);
+  if (stopMatch) {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+      return;
+    }
+    handleIntegrationsBatchStop(stopMatch[1], res);
+    return;
+  }
+
+  sendJson(res, 404, { ok: false, error: "Unknown integrations route", path: pathname });
+}
+
+async function handleIntegrationsBatchEnvelope(req, res, { kind }) {
+  let envelope;
+  try {
+    envelope = await readJsonRequestBody(req, { maxBytes: 512 * 1024 });
+  } catch (err) {
+    sendJson(res, 400, {
+      ok: false,
+      extras: { issues: ["body.invalid_json"], detail: String(err?.message || err) },
+    });
+    return;
+  }
+
+  const issues = [];
+  const env = String(envelope?.environment || "")
+    .trim()
+    .toLowerCase();
+  if (!INTEGRATIONS_BATCH_ENV_ALLOWLIST.has(env)) issues.push("environment");
+
+  const payload = envelope?.payload || {};
+  const selectedFixtures = Array.isArray(payload.selected_fixtures)
+    ? payload.selected_fixtures
+    : [];
+  const selectedPublishKeys = Array.isArray(payload.selected_publish_keys)
+    ? payload.selected_publish_keys
+    : [];
+  if (selectedFixtures.length === 0) issues.push("payload.selected_fixtures.empty");
+  if (selectedPublishKeys.length === 0) issues.push("payload.selected_publish_keys.empty");
+
+  if (kind === "publish") {
+    const confirmation = payload.confirmation || {};
+    if (confirmation.confirmed !== true) {
+      issues.push("payload.confirmation.confirmed");
+    }
+  }
+
+  if (issues.length > 0) {
+    sendJson(res, 400, { ok: false, extras: { issues } });
+    return;
+  }
+
+  if (kind === "preflight") {
+    sendJson(res, 200, {
+      ok: true,
+      action: envelope?.action || "batch-preflight",
+      request_id: envelope?.request_id,
+      environment: env,
+      extras: { issues: [] },
+    });
+    return;
+  }
+
+  const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const runRecord = {
+    runId,
+    request_id: envelope?.request_id,
+    requested_by: envelope?.requested_by,
+    environment: { code: env, label: formatRuntimeEnvironmentLabel(env) },
+    status: "queued",
+    started_at: new Date().toISOString(),
+    selected_fixtures: selectedFixtures,
+    selected_publish_keys: selectedPublishKeys,
+  };
+  batchRunStore.set(runId, runRecord);
+  sendJson(res, 202, {
+    ok: true,
+    run_id: runId,
+    status: "queued",
+    request_id: envelope?.request_id,
+    environment: env,
+  });
+}
+
+function handleIntegrationsBatchStop(runId, res) {
+  const record = batchRunStore.get(runId);
+  if (!record) {
+    sendJson(res, 404, { ok: false, error: "Run not found.", run_id: runId });
+    return;
+  }
+  record.status = "stopped";
+  record.stopped_at = new Date().toISOString();
+  record.completed_at = record.completed_at || record.stopped_at;
+  sendJson(res, 200, { ok: true, run_id: runId, status: "stopped" });
 }
 
 async function handleDebugDbRequest(res) {
@@ -3388,12 +3528,20 @@ async function executeCmsSelectedPublish({
     if (fixStep === "created") parts.push("fixture");
     if (trStep === "created") parts.push("type reference");
     if (published > 0) parts.push(`${published} selected market${published !== 1 ? "s" : ""}`);
-    runRecord.detail = parts.length > 0 ? `Created ${parts.join(", ")}.` : "";
+    runRecord.detail = parts.length > 0 ? `Created ${joinPartsWithAnd(parts)}.` : "";
   }
 
   await runVaultSyncIfApplicable();
   runRecord.completed_at = new Date().toISOString();
   return { runRecord };
+}
+
+function joinPartsWithAnd(parts = []) {
+  const list = parts.filter(Boolean);
+  if (list.length === 0) return "";
+  if (list.length === 1) return list[0];
+  if (list.length === 2) return `${list[0]} and ${list[1]}`;
+  return `${list.slice(0, -1).join(", ")}, and ${list[list.length - 1]}`;
 }
 
 function deriveStartTimeFromSelectedFixture(selectedFixture = {}) {
