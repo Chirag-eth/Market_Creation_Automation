@@ -1,0 +1,8 @@
+# Replace this placeholder owner with your real GitHub user/team handle.
+* @REPLACE_WITH_GITHUB_HANDLE
+
+# Suggested ownership split
+/server.js @REPLACE_WITH_GITHUB_HANDLE
+/src/backend/ @REPLACE_WITH_GITHUB_HANDLE
+/frontend/ @REPLACE_WITH_GITHUB_HANDLE
+/tests/ @REPLACE_WITH_GITHUB_HANDLE

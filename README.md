@@ -169,6 +169,12 @@ Health endpoint (for load balancers/uptime checks):
 - `GET /api/healthz`
 - `GET /api/readyz` (checks CSV source availability/readiness)
 
+OpenAPI docs:
+
+- `GET /api/openapi.json`
+- `GET /api/openapi.yaml`
+- `GET /api/docs` (ReDoc UI)
+
 ## Vault-Automation post-publish hook
 
 When `VAULT_AUTOMATION_HOST` is set, every successful CMS publish (selected
@@ -223,16 +229,34 @@ npm test
 
 `tests/browser.e2e.test.mjs` runs only when Playwright is installed; otherwise it is skipped automatically.
 
+## Code quality tooling
+
+```bash
+npm run lint
+npm run lint:fix
+npm run format:check
+npm run format
+```
+
+Pre-commit checks are enforced with Husky + lint-staged.
+
 ## CI
 
 GitHub Actions workflow is included at:
 
 - `.github/workflows/ci.yml`
 
+Code review process:
+
+- `docs/code-review-process.md`
+- `.github/pull_request_template.md`
+- `.github/CODEOWNERS`
+
 ## Project structure
 
 - `/Users/chirag/Desktop/Market_Making/public/` served UI shell, styles, and browser assets
 - `/Users/chirag/Desktop/Market_Making/src/` application modules (`app/`, `core/`, `data/`, `shared/`)
+- `/Users/chirag/Desktop/Market_Making/src/server/` server MVC modules (services/controllers/routes as they are extracted)
 - `/Users/chirag/Desktop/Market_Making/catalog/` CSV source-of-truth files
 - `/Users/chirag/Desktop/Market_Making/tests/` unit, server, and browser regression tests
 - `/Users/chirag/Desktop/Market_Making/archive/legacy/` archived pre-modular code kept for reference

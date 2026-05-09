@@ -1,0 +1,7 @@
+node_modules
+public/assets
+archive
+portfolio_export
+.claude
+*.log
+**/* 2.*

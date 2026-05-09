@@ -4,4 +4,10 @@
 node_modules
 tests
 legacy
+scripts
 README.md
+.claude
+.env
+.env.*
+!.env.example
+public/assets

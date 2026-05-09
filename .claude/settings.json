@@ -1,0 +1,10 @@
+{                                                                                                                                                                                                                                      
+    "enabledPlugins": {                                                                                                                                                                                                                          
+      "frontend-design@claude-plugins-official": true                                                                                                                                                                                            
+    },                                                                                                                                                                                                                                           
+    "permissions": {                                                                                                                                                                                                                         
+      "allow": [                                                                                                                                                                                                                             
+        "Bash(psql -h reader.mainnet-frankfurt.database.pred.app *)"                                                                                                                                                                         
+      ]                                                                                              
+    }                                                                                                                                                                                                                                            
+  }

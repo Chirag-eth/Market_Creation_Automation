@@ -1,0 +1,99 @@
+openapi: 3.0.3
+info:
+  title: Market Making API
+  version: 1.0.0
+  description: API surface for runtime environment selection, catalog health/readiness, and CMS publish workflows.
+servers:
+  - url: http://localhost:2020
+    description: Local development
+paths:
+  /api/healthz:
+    get:
+      summary: Liveness endpoint
+      responses:
+        "200":
+          description: Server is up
+  /api/readyz:
+    get:
+      summary: Readiness endpoint
+      responses:
+        "200":
+          description: Server is ready
+        "503":
+          description: Server is not ready
+  /api/runtime/environment:
+    get:
+      summary: Get active runtime environment
+      responses:
+        "200":
+          description: Active environment and available profiles
+    post:
+      summary: Switch runtime environment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - app_env
+              properties:
+                app_env:
+                  type: string
+                  example: uat
+      responses:
+        "200":
+          description: Environment switched
+        "400":
+          description: Invalid environment code
+  /api/cms/batch-publish:
+    post:
+      summary: Queue asynchronous CMS batch publish
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - fixtures
+                - submarkets
+              properties:
+                fixtures:
+                  type: array
+                  items:
+                    type: object
+                submarkets:
+                  type: array
+                  items:
+                    type: string
+                environment:
+                  type: string
+                  example: mainnet
+      responses:
+        "202":
+          description: Queued
+        "400":
+          description: Validation error
+  /api/cms/batch-runs/{runId}:
+    get:
+      summary: Get batch publish run status
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Run status payload
+        "404":
+          description: Run not found
+  /auth/me:
+    get:
+      summary: Get authenticated session user
+      responses:
+        "200":
+          description: User session payload
+        "401":
+          description: Not authenticated

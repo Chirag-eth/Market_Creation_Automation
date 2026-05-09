@@ -18,15 +18,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
-      - name: Syntax Checks
-        run: |
-          node --check src/ui.js
-          node --check src/parser.js
-          node --check src/typeRefs.js
-          node --check src/markets.js
-          node --check src/validation.js
-          node --check server.js
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Run Tests
-        run: node --test tests/*.test.mjs
+      - name: Syntax checks
+        run: npm run check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Run core tests
+        run: npm run test:core

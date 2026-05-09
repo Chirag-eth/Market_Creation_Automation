@@ -8,3 +8,19 @@ yarn-debug.log*
 yarn-error.log*
 dist/
 coverage/
+
+# Vite build output (frontend is rebuilt inside the Docker image)
+public/assets/
+
+# Local-only Claude/Codex settings
+.claude/settings.local.json
+
+# Throwaway operator scripts (one-off DB ops, probes, mainnet dumps)
+scripts/tmp_*.mjs
+
+# iCloud / Finder duplicate pattern: "name 2.ext"
+**/* 2.*
+**/* 2
+
+# Legacy: personal portfolio export accidentally landed here once
+portfolio_export/
