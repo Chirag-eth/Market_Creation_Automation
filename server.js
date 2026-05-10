@@ -77,6 +77,14 @@ import {
 import { createVaultAutomationConfig } from "./src/backend/vaultAutomationConfig.js";
 import { syncSingleFixtureAfterPublish } from "./src/backend/vaultSyncOrchestrator.js";
 import {
+  insertScheduledJob,
+  getScheduledJob,
+  listScheduledJobs,
+  cancelJob as cancelScheduledJobInRepo,
+  rescheduleJob as rescheduleScheduledJobInRepo,
+} from "./src/backend/cmsScheduledJobsRepo.js";
+import { createCmsScheduler } from "./src/backend/cmsScheduler.js";
+import {
   getUpcomingSchedulePayload,
   backgroundRefreshAllSchedules,
   getScheduleCacheSnapshot,
@@ -114,6 +122,7 @@ const schedLog = createScopedLogger("schedule");
 const batchLog = createScopedLogger("batch");
 const cmsLog = createScopedLogger("cms");
 const vaultLog = createScopedLogger("vault");
+const schedulerLog = createScopedLogger("scheduler");
 
 const STARTUP_ENV = { ...process.env };
 const ROOT_DIR = path.resolve(process.cwd());
@@ -169,6 +178,12 @@ let activeRuntimeEnvCode = resolveRuntimeEnvironmentCode(process.env);
 // Per-environment DB pool cache — keyed by "host:port:user:database"
 const _dbPoolCache = new Map();
 function getDbPoolForEnv(envVars = {}) {
+  // Test escape hatch: when DISABLE_DB=1 is set, return null regardless of
+  // host/user/database config. Avoids the situation where a developer's local
+  // .env DB credentials leak into a test that wants to assert no-DB behavior.
+  if (String(envVars.DISABLE_DB || process.env.DISABLE_DB || "").trim() === "1") {
+    return null;
+  }
   const host = String(envVars.DB_HOST || "").trim();
   const port = String(envVars.DB_PORT || "5432").trim();
   const user = String(envVars.DB_USER || "").trim();
@@ -966,6 +981,12 @@ const IS_MAIN = (() => {
 if (IS_MAIN) {
   setInterval(() => purgeExpiredSessions(), 10 * 60 * 1000).unref();
 
+  // CMS scheduler — DB-backed worker that fires due cms_scheduled_jobs.
+  // Disabled when SCHEDULER_ENABLED=0 (used by some tests to avoid background timers).
+  if (String(process.env.SCHEDULER_ENABLED || "1").trim() !== "0") {
+    cmsScheduler.start();
+  }
+
   server.listen(PORT, () => {
     serverLog.info({ port: PORT, url: `http://localhost:${PORT}` }, "server listening");
     void (async () => {
@@ -1345,6 +1366,75 @@ function handleCmsBatchRunRequest(runId, res) {
   sendJson(res, 200, record);
 }
 
+// Worker entry point — translates a saved integrations envelope into a batch
+// run and awaits its completion so the scheduler can record the outcome.
+// Throws on empty/invalid payload; the worker turns thrown errors into
+// markFailed(jobId, ...).
+async function fireScheduledJob(job, { environment } = {}) {
+  const envelope = job?.payload || {};
+  const payload = envelope?.payload || {};
+  const fixtures = Array.isArray(payload.selected_fixtures) ? payload.selected_fixtures : [];
+  const publishKeys = Array.isArray(payload.selected_publish_keys)
+    ? payload.selected_publish_keys
+    : [];
+
+  if (fixtures.length === 0) throw new Error("scheduled job has no selected_fixtures");
+  if (publishKeys.length === 0) throw new Error("scheduled job has no selected_publish_keys");
+
+  const targetEnv = String(environment || job?.environment || "").trim() || undefined;
+  const activeProfile = targetEnv
+    ? getRuntimeEnvironmentProfile(targetEnv)
+    : getActiveRuntimeEnvironmentProfile();
+  const runId = `run_sched_${(job?.job_id || "").slice(0, 8)}_${Date.now()}`;
+
+  schedulerLog.info(
+    {
+      jobId: job?.job_id,
+      runId,
+      env: { code: activeProfile.code, label: activeProfile.label },
+      fixtureCount: fixtures.length,
+      publishKeyCount: publishKeys.length,
+    },
+    "firing scheduled job"
+  );
+
+  const runRecord = createCmsBatchRunRecord({
+    runId,
+    requestId: envelope?.request_id || job?.request_id || runId,
+    environment: { code: activeProfile.code, label: activeProfile.label },
+    selectedFixtures: fixtures,
+    selectedPublishKeys: publishKeys,
+    operatorName: envelope?.requested_by || job?.created_by || "scheduler",
+  });
+  batchRunStore.set(runId, runRecord);
+
+  await executeCmsBatchRun(runId, fixtures, publishKeys, activeProfile, {
+    runStore: batchRunStore,
+    getDbPoolForEnv,
+    getCatalogPayloadCached,
+  });
+
+  const finalRecord = batchRunStore.get(runId);
+  if (finalRecord && finalRecord.status === "failed") {
+    throw new Error(
+      `scheduled batch run failed: ${finalRecord.detail || finalRecord.summary || "unknown"}`
+    );
+  }
+  return { runId };
+}
+
+const cmsScheduler = createCmsScheduler({
+  getActiveEnvCode: () => getActiveRuntimeEnvironmentProfile().code,
+  getDbPoolForEnv,
+  getActiveRuntimeEnvVars,
+  fireScheduledJob,
+  log: schedulerLog,
+  tickIntervalMs: parsePositiveIntegerEnv(process.env.SCHEDULER_TICK_INTERVAL_MS, 60_000, {
+    min: 5_000,
+  }),
+  batchSize: parsePositiveIntegerEnv(process.env.SCHEDULER_BATCH_SIZE, 5, { min: 1 }),
+});
+
 // ─── /api/integrations/cms/* — envelope-style batch routes ───────────────────
 //
 // Wraps the legacy /api/cms/batch-* surface in the operator envelope contract:
@@ -1388,6 +1478,56 @@ async function handleIntegrationsCmsRequest(req, res, requestUrl) {
     }
     handleIntegrationsBatchStop(stopMatch[1], res);
     return;
+  }
+
+  if (pathname === "/api/integrations/cms/schedule-publish") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+      return;
+    }
+    await handleIntegrationsSchedulePublish(req, res);
+    return;
+  }
+
+  if (pathname === "/api/integrations/cms/scheduled-jobs") {
+    if (req.method !== "GET") {
+      sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "GET" });
+      return;
+    }
+    await handleIntegrationsListScheduledJobs(req, res, requestUrl);
+    return;
+  }
+
+  const scheduledJobMatch = pathname.match(
+    /^\/api\/integrations\/cms\/scheduled-jobs\/([^/]+)(?:\/(cancel|reschedule))?$/
+  );
+  if (scheduledJobMatch) {
+    const jobId = scheduledJobMatch[1];
+    const action = scheduledJobMatch[2] || null;
+    if (action === null) {
+      if (req.method !== "GET") {
+        sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "GET" });
+        return;
+      }
+      await handleIntegrationsGetScheduledJob(jobId, res);
+      return;
+    }
+    if (action === "cancel") {
+      if (req.method !== "POST") {
+        sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+        return;
+      }
+      await handleIntegrationsCancelScheduledJob(jobId, res);
+      return;
+    }
+    if (action === "reschedule") {
+      if (req.method !== "POST") {
+        sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+        return;
+      }
+      await handleIntegrationsRescheduleScheduledJob(jobId, req, res);
+      return;
+    }
   }
 
   sendJson(res, 404, { ok: false, error: "Unknown integrations route", path: pathname });
@@ -1475,6 +1615,260 @@ function handleIntegrationsBatchStop(runId, res) {
   record.stopped_at = new Date().toISOString();
   record.completed_at = record.completed_at || record.stopped_at;
   sendJson(res, 200, { ok: true, run_id: runId, status: "stopped" });
+}
+
+// ─── /api/integrations/cms/schedule-publish — DB-backed scheduler ────────────
+//
+// Persists the publish envelope into cms_scheduled_jobs. The in-process
+// cmsScheduler worker (see startCmsScheduler below) polls the table every
+// SCHEDULER_TICK_INTERVAL_MS and fires due jobs through executeCmsBatchRun.
+//
+// Envelope contract is the same as batch-publish, with one extra required
+// field: payload.scheduled_at (ISO 8601 UTC). All envelope validations from
+// batch-publish apply here too — including confirmation.confirmed === true.
+
+async function handleIntegrationsSchedulePublish(req, res) {
+  let envelope;
+  try {
+    envelope = await readJsonRequestBody(req, { maxBytes: 512 * 1024 });
+  } catch (err) {
+    sendJson(res, 400, {
+      ok: false,
+      extras: { issues: ["body.invalid_json"], detail: String(err?.message || err) },
+    });
+    return;
+  }
+
+  const issues = [];
+  const env = String(envelope?.environment || "")
+    .trim()
+    .toLowerCase();
+  if (!INTEGRATIONS_BATCH_ENV_ALLOWLIST.has(env)) issues.push("environment");
+
+  const payload = envelope?.payload || {};
+  const selectedFixtures = Array.isArray(payload.selected_fixtures)
+    ? payload.selected_fixtures
+    : [];
+  const selectedPublishKeys = Array.isArray(payload.selected_publish_keys)
+    ? payload.selected_publish_keys
+    : [];
+  if (selectedFixtures.length === 0) issues.push("payload.selected_fixtures.empty");
+  if (selectedPublishKeys.length === 0) issues.push("payload.selected_publish_keys.empty");
+
+  const confirmation = payload.confirmation || {};
+  if (confirmation.confirmed !== true) {
+    issues.push("payload.confirmation.confirmed");
+  }
+
+  const scheduledAtRaw = String(payload.scheduled_at || "").trim();
+  let scheduledAt = null;
+  if (!scheduledAtRaw) {
+    issues.push("payload.scheduled_at.required");
+  } else {
+    const parsed = new Date(scheduledAtRaw);
+    if (Number.isNaN(parsed.getTime())) {
+      issues.push("payload.scheduled_at.invalid");
+    } else if (parsed.getTime() <= Date.now()) {
+      issues.push("payload.scheduled_at.in_past");
+    } else {
+      scheduledAt = parsed;
+    }
+  }
+
+  if (issues.length > 0) {
+    sendJson(res, 400, { ok: false, extras: { issues } });
+    return;
+  }
+
+  const profile = getRuntimeEnvironmentProfile(env);
+  const pool = getDbPoolForEnv(profile.env);
+  if (!pool) {
+    sendJson(res, 503, {
+      ok: false,
+      error: "DB not configured for environment",
+      detail: `Set DB_HOST/DB_USER/DB_NAME for ${profile.label}.`,
+    });
+    return;
+  }
+
+  let job;
+  try {
+    job = await insertScheduledJob(pool, {
+      environment: env,
+      scheduledAt,
+      payload: envelope,
+      requestId: envelope?.request_id || null,
+      createdBy: envelope?.requested_by || null,
+    });
+  } catch (err) {
+    schedulerLog.error(
+      { err: String(err?.message || err), env, requestId: envelope?.request_id },
+      "schedule-publish insert failed"
+    );
+    sendJson(res, 500, {
+      ok: false,
+      error: "Failed to persist scheduled job",
+      detail: String(err?.message || err),
+    });
+    return;
+  }
+
+  schedulerLog.info(
+    { jobId: job.job_id, env, scheduledAt: job.scheduled_at, requestId: envelope?.request_id },
+    "scheduled-job created"
+  );
+  sendJson(res, 202, {
+    ok: true,
+    job_id: job.job_id,
+    status: job.status,
+    scheduled_at: job.scheduled_at,
+    environment: env,
+    request_id: envelope?.request_id || null,
+  });
+}
+
+async function handleIntegrationsListScheduledJobs(req, res, requestUrl) {
+  const env = String(requestUrl.searchParams.get("environment") || "")
+    .trim()
+    .toLowerCase();
+  const status = String(requestUrl.searchParams.get("status") || "")
+    .trim()
+    .toLowerCase();
+  const limit = Number(requestUrl.searchParams.get("limit") || 100);
+
+  const targetEnv = env || getActiveRuntimeEnvironmentProfile().code;
+  if (env && !INTEGRATIONS_BATCH_ENV_ALLOWLIST.has(env)) {
+    sendJson(res, 400, { ok: false, extras: { issues: ["environment"] } });
+    return;
+  }
+
+  const profile = getRuntimeEnvironmentProfile(targetEnv);
+  const pool = getDbPoolForEnv(profile.env);
+  if (!pool) {
+    sendJson(res, 200, { ok: true, jobs: [], environment: targetEnv, db_configured: false });
+    return;
+  }
+
+  try {
+    const jobs = await listScheduledJobs(pool, {
+      environment: targetEnv,
+      status: status || null,
+      limit: Number.isFinite(limit) ? limit : 100,
+    });
+    sendJson(res, 200, { ok: true, jobs, environment: targetEnv, db_configured: true });
+  } catch (err) {
+    sendJson(res, 500, {
+      ok: false,
+      error: "Failed to list scheduled jobs",
+      detail: String(err?.message || err),
+    });
+  }
+}
+
+async function handleIntegrationsGetScheduledJob(jobId, res) {
+  const profile = getActiveRuntimeEnvironmentProfile();
+  const pool = getDbPoolForEnv(profile.env);
+  if (!pool) {
+    sendJson(res, 503, { ok: false, error: "DB not configured for active environment" });
+    return;
+  }
+  try {
+    const job = await getScheduledJob(pool, jobId);
+    if (!job) {
+      sendJson(res, 404, { ok: false, error: "Scheduled job not found", job_id: jobId });
+      return;
+    }
+    sendJson(res, 200, { ok: true, job });
+  } catch (err) {
+    sendJson(res, 500, {
+      ok: false,
+      error: "Failed to load scheduled job",
+      detail: String(err?.message || err),
+    });
+  }
+}
+
+async function handleIntegrationsCancelScheduledJob(jobId, res) {
+  const profile = getActiveRuntimeEnvironmentProfile();
+  const pool = getDbPoolForEnv(profile.env);
+  if (!pool) {
+    sendJson(res, 503, { ok: false, error: "DB not configured for active environment" });
+    return;
+  }
+  try {
+    const job = await cancelScheduledJobInRepo(pool, jobId);
+    if (!job) {
+      sendJson(res, 409, {
+        ok: false,
+        error: "Job not cancellable",
+        detail: "Job missing or no longer pending.",
+        job_id: jobId,
+      });
+      return;
+    }
+    schedulerLog.info({ jobId }, "scheduled-job cancelled");
+    sendJson(res, 200, { ok: true, job });
+  } catch (err) {
+    sendJson(res, 500, {
+      ok: false,
+      error: "Failed to cancel scheduled job",
+      detail: String(err?.message || err),
+    });
+  }
+}
+
+async function handleIntegrationsRescheduleScheduledJob(jobId, req, res) {
+  let body;
+  try {
+    body = await readJsonRequestBody(req, { maxBytes: 16 * 1024 });
+  } catch (err) {
+    sendJson(res, 400, {
+      ok: false,
+      extras: { issues: ["body.invalid_json"], detail: String(err?.message || err) },
+    });
+    return;
+  }
+  const raw = String(body?.scheduled_at || "").trim();
+  if (!raw) {
+    sendJson(res, 400, { ok: false, extras: { issues: ["scheduled_at.required"] } });
+    return;
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    sendJson(res, 400, { ok: false, extras: { issues: ["scheduled_at.invalid"] } });
+    return;
+  }
+  if (parsed.getTime() <= Date.now()) {
+    sendJson(res, 400, { ok: false, extras: { issues: ["scheduled_at.in_past"] } });
+    return;
+  }
+
+  const profile = getActiveRuntimeEnvironmentProfile();
+  const pool = getDbPoolForEnv(profile.env);
+  if (!pool) {
+    sendJson(res, 503, { ok: false, error: "DB not configured for active environment" });
+    return;
+  }
+  try {
+    const job = await rescheduleScheduledJobInRepo(pool, jobId, parsed);
+    if (!job) {
+      sendJson(res, 409, {
+        ok: false,
+        error: "Job not reschedulable",
+        detail: "Job missing or no longer pending.",
+        job_id: jobId,
+      });
+      return;
+    }
+    schedulerLog.info({ jobId, scheduledAt: job.scheduled_at }, "scheduled-job rescheduled");
+    sendJson(res, 200, { ok: true, job });
+  } catch (err) {
+    sendJson(res, 500, {
+      ok: false,
+      error: "Failed to reschedule job",
+      detail: String(err?.message || err),
+    });
+  }
 }
 
 async function handleDebugDbRequest(res) {
@@ -3573,5 +3967,7 @@ export {
   pollUntil,
   buildCmsSelectedPreflight,
   executeCmsSelectedPublish,
+  cmsScheduler,
+  fireScheduledJob,
   server,
 };

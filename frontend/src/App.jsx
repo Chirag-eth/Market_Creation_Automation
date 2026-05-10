@@ -2,7 +2,16 @@ import { useState, useMemo, useEffect } from "react";
 import { submarketGroups, ALL_SUBMARKET_IDS } from "./data.js";
 import { useFixtures } from "./hooks/useFixtures.js";
 import { useAuth } from "./hooks/useAuth.js";
-import { publishBatch, fetchBatchRun, fetchEnvironment, switchEnvironment } from "./api.js";
+import {
+  publishBatch,
+  fetchBatchRun,
+  fetchEnvironment,
+  switchEnvironment,
+  scheduleBatchPublish,
+  listScheduledJobs as apiListScheduledJobs,
+  cancelScheduledJob as apiCancelScheduledJob,
+  rescheduleJob as apiRescheduleJob,
+} from "./api.js";
 import { useTheme } from "./hooks/useTheme.js";
 import Header from "./components/Header.jsx";
 import TabBar from "./components/TabBar.jsx";
@@ -243,21 +252,106 @@ export default function App() {
     throw new Error("Publish run timed out");
   }
 
-  function handleSchedule(scheduleAt, fixturesWithMarkets, totalMkts) {
-    setScheduledJobs((prev) => [
-      ...prev,
-      {
-        id: `job_${Date.now()}`,
-        fixtures: fixturesWithMarkets,
-        totalMarkets: totalMkts,
+  function adaptBackendJob(backendJob) {
+    const env = backendJob?.payload?.payload || {};
+    const selFix = Array.isArray(env.selected_fixtures) ? env.selected_fixtures : [];
+    const fixtures = selFix.map((sf) => {
+      const [home, away] = String(sf.event_name || "").split(/\s+vs\s+/i);
+      return {
+        id: sf.game_id || sf.providerFixtureId || backendJob.job_id,
+        home: home || sf.home_team_name || "",
+        away: away || sf.away_team_name || "",
+        leagueCode: sf.league_code || "",
+        gameId: sf.game_id || "",
+        kickoff:
+          sf.fixture_date && sf.kickoff_time_utc
+            ? `${sf.fixture_date}T${sf.kickoff_time_utc}:00Z`
+            : "",
+        // Backend stores publish_keys globally, not per-fixture, so the per-
+        // fixture customSubmarkets list is empty in queue-rendered jobs.
+        customSubmarkets: [],
+      };
+    });
+    const publishKeyCount = Array.isArray(env.selected_publish_keys)
+      ? env.selected_publish_keys.length
+      : 0;
+    return {
+      id: backendJob.job_id,
+      fixtures,
+      totalMarkets: fixtures.length * publishKeyCount,
+      scheduledAt: backendJob.scheduled_at,
+      createdAt: backendJob.created_at,
+      status: backendJob.status,
+      backendStatus: backendJob.status,
+      runId: backendJob.run_id || null,
+      lastError: backendJob.last_error || null,
+    };
+  }
+
+  async function refreshScheduledJobs() {
+    const code = activeEnv?.code;
+    if (!code) return;
+    try {
+      const data = await apiListScheduledJobs({ environment: code });
+      const adapted = (data.jobs || []).map(adaptBackendJob);
+      setScheduledJobs(adapted);
+    } catch (err) {
+      // Non-fatal — queue stays empty if the backend list call fails (e.g., DB not configured)
+      console.warn("Failed to refresh scheduled jobs:", err.message);
+    }
+  }
+
+  useEffect(() => {
+    if (queueOpen) {
+      void refreshScheduledJobs();
+    }
+  }, [queueOpen, activeEnv?.code]);
+
+  async function handleSchedule(scheduleAt, fixturesWithMarkets, totalMkts) {
+    setPublishError(null);
+    try {
+      await scheduleBatchPublish({
         scheduledAt: scheduleAt,
-        createdAt: new Date().toISOString(),
-        status: "pending",
-      },
-    ]);
+        fixturesWithMarkets,
+        environment: activeEnv?.code || "dev",
+        requestedBy: user?.email || "operator",
+      });
+    } catch (err) {
+      setPublishError(`Schedule failed: ${err.message}`);
+      return;
+    }
     setLastScheduledAt(scheduleAt);
     setLastActionMarkets(totalMkts);
     setView("job-scheduled");
+    // Don't await — UI doesn't depend on the refresh, and queue overlay will
+    // refetch on open anyway.
+    void refreshScheduledJobs();
+  }
+
+  async function handleCancelScheduledJob(jobId) {
+    try {
+      await apiCancelScheduledJob(jobId);
+    } catch (err) {
+      console.error("Cancel failed:", err.message);
+    }
+    await refreshScheduledJobs();
+  }
+
+  async function handleRescheduleScheduledJob(jobId, newTime) {
+    try {
+      await apiRescheduleJob(jobId, newTime);
+    } catch (err) {
+      console.error("Reschedule failed:", err.message);
+    }
+    await refreshScheduledJobs();
+  }
+
+  function handleClearCancelledJobs() {
+    // Cancelled jobs are surfaced from the backend list. The "clear" UX action
+    // is purely visual now — we just refresh from the backend so completed/
+    // failed/cancelled rows older than the list-window drop off naturally.
+    // (No backend bulk-delete endpoint by design — keep an audit trail.)
+    void refreshScheduledJobs();
   }
 
   function handleDone() {
@@ -363,19 +457,9 @@ export default function App() {
           {queueOpen && (
             <ScheduleQueue
               jobs={scheduledJobs}
-              onCancel={(id) =>
-                setScheduledJobs((prev) =>
-                  prev.map((j) => (j.id === id ? { ...j, status: "cancelled" } : j))
-                )
-              }
-              onEditTime={(id, t) =>
-                setScheduledJobs((prev) =>
-                  prev.map((j) => (j.id === id ? { ...j, scheduledAt: t } : j))
-                )
-              }
-              onClearCancelled={() =>
-                setScheduledJobs((prev) => prev.filter((j) => j.status !== "cancelled"))
-              }
+              onCancel={handleCancelScheduledJob}
+              onEditTime={handleRescheduleScheduledJob}
+              onClearCancelled={handleClearCancelledJobs}
               onClose={() => setQueueOpen(false)}
             />
           )}

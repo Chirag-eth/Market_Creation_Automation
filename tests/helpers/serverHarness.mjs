@@ -31,6 +31,9 @@ export async function startServerForTest({
       ENV_FILE: "",
       EXTRA_LEAGUES_CSV_PATHS: "",
       EXTRA_TEAMS_CSV_PATHS: "",
+      // Background workers off by default — tests that need the cms scheduler
+      // can opt in by passing SCHEDULER_ENABLED: "1" in their env override.
+      SCHEDULER_ENABLED: "0",
       ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -62,7 +65,9 @@ export async function startServerForTest({
           stop: async () => {},
         };
       }
-      throw new Error(`Server exited early (code ${child.exitCode}).\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`);
+      throw new Error(
+        `Server exited early (code ${child.exitCode}).\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`
+      );
     }
 
     try {

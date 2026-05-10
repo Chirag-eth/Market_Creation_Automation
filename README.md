@@ -212,6 +212,50 @@ HTTP service) must be running and reachable from Market_Making at
 `VAULT_AUTOMATION_HOST`. See `/Users/chirag/Desktop/Vault-Automation /` —
 note the trailing space in the directory name.
 
+## Scheduled publishes (DB-backed)
+
+Operators schedule a batch publish for a future time via the dashboard
+(Fixtures tab → Review → "Schedule for later"). Jobs persist in the
+`cms_scheduled_jobs` table; an in-process worker (`src/backend/cmsScheduler.js`)
+polls every minute and fires due jobs through the existing
+`executeCmsBatchRun` path.
+
+**One-time DB migration** — apply per environment, dev first:
+
+```bash
+psql "$DB_URL" -f sql/cms_002_scheduled_jobs.sql
+```
+
+**HTTP endpoints**:
+
+- `POST /api/integrations/cms/schedule-publish` — same envelope as
+  `batch-publish` plus `payload.scheduled_at` (ISO 8601 UTC, must be in the
+  future). Validates `payload.confirmation.confirmed === true`.
+- `GET  /api/integrations/cms/scheduled-jobs?environment=<code>&status=<status>`
+- `GET  /api/integrations/cms/scheduled-jobs/:id`
+- `POST /api/integrations/cms/scheduled-jobs/:id/cancel` — only pending jobs
+  can be cancelled.
+- `POST /api/integrations/cms/scheduled-jobs/:id/reschedule` — body
+  `{ scheduled_at }`; only pending jobs.
+
+**Configuration** (env vars):
+
+```bash
+SCHEDULER_ENABLED=1            # set to 0 to disable the worker (tests do this)
+SCHEDULER_TICK_INTERVAL_MS=60000
+SCHEDULER_BATCH_SIZE=5         # max jobs claimed per tick
+DISABLE_DB=0                   # 1 forces getDbPoolForEnv to return null (test escape hatch)
+```
+
+**Concurrency**. `claimDueJobs` uses `SELECT ... FOR UPDATE SKIP LOCKED` so
+multiple replicas (or restarts mid-tick) cannot double-fire the same job.
+The worker also re-entrancy-guards itself within a process: an overlapping
+tick is skipped rather than running concurrently.
+
+**Env safety**. The worker only fires jobs whose `environment` matches the
+active runtime env. Jobs scheduled for a different env sit until that env
+becomes active. Switching APP_ENV at runtime is therefore safe.
+
 ## Docker (optional phase 1 deployment packaging)
 
 Build and run:
