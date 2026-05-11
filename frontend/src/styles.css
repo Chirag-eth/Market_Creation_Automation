@@ -1715,6 +1715,13 @@ input {
 /* ─── DateTimePicker ─────────────────────────────────────────────── */
 .dtpicker {
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.dtpicker__wheels {
+  display: flex;
   align-items: center;
   justify-content: center;
   gap: 0;
@@ -1736,6 +1743,18 @@ input {
   line-height: 1;
   flex-shrink: 0;
   margin-bottom: 2px;
+}
+
+.dtpicker__preview {
+  font-size: 13px;
+  color: var(--t2);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.dtpicker__preview--past {
+  color: var(--danger, #d04040);
+  font-weight: 500;
 }
 
 /* ─── Schedule Modal ─────────────────────────────────────────────── */

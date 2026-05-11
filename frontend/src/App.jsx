@@ -102,6 +102,21 @@ export default function App() {
 
   const builderSelectedIds = useMemo(() => new Set(builderSelection.keys()), [builderSelection]);
 
+  // Queue overlay refetch — kept above the early returns so React sees a
+  // stable hook order between (authLoading=true) and (authLoading=false)
+  // renders. Previously this lived below at the "Handlers" section and
+  // triggered React error #310 ("more hooks than during the previous render")
+  // the moment auth resolved.
+  useEffect(() => {
+    if (queueOpen && user) {
+      // Resolution: refreshScheduledJobs is defined below but doesn't need
+      // to be captured here — we look it up via closure each time the effect
+      // fires, which is fine because it's stable across renders (no hooks
+      // inside it). React only cares about the hook *count* and *order*.
+      void refreshScheduledJobs();
+    }
+  }, [queueOpen, activeEnv?.code, user]);
+
   // ── Early returns (all hooks above) ──────────────────────────────────────
   if (authLoading) return null;
 
@@ -300,12 +315,6 @@ export default function App() {
       console.warn("Failed to refresh scheduled jobs:", err.message);
     }
   }
-
-  useEffect(() => {
-    if (queueOpen) {
-      void refreshScheduledJobs();
-    }
-  }, [queueOpen, activeEnv?.code]);
 
   async function handleSchedule(scheduleAt, fixturesWithMarkets, totalMkts) {
     setPublishError(null);

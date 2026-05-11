@@ -281,3 +281,90 @@ So the failure was loud in the code path (500 + error log) and silent in the UI.
 ### Operator note
 
 The earlier "fired" job did **not** persist; the INSERT failed before the row was written. After the migration is applied, re-fire the schedule from the Builder. The worker ticks every 60 s, so a 17:00 schedule will fire on the first tick after 17:00:00 IST.
+
+---
+
+## BUG-S002 — Frontend bundle not rebuilt after scheduler integration
+
+**Status:** Fixed (frontend rebuilt this commit).
+**Filed:** 2026-05-11
+
+### Symptom
+
+Operator clicks Schedule, sees a Tottenham card appear in the queue with "overdue" status. But the backend `cms_scheduled_jobs` table is empty (even after BUG-S001 migration would be applied), and the worker never claims anything.
+
+### Root cause
+
+`public/index.html` shipped a stale bundle (`index-DUhN91sr.js`, built 2026-05-08), pre-dating the backend scheduler integration in commit `dff0d6b` (2026-05-10). The bundle still contained the **old in-memory `handleSchedule`** path which mutates React state without POSTing anywhere. The operator's clicks added cards to local browser state only; nothing reached the API.
+
+### Fix
+
+`npm run build:frontend` to regenerate `public/index.html` + `public/assets/*` against the current `frontend/src/`. The new bundle wires `handleSchedule` → `scheduleBatchPublish` → `POST /api/integrations/cms/schedule-publish`.
+
+### Why it stayed broken
+
+No CI step rebuilds the frontend on backend-merged branches; the deploy expectation was that anyone touching `frontend/src/` would also commit a fresh `public/index.html`. The scheduler PR touched both but only the source — the rebuilt bundle was never committed. Add a release checklist line: "if frontend/src/ changed, `npm run build:frontend` and commit `public/index.html`." A pre-commit hook that detects `frontend/src/` ⊕ `public/index.html` drift would catch this automatically.
+
+---
+
+## BUG-S003 — DateTimePicker emits yesterday's date for any user east of UTC
+
+**Status:** Fixed this commit.
+**Filed:** 2026-05-11
+
+### Symptom
+
+Operator on IST (or any UTC-positive timezone) scrolls the date wheel to "Today" and a time, then clicks Schedule. The Builder shows the card with **yesterday's** date and "overdue" status.
+
+### Root cause
+
+`frontend/src/components/DateTimePicker.jsx` built the `iso` field via:
+
+```js
+const base = new Date();
+base.setHours(0, 0, 0, 0); // local midnight today
+// ...
+iso: d.toISOString().slice(0, 10); // UTC date of local midnight ← bug
+```
+
+For IST (UTC+5:30), `local midnight 2026-05-11` = `2026-05-10T18:30:00Z` in UTC. `.toISOString().slice(0,10)` returns `"2026-05-10"`. The emitted string `"2026-05-10T17:40"` is then parsed by `new Date()` as **local** time → 2026-05-10 17:40 IST → yesterday → instantly "overdue".
+
+Bug present from the original DateTimePicker; only surfaced once the operator-visible "overdue" badge was wired and the backend started enforcing `scheduled_at.in_past`.
+
+### Fix
+
+Replaced with a `localIsoDate(d)` helper using `getFullYear/getMonth/getDate` (all timezone-local accessors). "Today" wheel now actually emits today's local date.
+
+---
+
+## BUG-S004 — App.jsx queue-refresh useEffect placed after early returns
+
+**Status:** Fixed this commit.
+**Filed:** 2026-05-11
+
+### Symptom
+
+Loading the dashboard renders nothing — blank `<div id="root">`. Console shows React error #310: "Rendered more hooks than during the previous render." All Playwright e2e tests timeout on `.tabbar__btn`.
+
+### Root cause
+
+In commit `dff0d6b`, the scheduler-integration changes added:
+
+```js
+useEffect(() => {
+  if (queueOpen) void refreshScheduledJobs();
+}, [queueOpen, activeEnv?.code]);
+```
+
+at `frontend/src/App.jsx:304`, AFTER the `if (authLoading) return null;` early return at line 106. On first render (`authLoading=true`), React saw N hooks. On second render (`authLoading=false`), it saw N+1. Violation → unmount → blank page.
+
+Why tests didn't catch it: the local Playwright runtime wasn't initialised, so all 7 frontend e2e tests skipped silently (`launchFrontendApp` → `t.skip`). The `npm test` summary showed `340/0/11` and the bug landed.
+
+### Fix
+
+Moved the `useEffect` above the early returns (line ~104). Hook count is now stable across the auth-resolution boundary. Also added `user` to the dependency array and an `if (queueOpen && user)` gate so the effect doesn't fire during the unauthenticated phase.
+
+### Follow-up worth doing
+
+- Add `eslint-plugin-react-hooks` rule `react-hooks/rules-of-hooks: error` (likely already there but evidently not catching this — verify it's wired into the lint-staged pre-commit).
+- The 11 skipped tests in `npm test` deserve a one-shot audit: which are env-gated (mainnet) vs Playwright-gated. The Playwright skips are silent bug-hiders; ensure CI exercises them.
