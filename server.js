@@ -969,6 +969,23 @@ function validateRuntimeConfig() {
   }
 }
 
+// Scheduler instance — declared here so the IS_MAIN bootstrap below can call
+// .start() on it. The initializer only touches hoisted function declarations
+// (getActiveRuntimeEnvironmentProfile, getDbPoolForEnv, getActiveRuntimeEnvVars,
+// fireScheduledJob, parsePositiveIntegerEnv) and the schedulerLog const declared
+// at the top of the file — so this can live above its module-source neighbors.
+const cmsScheduler = createCmsScheduler({
+  getActiveEnvCode: () => getActiveRuntimeEnvironmentProfile().code,
+  getDbPoolForEnv,
+  getActiveRuntimeEnvVars,
+  fireScheduledJob,
+  log: schedulerLog,
+  tickIntervalMs: parsePositiveIntegerEnv(process.env.SCHEDULER_TICK_INTERVAL_MS, 60_000, {
+    min: 5_000,
+  }),
+  batchSize: parsePositiveIntegerEnv(process.env.SCHEDULER_BATCH_SIZE, 5, { min: 1 }),
+});
+
 const IS_MAIN = (() => {
   const invokedPath = process.argv?.[1];
   if (!invokedPath) {
@@ -1422,18 +1439,6 @@ async function fireScheduledJob(job, { environment } = {}) {
   }
   return { runId };
 }
-
-const cmsScheduler = createCmsScheduler({
-  getActiveEnvCode: () => getActiveRuntimeEnvironmentProfile().code,
-  getDbPoolForEnv,
-  getActiveRuntimeEnvVars,
-  fireScheduledJob,
-  log: schedulerLog,
-  tickIntervalMs: parsePositiveIntegerEnv(process.env.SCHEDULER_TICK_INTERVAL_MS, 60_000, {
-    min: 5_000,
-  }),
-  batchSize: parsePositiveIntegerEnv(process.env.SCHEDULER_BATCH_SIZE, 5, { min: 1 }),
-});
 
 // ─── /api/integrations/cms/* — envelope-style batch routes ───────────────────
 //

@@ -49,6 +49,34 @@ function envelope(overrides = {}) {
   };
 }
 
+test("server boots with SCHEDULER_ENABLED=1 — no temporal-dead-zone on cmsScheduler", async (t) => {
+  // Regression: dff0d6b shipped with `const cmsScheduler` declared AFTER the
+  // IS_MAIN bootstrap block, so the default SCHEDULER_ENABLED=1 path threw
+  // `ReferenceError: Cannot access 'cmsScheduler' before initialization`.
+  // This test forces the scheduler-enabled boot path through the harness
+  // (which otherwise defaults SCHEDULER_ENABLED=0).
+  const port = nextPort();
+  const started = await startServerForTest({
+    cwd: WORKSPACE,
+    port,
+    env: {
+      APP_ENV: "dev",
+      LEAGUES_CSV_PATH: LEAGUES_CSV,
+      TEAMS_CSV_PATH: TEAMS_CSV,
+      SCHEDULER_ENABLED: "1",
+      DISABLE_DB: "1",
+    },
+  });
+  if (started.skipReason) {
+    t.skip(started.skipReason);
+    return;
+  }
+  t.after(async () => started.stop());
+
+  const res = await fetch(`${started.baseUrl}/api/healthz`);
+  assert.equal(res.status, 200);
+});
+
 test("schedule-publish: rejects confirmation.confirmed=false with same issue shape as batch-publish", async (t) => {
   const port = nextPort();
   const started = await startServerForTest({
