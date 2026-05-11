@@ -547,6 +547,45 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Diagnostic surface for in-memory batchRunStore. The store is the
+    // authoritative record of a batch run within a process lifetime; without
+    // this endpoint operators have to dig through stdout logs to learn why a
+    // run failed. Read-only, returns the last N entries sorted by start time.
+    if (requestUrl.pathname === "/api/debug/batch-runs") {
+      const limitRaw = Number(requestUrl.searchParams.get("limit") || 10);
+      const limit = Math.max(1, Math.min(100, Number.isFinite(limitRaw) ? limitRaw : 10));
+      const runs = Array.from(batchRunStore.values())
+        .sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")))
+        .slice(0, limit)
+        .map((r) => ({
+          run_id: r.run_id,
+          request_id: r.request_id || null,
+          status: r.status,
+          detail: r.detail || null,
+          summary: r.summary || null,
+          environment: r.environment || null,
+          started_at: r.started_at || null,
+          completed_at: r.completed_at || null,
+          fixture_results: Array.isArray(r.fixture_results)
+            ? r.fixture_results.map((fr) => ({
+                fixture_key: fr.fixture_key || null,
+                event_name: fr.event_name || null,
+                status: fr.status,
+                reason: fr.reason || null,
+                markets: Array.isArray(fr.markets)
+                  ? fr.markets.map((m) => ({
+                      publish_key: m.publish_key,
+                      status: m.status,
+                      reason: m.reason || null,
+                    }))
+                  : [],
+              }))
+            : [],
+        }));
+      sendJson(res, 200, { ok: true, count: runs.length, runs });
+      return;
+    }
+
     if (requestUrl.pathname === "/api/db/verify/fixture" && req.method === "POST") {
       await handleDbVerifyFixtureRequest(req, res);
       return;

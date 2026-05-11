@@ -260,7 +260,15 @@ export default function App() {
       await new Promise((r) => setTimeout(r, 2000));
       const run = await fetchBatchRun(runId);
       if (["completed", "partial", "failed", "stopped"].includes(run.status)) {
-        if (run.status === "failed") throw new Error(`Publish run failed`);
+        if (run.status === "failed") {
+          // Surface the actual CMS error chain so operators don't have to
+          // dig through Network tab / server logs to know why it failed.
+          // Pulls from run.detail (top-level), then the first failed fixture's
+          // reason, then falls back to the generic message.
+          const firstFailed = (run.fixture_results || []).find((fr) => fr.status === "failed");
+          const detail = run.detail || firstFailed?.reason || run.summary || "Publish run failed";
+          throw new Error(detail);
+        }
         return run;
       }
     }
