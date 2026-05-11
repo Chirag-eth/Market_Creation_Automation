@@ -82,13 +82,26 @@ export function createCmsScheduler({
       // Fire sequentially. Each batch run is non-trivial; sequencing keeps the
       // worker predictable and avoids piling concurrent CMS requests.
       for (const job of claimed) {
+        const startedAt = Date.now();
         try {
           const { runId } = await fireScheduledJob(job, { pool, environment });
           await markCompleted(pool, job.job_id, { runId: runId || null });
           fired += 1;
+          log?.info?.(
+            {
+              jobId: job.job_id,
+              runId: runId || null,
+              durationMs: Date.now() - startedAt,
+            },
+            "scheduled job completed"
+          );
         } catch (err) {
           log?.error?.(
-            { err: String(err?.message || err), jobId: job.job_id },
+            {
+              err: String(err?.message || err),
+              jobId: job.job_id,
+              durationMs: Date.now() - startedAt,
+            },
             "scheduled job failed"
           );
           await markFailed(pool, job.job_id, {
