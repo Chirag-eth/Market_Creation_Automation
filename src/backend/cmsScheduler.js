@@ -42,6 +42,31 @@ export function createCmsScheduler({
   let timer = null;
   let tickInProgress = false;
   let stopped = false;
+  let lastSchemaError = null;
+  let schemaCheckedFor = null;
+
+  // Probes the active env's pool for the cms_scheduled_jobs table. Called
+  // lazily from tick() so we only hit the DB once per env-switch. If the
+  // table is missing or the pool refuses the query, we record the error so
+  // future health endpoints / operators can see why nothing is firing.
+  async function ensureSchema(pool, environment) {
+    if (schemaCheckedFor === environment && lastSchemaError === null) return true;
+    try {
+      await pool.query("SELECT 1 FROM cms_scheduled_jobs LIMIT 0");
+      schemaCheckedFor = environment;
+      lastSchemaError = null;
+      return true;
+    } catch (err) {
+      const msg = String(err?.message || err);
+      schemaCheckedFor = environment;
+      lastSchemaError = msg;
+      log?.error?.(
+        { err: msg, environment },
+        "scheduler schema check failed — cms_scheduled_jobs missing or unreadable. Apply sql/cms_002_scheduled_jobs.sql to this env's DB. Worker will retry on next tick."
+      );
+      return false;
+    }
+  }
 
   async function tick(now = new Date()) {
     if (tickInProgress) {
@@ -63,12 +88,36 @@ export function createCmsScheduler({
         return { claimed: 0, fired: 0, skipped: true, reason: "no_env" };
       }
 
+      // Re-check schema whenever env changes so a UAT-then-dev switch
+      // (or vice versa) re-probes the new env's DB. Cheap (one round-trip)
+      // and we only probe once per env per process while healthy.
+      if (schemaCheckedFor !== environment) {
+        const ok = await ensureSchema(pool, environment);
+        if (!ok) {
+          return {
+            claimed: 0,
+            fired: 0,
+            skipped: true,
+            reason: "schema_missing",
+            error: lastSchemaError,
+          };
+        }
+      }
+
       let claimed;
       try {
         claimed = await claimDueJobs(pool, { environment, now, limit: batchSize });
       } catch (err) {
-        log?.error?.({ err: String(err?.message || err) }, "scheduler claim failed");
-        return { claimed: 0, fired: 0, error: String(err?.message || err) };
+        const msg = String(err?.message || err);
+        // 42P01 = undefined_table. If the table has gone missing between
+        // ticks (or our cached schema-OK signal is stale), force a re-probe
+        // on the next tick so getLastSchemaError() reports it.
+        if (/relation .* does not exist/i.test(msg) || /42P01/.test(msg)) {
+          schemaCheckedFor = null;
+          lastSchemaError = msg;
+        }
+        log?.error?.({ err: msg }, "scheduler claim failed");
+        return { claimed: 0, fired: 0, error: msg };
       }
 
       if (claimed.length === 0) {
@@ -147,5 +196,10 @@ export function createCmsScheduler({
     tick, // exposed for tests
     isRunning: () => Boolean(timer),
     isTickInProgress: () => tickInProgress,
+    // Schema-health surface. Returns null when no probe has run yet or when
+    // the last probe succeeded; returns the error message string otherwise.
+    // Consumers (future /scheduler-health route, frontend banner) should
+    // treat any non-null value as "operator action needed".
+    getLastSchemaError: () => lastSchemaError,
   };
 }

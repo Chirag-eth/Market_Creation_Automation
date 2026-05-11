@@ -190,6 +190,84 @@ test("scheduler tick: re-entrancy guard skips overlapping ticks", async () => {
   assert.equal(firstResult.fired, 1);
 });
 
+test("scheduler tick: skipped with schema_missing reason when probe fails; getLastSchemaError reports it", async () => {
+  // Fake pool whose schema probe ("SELECT 1 FROM cms_scheduled_jobs LIMIT 0")
+  // throws like Postgres 42P01. This is the exact failure mode that hit UAT
+  // on 2026-05-11 — see bugs.md BUG-S001.
+  const pool = {
+    async query(sql) {
+      const text = String(sql || "");
+      if (/SELECT 1 FROM cms_scheduled_jobs LIMIT 0/i.test(text)) {
+        const err = new Error('relation "cms_scheduled_jobs" does not exist');
+        err.code = "42P01";
+        throw err;
+      }
+      return { rows: [] };
+    },
+    async connect() {
+      throw new Error("connect should not be reached — schema check fails first");
+    },
+  };
+  const sched = createCmsScheduler({
+    getActiveEnvCode: () => "uat",
+    getDbPoolForEnv: () => pool,
+    getActiveRuntimeEnvVars: () => ({}),
+    fireScheduledJob: async () => ({ runId: "x" }),
+  });
+  const result = await sched.tick();
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "schema_missing");
+  assert.match(String(result.error), /does not exist/);
+  assert.match(String(sched.getLastSchemaError()), /does not exist/);
+});
+
+test("scheduler tick: re-probes schema after env switch (cache is per-env)", async () => {
+  // Simulate switching active env between ticks. First tick on uat fails the
+  // probe; second tick on dev should re-probe (and succeed here) — i.e. the
+  // "checked once per env" cache must be invalidated on env change.
+  let currentEnv = "uat";
+  let probeCalls = 0;
+  const pool = {
+    async query(sql) {
+      const text = String(sql || "");
+      if (/SELECT 1 FROM cms_scheduled_jobs LIMIT 0/i.test(text)) {
+        probeCalls += 1;
+        if (currentEnv === "uat") {
+          throw new Error('relation "cms_scheduled_jobs" does not exist');
+        }
+        return { rows: [] };
+      }
+      return { rows: [] };
+    },
+    async connect() {
+      return {
+        async query(sql) {
+          const text = String(sql || "").trim();
+          if (/^BEGIN$/i.test(text) || /^COMMIT$/i.test(text)) return { rows: [] };
+          if (/SELECT \* FROM cms_scheduled_jobs/i.test(text)) return { rows: [] };
+          return { rows: [] };
+        },
+        release() {},
+      };
+    },
+  };
+  const sched = createCmsScheduler({
+    getActiveEnvCode: () => currentEnv,
+    getDbPoolForEnv: () => pool,
+    getActiveRuntimeEnvVars: () => ({}),
+    fireScheduledJob: async () => ({ runId: "x" }),
+  });
+
+  const first = await sched.tick();
+  assert.equal(first.reason, "schema_missing");
+
+  currentEnv = "dev";
+  const second = await sched.tick();
+  assert.equal(second.skipped, undefined); // healthy path
+  assert.equal(probeCalls, 2); // re-probed on env switch
+  assert.equal(sched.getLastSchemaError(), null);
+});
+
 test("scheduler start/stop are idempotent and unref the timer", async () => {
   const pool = buildFakePool();
   const sched = createCmsScheduler({
