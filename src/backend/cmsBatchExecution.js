@@ -173,7 +173,15 @@ export function buildFixtureCreateCname(fixture, homeTeam, awayTeam) {
 
 // Translates an internal pipe-delimited publish key (e.g. "spreads|1.5|home")
 // into the parent_markets[] string that fixtures/create expects.
-export function publishKeyToParentMarketKey(publishKey, homeName, awayName) {
+//
+// Spreads side encoding: the CMS rejects `<side>_<team-slug>` (e.g.
+// "spreads_1.5_home_west-ham-united-fc") with HTTP 500
+// "spread side ... must be teama/teamb or home/away team name".
+// We use the teama/teamb convention — teama = home, teamb = away —
+// because it's deterministic and doesn't depend on team-name slugification.
+// The homeName/awayName parameters are kept on the signature for callers
+// that may want a name-based variant later.
+export function publishKeyToParentMarketKey(publishKey, _homeName, _awayName) {
   const parts = String(publishKey || "").split("|");
   const family = parts[0] || "";
   const line = parts[1] || "";
@@ -183,12 +191,8 @@ export function publishKeyToParentMarketKey(publishKey, homeName, awayName) {
   if (family === "totals") return line ? `totals_${line}` : null;
   if (family === "spreads") {
     if (!line || !side) return null;
-    const team = side === "away" ? awayName : homeName;
-    const slug = String(team || "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "");
-    return slug ? `spreads_${line}_${side}_${slug}` : `spreads_${line}_${side}`;
+    const sideToken = side === "away" ? "teamb" : "teama";
+    return `spreads_${line}_${sideToken}`;
   }
   return null;
 }
