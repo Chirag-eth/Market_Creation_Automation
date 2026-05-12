@@ -1513,20 +1513,42 @@ async function handleCmsCheckExistingRequest(req, res) {
     return;
   }
 
+  // "Existing" criterion: every required parent_market for the canonical
+  // full publish set must already be present for this fixture in CMS.
+  // Partial publishes (some markets missing) stay in the Builder so the
+  // operator can fill them in. Keep this HAVING clause aligned with
+  // SUBMARKET_TO_PUBLISH_KEYS / publishKeyToParentMarketKey — if the
+  // canonical full set changes, this query needs to track it.
+  //
+  // Full set today (10 parent_markets after dedup):
+  //   moneyline, btts, totals_1.5/2.5/3.5/4.5,
+  //   spreads at 1.5 (teama+teamb), spreads at 2.5 (teama+teamb)
   let rows = [];
   try {
     const r = await pool.query(
-      `SELECT canonical_name
-         FROM type_references
-        WHERE type_value = 'fixture'
-          AND canonical_name = ANY($1::text[])`,
+      `SELECT tr.canonical_name AS canonical_name
+         FROM type_references tr
+         JOIN parent_markets pm
+           ON pm.type_reference_id = tr.type_reference_id
+        WHERE tr.type_value = 'fixture'
+          AND tr.canonical_name = ANY($1::text[])
+        GROUP BY tr.canonical_name
+       HAVING
+              COUNT(*) FILTER (WHERE pm.parent_market_family = 'moneyline') >= 1
+          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'spreads' AND pm.market_line = 1.5) >= 2
+          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'spreads' AND pm.market_line = 2.5) >= 2
+          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals' AND pm.market_line = 1.5) >= 1
+          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals' AND pm.market_line = 2.5) >= 1
+          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals' AND pm.market_line = 3.5) >= 1
+          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals' AND pm.market_line = 4.5) >= 1
+          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'btts') >= 1`,
       [cnames]
     );
     rows = r.rows || [];
   } catch (err) {
     cmsLog.warn(
       { err: String(err?.message || err), env: activeProfile.code },
-      "check-existing: type_references query failed"
+      "check-existing: parent_markets HAVING query failed"
     );
     sendJson(res, 200, {
       ok: true,
