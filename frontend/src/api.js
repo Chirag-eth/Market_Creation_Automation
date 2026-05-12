@@ -53,6 +53,20 @@ export async function publishBatch({ fixtures, submarkets, environment }) {
   return res.json();
 }
 
+// Given a list of schedule fixtures, returns which are already published in
+// the active env's CMS. Used to split the Builder list into Upcoming + Existing.
+// Backend matches by canonical_name in type_references (deterministic from
+// the same buildFixtureCreateCname we use at publish time).
+export async function checkExistingFixtures({ environment, fixtures }) {
+  const res = await fetch(`${BASE}/api/cms/check-existing`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ environment, fixtures }),
+  });
+  if (!res.ok) throw new Error(`checkExistingFixtures failed: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchBatchRun(runId) {
   const res = await fetch(`${BASE}/api/cms/batch-runs/${encodeURIComponent(runId)}`);
   if (!res.ok) throw new Error(`fetchBatchRun(${runId}) failed: ${res.status}`);

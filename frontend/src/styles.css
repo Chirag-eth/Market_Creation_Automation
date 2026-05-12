@@ -2607,6 +2607,74 @@ input {
   color: var(--a);
 }
 
+/* ─── Existing-fixtures section (already published in CMS) ───────── */
+.fix-existing {
+  margin-top: 12px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+
+.fix-existing__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--t2);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.fix-existing__toggle:hover {
+  color: var(--t1);
+}
+
+.fix-existing__chevron {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  font-size: 10px;
+  color: var(--t3);
+}
+
+.fix-existing__chevron--open {
+  transform: rotate(90deg);
+}
+
+.fix-existing__label {
+  letter-spacing: 0.05em;
+}
+
+.fix-existing__count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--t3);
+  background: var(--bg-2);
+  padding: 2px 8px;
+  border-radius: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.fix-row--existing {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.fix-row--existing:hover {
+  background: transparent;
+}
+
+.fix-row__existing-tag {
+  color: var(--a);
+  font-weight: 500;
+}
+
 /* ─── Builder – publish section ───────────────────── */
 .builder__publish {
   flex-shrink: 0;

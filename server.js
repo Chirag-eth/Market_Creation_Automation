@@ -506,6 +506,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/cms/check-existing") {
+      await handleCmsCheckExistingRequest(req, res);
+      return;
+    }
+
     if (requestUrl.pathname.startsWith("/api/cms/batch-runs/")) {
       const runId = requestUrl.pathname.slice("/api/cms/batch-runs/".length);
       handleCmsBatchRunRequest(runId, res);
@@ -1407,6 +1412,148 @@ async function handleCmsBatchPublishRequest(req, res) {
   });
 
   sendJson(res, 202, { run_id: runId, status: "queued" });
+}
+
+// POST /api/cms/check-existing — given a list of schedule fixtures, returns
+// which ones already exist in the active env's CMS (matched by canonical_name
+// in type_references). The frontend uses this to partition the Builder
+// schedule into "Upcoming" (selectable) and "Existing" (read-only) so
+// operators don't re-publish what's already there.
+//
+// Body: { environment?, fixtures: [{ game_id, home, away, leagueCode, kickoff }] }
+// Response: { ok, existing_game_ids: [string], by_game_id: { [gid]: {cname} } }
+// Non-failing on DB-missing / catalog-load issues — returns empty existing list
+// and a flag so the UI can stay usable.
+async function handleCmsCheckExistingRequest(req, res) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+    return;
+  }
+  let payload;
+  try {
+    payload = await readJsonRequestBody(req, { maxBytes: 512 * 1024 });
+  } catch (err) {
+    sendJson(res, 400, {
+      ok: false,
+      error: "Invalid JSON body",
+      detail: String(err?.message || err),
+    });
+    return;
+  }
+
+  const inputFixtures = Array.isArray(payload?.fixtures) ? payload.fixtures : [];
+  if (inputFixtures.length === 0) {
+    sendJson(res, 200, { ok: true, existing_game_ids: [], by_game_id: {} });
+    return;
+  }
+
+  const envCode = String(payload?.environment || "").trim();
+  const activeProfile = envCode
+    ? getRuntimeEnvironmentProfile(envCode)
+    : getActiveRuntimeEnvironmentProfile();
+  const pool = getDbPoolForEnv(activeProfile.env);
+  if (!pool) {
+    sendJson(res, 200, {
+      ok: true,
+      existing_game_ids: [],
+      by_game_id: {},
+      db_configured: false,
+    });
+    return;
+  }
+
+  let batchLeagues = null;
+  let batchTeams = null;
+  try {
+    const dbCatalog = await queryCatalogRowsFromDb(pool);
+    batchLeagues = normalizeLeagueRows(dbCatalog.leagues || []);
+    batchTeams = normalizeTeamRows(dbCatalog.teams || [], batchLeagues);
+  } catch (err) {
+    cmsLog.warn(
+      { err: String(err?.message || err), env: activeProfile.code },
+      "check-existing: DB catalog load failed; falling back to raw fixture names"
+    );
+  }
+  const teamAliasIdx = batchTeams ? buildTeamAliasIndex(batchTeams) : null;
+
+  const cnameToGameId = new Map();
+  for (const fx of inputFixtures) {
+    const gameId = String(fx?.game_id || fx?.gameId || "").trim();
+    if (!gameId) continue;
+    const homeName = String(fx?.home || fx?.homeTeamName || "").trim();
+    const awayName = String(fx?.away || fx?.awayTeamName || "").trim();
+    const leagueCode = String(fx?.leagueCode || fx?.league_code || "")
+      .trim()
+      .toLowerCase();
+    const kickoff = String(fx?.kickoff || fx?.kickoffIso || "").trim();
+
+    let homeTeam = null;
+    let awayTeam = null;
+    if (batchLeagues && teamAliasIdx) {
+      const lg = resolveBatchLeague(batchLeagues, leagueCode);
+      if (lg) {
+        homeTeam = resolveBatchTeam(teamAliasIdx, homeName, lg.id);
+        awayTeam = resolveBatchTeam(teamAliasIdx, awayName, lg.id);
+      }
+    }
+    const cname = buildFixtureCreateCname(
+      { kickoff, leagueCode, home: homeName, away: awayName },
+      homeTeam,
+      awayTeam
+    );
+    if (!cname) continue;
+    // First write wins — duplicate game_ids in input shouldn't happen but
+    // if they do we keep the first.
+    if (!cnameToGameId.has(cname)) cnameToGameId.set(cname, gameId);
+  }
+
+  const cnames = Array.from(cnameToGameId.keys());
+  if (cnames.length === 0) {
+    sendJson(res, 200, { ok: true, existing_game_ids: [], by_game_id: {} });
+    return;
+  }
+
+  let rows = [];
+  try {
+    const r = await pool.query(
+      `SELECT canonical_name
+         FROM type_references
+        WHERE type_value = 'fixture'
+          AND canonical_name = ANY($1::text[])`,
+      [cnames]
+    );
+    rows = r.rows || [];
+  } catch (err) {
+    cmsLog.warn(
+      { err: String(err?.message || err), env: activeProfile.code },
+      "check-existing: type_references query failed"
+    );
+    sendJson(res, 200, {
+      ok: true,
+      existing_game_ids: [],
+      by_game_id: {},
+      db_configured: true,
+      query_error: String(err?.message || err),
+    });
+    return;
+  }
+
+  const existingGameIds = [];
+  const byGameId = {};
+  for (const row of rows) {
+    const cname = String(row?.canonical_name || "");
+    const gid = cnameToGameId.get(cname);
+    if (gid && !byGameId[gid]) {
+      existingGameIds.push(gid);
+      byGameId[gid] = { cname };
+    }
+  }
+
+  sendJson(res, 200, {
+    ok: true,
+    existing_game_ids: existingGameIds,
+    by_game_id: byGameId,
+  });
 }
 
 function handleCmsBatchRunRequest(runId, res) {
