@@ -222,6 +222,28 @@ export async function postCmsFixtureCreate(cmsConfig, body, log) {
     respBody = text;
   }
   if (!response.ok) {
+    // CMS returns 500 when re-publishing a fixture whose canonical_name
+    // already exists, due to a unique-constraint violation on the
+    // `type_references` table. The markets are already created — this is a
+    // bookkeeping inconsistency on the CMS side (some fixtures dedupe
+    // gracefully with "already exists, skipped"; others surface as a raw
+    // 23505). Treat the duplicate-key shape as a non-fatal "existing"
+    // signal so the operator doesn't see a false failure on a re-publish.
+    const bodyText = typeof respBody === "string" ? respBody : JSON.stringify(respBody || "");
+    const isDuplicateCanonical =
+      response.status === 500 &&
+      (bodyText.includes("uni_type_references_canonical_name") ||
+        /SQLSTATE\s*23505/i.test(bodyText));
+    if (isDuplicateCanonical) {
+      log.warn(
+        { status: response.status, url, body: respBody },
+        "fixtures/create: canonical_name already exists — treating as existing"
+      );
+      const err = new Error("fixtures/create: canonical_name already exists");
+      err.cmsCode = "duplicate_canonical_name";
+      err.cmsBody = respBody;
+      throw err;
+    }
     log.error({ status: response.status, url, body: respBody }, "fixtures/create failed");
     throw new Error(
       `HTTP ${response.status} from fixtures/create: ${typeof respBody === "string" ? respBody : JSON.stringify(respBody)}`
@@ -251,6 +273,66 @@ async function resolveTeamByLeagueFromDb(pool, teamName, leagueId) {
   } catch {
     return null;
   }
+}
+
+export async function findExistingFixtureUuid(
+  pool,
+  { leagueId = "", homeTeamId = "", awayTeamId = "", gameDate = "" } = {}
+) {
+  if (!pool || !leagueId || !homeTeamId || !awayTeamId || !gameDate) {
+    return { fixtureUuid: null, match: null, row: null };
+  }
+
+  const exact = await pool.query(
+    `SELECT fixture_id
+     FROM fixtures
+     WHERE league_id = $1
+       AND home_team_id = $2
+       AND away_team_id = $3
+       AND game_start_time::date = $4::date
+     ORDER BY created_at DESC NULLS LAST
+     LIMIT 1`,
+    [leagueId, homeTeamId, awayTeamId, gameDate]
+  );
+  if (exact.rows.length > 0) {
+    return {
+      fixtureUuid: String(exact.rows[0].fixture_id || "").trim() || null,
+      match: "exact+date",
+      row: exact.rows[0],
+    };
+  }
+
+  const byHome = await pool.query(
+    `SELECT fixture_id, away_team_id
+     FROM fixtures
+     WHERE league_id = $1 AND home_team_id = $2 AND game_start_time::date = $3::date
+     ORDER BY created_at DESC NULLS LAST LIMIT 1`,
+    [leagueId, homeTeamId, gameDate]
+  );
+  if (byHome.rows.length > 0) {
+    return {
+      fixtureUuid: String(byHome.rows[0].fixture_id || "").trim() || null,
+      match: "home+date",
+      row: byHome.rows[0],
+    };
+  }
+
+  const byAway = await pool.query(
+    `SELECT fixture_id, home_team_id
+     FROM fixtures
+     WHERE league_id = $1 AND away_team_id = $2 AND game_start_time::date = $3::date
+     ORDER BY created_at DESC NULLS LAST LIMIT 1`,
+    [leagueId, awayTeamId, gameDate]
+  );
+  if (byAway.rows.length > 0) {
+    return {
+      fixtureUuid: String(byAway.rows[0].fixture_id || "").trim() || null,
+      match: "away+date",
+      row: byAway.rows[0],
+    };
+  }
+
+  return { fixtureUuid: null, match: null, row: null };
 }
 
 // ── Main batch run orchestrator ──────────────────────────────────────────────
@@ -413,6 +495,33 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
           response: resp ?? null,
         });
       } catch (err) {
+        if (err?.cmsCode === "duplicate_canonical_name") {
+          // Re-publish of an already-created fixture. The markets exist in
+          // CMS; we just hit the type_references unique constraint. Record
+          // as "existing" (non-fatal) so the operator sees a clear "already
+          // published" signal and the run doesn't get demoted to partial.
+          log.info(
+            { eventName, gameId, cname },
+            "fixture already exists in CMS — recording as existing"
+          );
+          fixtureResults.push({
+            fixture_key: fixture.id || eventName,
+            event_name: eventName,
+            status: "existing",
+            reason: "Already published in CMS (canonical_name conflict)",
+            markets: publishKeys.map((k) => ({ publish_key: k, status: "existing" })),
+            payloads: {
+              fixture_create: {
+                game_id: gameId,
+                source: newSource,
+                parent_markets: parentMarkets,
+                cname,
+                appendix: "",
+              },
+            },
+          });
+          continue;
+        }
         anyFailed = true;
         log.error({ err, eventName, gameId }, "fixture failed via fixtures/create");
         fixtureResults.push({
@@ -521,45 +630,37 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
       if (dbPool) {
         try {
           const gameDate = gameStartTime.slice(0, 10);
-          const exact = await dbPool.query(
-            `SELECT fixture_id FROM fixtures
-             WHERE league_id = $1 AND home_team_id = $2 AND away_team_id = $3
-             ORDER BY created_at DESC NULLS LAST LIMIT 1`,
-            [league.id, homeTeam.id, awayTeam.id]
-          );
-          if (exact.rows.length > 0) {
-            fixtureUuid = String(exact.rows[0].fixture_id).trim();
-            log.debug({ fixtureUuid, match: "exact" }, "fixture found in DB");
-          } else {
-            const byHome = await dbPool.query(
-              `SELECT fixture_id, away_team_id FROM fixtures
-               WHERE league_id = $1 AND home_team_id = $2 AND game_start_time::date = $3::date
-               ORDER BY created_at DESC NULLS LAST LIMIT 1`,
-              [league.id, homeTeam.id, gameDate]
-            );
-            if (byHome.rows.length > 0) {
-              fixtureUuid = String(byHome.rows[0].fixture_id).trim();
+          const existingFixture = await findExistingFixtureUuid(dbPool, {
+            leagueId: league.id,
+            homeTeamId: homeTeam.id,
+            awayTeamId: awayTeam.id,
+            gameDate,
+          });
+          if (existingFixture.fixtureUuid) {
+            fixtureUuid = existingFixture.fixtureUuid;
+            if (existingFixture.match === "home+date") {
               log.debug(
-                { fixtureUuid, match: "home+date", awayUuidInDb: byHome.rows[0].away_team_id },
+                {
+                  fixtureUuid,
+                  match: existingFixture.match,
+                  awayUuidInDb: existingFixture.row?.away_team_id || "",
+                },
+                "fixture found in DB"
+              );
+            } else if (existingFixture.match === "away+date") {
+              log.debug(
+                {
+                  fixtureUuid,
+                  match: existingFixture.match,
+                  homeUuidInDb: existingFixture.row?.home_team_id || "",
+                },
                 "fixture found in DB"
               );
             } else {
-              const byAway = await dbPool.query(
-                `SELECT fixture_id, home_team_id FROM fixtures
-                 WHERE league_id = $1 AND away_team_id = $2 AND game_start_time::date = $3::date
-                 ORDER BY created_at DESC NULLS LAST LIMIT 1`,
-                [league.id, awayTeam.id, gameDate]
-              );
-              if (byAway.rows.length > 0) {
-                fixtureUuid = String(byAway.rows[0].fixture_id).trim();
-                log.debug(
-                  { fixtureUuid, match: "away+date", homeUuidInDb: byAway.rows[0].home_team_id },
-                  "fixture found in DB"
-                );
-              } else {
-                log.debug({ leagueId: league.id, gameDate }, "no fixture in DB, will POST");
-              }
+              log.debug({ fixtureUuid, match: existingFixture.match }, "fixture found in DB");
             }
+          } else {
+            log.debug({ leagueId: league.id, gameDate }, "no fixture in DB, will POST");
           }
         } catch (e) {
           log.warn({ err: e }, "DB fixture lookup failed, will POST");

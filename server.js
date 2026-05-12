@@ -566,8 +566,8 @@ const server = http.createServer(async (req, res) => {
           environment: r.environment || null,
           started_at: r.started_at || null,
           completed_at: r.completed_at || null,
-          fixture_results: Array.isArray(r.fixture_results)
-            ? r.fixture_results.map((fr) => ({
+          fixture_results: Array.isArray(r.fixtures)
+            ? r.fixtures.map((fr) => ({
                 fixture_key: fr.fixture_key || null,
                 event_name: fr.event_name || null,
                 status: fr.status,
