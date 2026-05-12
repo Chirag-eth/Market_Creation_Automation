@@ -1516,39 +1516,45 @@ async function handleCmsCheckExistingRequest(req, res) {
   // "Existing" criterion: every required parent_market for the canonical
   // full publish set must already be present for this fixture in CMS.
   // Partial publishes (some markets missing) stay in the Builder so the
-  // operator can fill them in. Keep this HAVING clause aligned with
+  // operator can fill them in. Keep this aligned with
   // SUBMARKET_TO_PUBLISH_KEYS / publishKeyToParentMarketKey — if the
-  // canonical full set changes, this query needs to track it.
+  // canonical full set changes, update both the gate below and the
+  // per-family/line counters that drive it.
   //
   // Full set today (10 parent_markets after dedup):
   //   moneyline, btts, totals_1.5/2.5/3.5/4.5,
   //   spreads at 1.5 (teama+teamb), spreads at 2.5 (teama+teamb)
+  //
+  // We do the gating in JS (not in HAVING) so the response can also
+  // report per-fixture counts for diagnostics. This is read-only and
+  // cheap: one row per matched canonical_name.
   let rows = [];
   try {
     const r = await pool.query(
-      `SELECT tr.canonical_name AS canonical_name
-         FROM type_references tr
-         JOIN parent_markets pm
-           ON pm.type_reference_id = tr.type_reference_id
+      `SELECT
+          tr.canonical_name                                           AS canonical_name,
+          COUNT(pm.*)                                                  AS market_count,
+          COUNT(*) FILTER (WHERE pm.parent_market_family = 'moneyline')                          AS ml_count,
+          COUNT(*) FILTER (WHERE pm.parent_market_family = 'spreads'  AND pm.market_line = 1.5)  AS sp15_count,
+          COUNT(*) FILTER (WHERE pm.parent_market_family = 'spreads'  AND pm.market_line = 2.5)  AS sp25_count,
+          COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals'   AND pm.market_line = 1.5)  AS to15_count,
+          COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals'   AND pm.market_line = 2.5)  AS to25_count,
+          COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals'   AND pm.market_line = 3.5)  AS to35_count,
+          COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals'   AND pm.market_line = 4.5)  AS to45_count,
+          COUNT(*) FILTER (WHERE pm.parent_market_family = 'btts')                               AS btts_count
+        FROM type_references tr
+        LEFT JOIN parent_markets pm
+          ON pm.type_reference_id = tr.type_reference_id
         WHERE tr.type_value = 'fixture'
           AND tr.canonical_name = ANY($1::text[])
-        GROUP BY tr.canonical_name
-       HAVING
-              COUNT(*) FILTER (WHERE pm.parent_market_family = 'moneyline') >= 1
-          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'spreads' AND pm.market_line = 1.5) >= 2
-          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'spreads' AND pm.market_line = 2.5) >= 2
-          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals' AND pm.market_line = 1.5) >= 1
-          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals' AND pm.market_line = 2.5) >= 1
-          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals' AND pm.market_line = 3.5) >= 1
-          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'totals' AND pm.market_line = 4.5) >= 1
-          AND COUNT(*) FILTER (WHERE pm.parent_market_family = 'btts') >= 1`,
+        GROUP BY tr.canonical_name`,
       [cnames]
     );
     rows = r.rows || [];
   } catch (err) {
     cmsLog.warn(
       { err: String(err?.message || err), env: activeProfile.code },
-      "check-existing: parent_markets HAVING query failed"
+      "check-existing: parent_markets count query failed"
     );
     sendJson(res, 200, {
       ok: true,
@@ -1565,9 +1571,35 @@ async function handleCmsCheckExistingRequest(req, res) {
   for (const row of rows) {
     const cname = String(row?.canonical_name || "");
     const gid = cnameToGameId.get(cname);
-    if (gid && !byGameId[gid]) {
+    if (!gid) continue;
+    const counts = {
+      market_count: Number(row.market_count || 0),
+      moneyline: Number(row.ml_count || 0),
+      spreads_1_5: Number(row.sp15_count || 0),
+      spreads_2_5: Number(row.sp25_count || 0),
+      totals_1_5: Number(row.to15_count || 0),
+      totals_2_5: Number(row.to25_count || 0),
+      totals_3_5: Number(row.to35_count || 0),
+      totals_4_5: Number(row.to45_count || 0),
+      btts: Number(row.btts_count || 0),
+    };
+    const isFullyPublished =
+      counts.moneyline >= 1 &&
+      counts.spreads_1_5 >= 2 &&
+      counts.spreads_2_5 >= 2 &&
+      counts.totals_1_5 >= 1 &&
+      counts.totals_2_5 >= 1 &&
+      counts.totals_3_5 >= 1 &&
+      counts.totals_4_5 >= 1 &&
+      counts.btts >= 1;
+    if (isFullyPublished && !byGameId[gid]) {
       existingGameIds.push(gid);
-      byGameId[gid] = { cname };
+      byGameId[gid] = { cname, counts };
+    } else if (!byGameId[gid]) {
+      // Record partial fixtures too — useful for diagnostics and could feed
+      // a future "Partial" UI affordance. Doesn't go into existing_game_ids
+      // so they remain selectable in the Builder.
+      byGameId[gid] = { cname, counts, partial: true };
     }
   }
 
