@@ -43,14 +43,120 @@ export async function fetchFixtures(leagueCode) {
   return res.json();
 }
 
-export async function publishBatch({ fixtures, submarkets, environment }) {
+export async function fetchLeagueFutures(
+  leagueCode,
+  { refresh = false, withReadiness = false } = {}
+) {
+  const params = new URLSearchParams({ league: leagueCode });
+  if (refresh) params.set("refresh", "1");
+  if (withReadiness) params.set("with_readiness", "1");
+  const res = await fetch(`${BASE}/api/futures/league?${params}`);
+  if (!res.ok) throw new Error(`fetchLeagueFutures(${leagueCode}) failed: ${res.status}`);
+  return res.json();
+}
+
+export async function prefetchLeagueFutures(leagueCode) {
+  const params = new URLSearchParams({ league: leagueCode });
+  const res = await fetch(`${BASE}/api/futures/prefetch?${params}`);
+  if (!res.ok) return { ok: false };
+  return res.json();
+}
+
+export async function fetchFutureTemplate(futureKey) {
+  const params = new URLSearchParams({ future_key: futureKey });
+  const res = await fetch(`${BASE}/api/futures/template?${params}`);
+  if (!res.ok) throw new Error(`fetchFutureTemplate failed: ${res.status}`);
+  return res.json();
+}
+
+export async function resolveFuturesCatalog({ environment, leagueCode, outcomeNames }) {
+  const res = await fetch(`${BASE}/api/futures/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      environment,
+      league_code: leagueCode,
+      outcome_names: outcomeNames,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+export async function publishFutures(envelope) {
+  const res = await fetch(`${BASE}/api/cms/publish-futures`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(envelope),
+  });
+  const data = await res.json();
+  if (!res.ok && res.status !== 202) {
+    const issues = data?.extras?.issues || [];
+    const detail = issues.length ? issues.join(", ") : data.error || `HTTP ${res.status}`;
+    throw new Error(`publishFutures failed: ${detail}`);
+  }
+  return data;
+}
+
+export async function previewFuture(input) {
+  const res = await fetch(`${BASE}/api/cms/preview-future`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const issues = data?.extras?.issues || [];
+    const detail = issues.length ? issues.join(", ") : data.error || `HTTP ${res.status}`;
+    throw new Error(`previewFuture failed: ${detail}`);
+  }
+  return data;
+}
+
+export async function publishFutureQuick(input) {
+  const res = await fetch(`${BASE}/api/cms/publish-future-quick`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = await res.json();
+  if (!res.ok && res.status !== 202) {
+    const issues = data?.extras?.issues || [];
+    const detail = issues.length ? issues.join(", ") : data.error || `HTTP ${res.status}`;
+    throw new Error(`publishFutureQuick failed: ${detail}`);
+  }
+  return data;
+}
+
+export async function fetchFuturesRun(runId) {
+  const res = await fetch(`${BASE}/api/cms/futures-runs/${encodeURIComponent(runId)}`);
+  if (!res.ok) throw new Error(`fetchFuturesRun(${runId}) failed: ${res.status}`);
+  return res.json();
+}
+
+export async function publishBatch({ fixtures, submarkets, environment, sport, perFixtureLines }) {
+  const body = { fixtures, submarkets, environment };
+  if (sport) body.sport = sport;
+  if (perFixtureLines && typeof perFixtureLines === "object") {
+    body.per_fixture_lines = perFixtureLines;
+  }
   const res = await fetch(`${BASE}/api/cms/batch-publish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fixtures, submarkets, environment }),
+    body: JSON.stringify(body),
   });
-  if (!res.ok && res.status !== 202) throw new Error(`publishBatch failed: ${res.status}`);
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && res.status !== 202) {
+    const details = Array.isArray(data?.details) ? data.details : [];
+    const detailText = details
+      .map((entry) => String(entry?.message || "").trim())
+      .filter(Boolean)
+      .join("; ");
+    const reason = detailText || String(data?.error || "").trim() || `HTTP ${res.status}`;
+    throw new Error(`publishBatch failed: ${reason}`);
+  }
+  return data;
 }
 
 // Given a list of schedule fixtures, returns which are already published in

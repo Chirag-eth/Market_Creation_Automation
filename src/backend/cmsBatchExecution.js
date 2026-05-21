@@ -29,15 +29,29 @@ export async function postCmsJson(cmsConfig, url, payload) {
   if (cmsConfig.bearerToken) {
     headers.Authorization = `Bearer ${cmsConfig.bearerToken}`;
   }
+  const timeoutMs = cmsConfig.timeoutMs || 30000;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), cmsConfig.timeoutMs || 8000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        cmsLog.error({ url, timeoutMs }, "cms post timed out");
+        const wrapped = new Error(
+          `${url} timed out after ${timeoutMs}ms (set CMS_PUBLISH_TIMEOUT_MS to override)`
+        );
+        wrapped.cmsCode = "timeout";
+        throw wrapped;
+      }
+      throw err;
+    }
     const text = await response.text();
     let body;
     try {
@@ -133,6 +147,61 @@ export function classifyExistingBatchParentMarketRows(
   });
 }
 
+export function validateBatchFixturesAgainstCatalog(
+  fixtures = [],
+  { leagues = [], teams = [] } = {}
+) {
+  const teamAliasIdx = buildTeamAliasIndex(Array.isArray(teams) ? teams : []);
+  const issues = [];
+
+  for (const fixture of Array.isArray(fixtures) ? fixtures : []) {
+    const fixtureKey = String(
+      fixture?.id ||
+        fixture?.gameId ||
+        fixture?.game_id ||
+        `${fixture?.home || ""} vs ${fixture?.away || ""}`
+    ).trim();
+    const leagueCode = String(fixture?.leagueCode || fixture?.league_code || "").trim();
+    const homeName = String(fixture?.home || fixture?.homeTeamName || "").trim();
+    const awayName = String(fixture?.away || fixture?.awayTeamName || "").trim();
+
+    const league = resolveBatchLeague(leagues, leagueCode);
+    if (!league) {
+      issues.push({
+        fixture_key: fixtureKey,
+        issue: "league_missing",
+        league_code: leagueCode,
+        message: `League not found in catalog for code "${leagueCode}"`,
+      });
+      continue;
+    }
+
+    const homeTeam = resolveBatchTeam(teamAliasIdx, homeName, league.id);
+    if (!homeTeam) {
+      issues.push({
+        fixture_key: fixtureKey,
+        issue: "home_team_missing",
+        league_code: leagueCode,
+        team_name: homeName,
+        message: `Home team "${homeName}" not found in catalog`,
+      });
+    }
+
+    const awayTeam = resolveBatchTeam(teamAliasIdx, awayName, league.id);
+    if (!awayTeam) {
+      issues.push({
+        fixture_key: fixtureKey,
+        issue: "away_team_missing",
+        league_code: leagueCode,
+        team_name: awayName,
+        message: `Away team "${awayName}" not found in catalog`,
+      });
+    }
+  }
+
+  return issues;
+}
+
 // ── New combined fixtures/create endpoint helpers ─────────────────────────────
 
 // Maps a fixture's schedule-provider key to the `source` value the new
@@ -144,6 +213,7 @@ export function mapProviderToCmsSource(provider) {
     .toLowerCase();
   if (p === "sportsdata") return "sports_data";
   if (p === "lsports-db" || p === "lsports-csv" || p === "lsports-sql") return "lsports";
+  if (p === "polymarket" || p === "gamma-polymarket") return "polymarket";
   return null;
 }
 
@@ -154,21 +224,61 @@ export function slugifyForCname(value) {
     .replace(/^-+|-+$/g, "");
 }
 
-// cname format: "{leagueCode}-{home alt-name slug}-{away alt-name slug}-{YYYY-MM-DD}".
-// Prefers each team's catalog alternate_name; falls back to name, then to the
-// raw home/away string from the fixture if no team object was resolved.
+// cname format: "{leagueCode}-{home code}-{away code}-{YYYY-MM-DD}".
+// Prefers each team's catalog code (3-letter); falls back to alternate_name,
+// then name, then the raw home/away string from the fixture.
 export function buildFixtureCreateCname(fixture, homeTeam, awayTeam) {
-  const date = String(fixture?.kickoff || fixture?.kickoffIso || "").slice(0, 10);
+  const iso = String(fixture?.kickoff || fixture?.kickoffIso || "");
+  const date = iso.slice(0, 10);
   const home = slugifyForCname(
-    homeTeam?.alternateName || homeTeam?.name || fixture?.home || fixture?.homeTeamName || ""
+    homeTeam?.code ||
+      homeTeam?.alternateName ||
+      homeTeam?.name ||
+      fixture?.home ||
+      fixture?.homeTeamName ||
+      ""
   );
   const away = slugifyForCname(
-    awayTeam?.alternateName || awayTeam?.name || fixture?.away || fixture?.awayTeamName || ""
+    awayTeam?.code ||
+      awayTeam?.alternateName ||
+      awayTeam?.name ||
+      fixture?.away ||
+      fixture?.awayTeamName ||
+      ""
   );
   const league = String(fixture?.leagueCode || "")
     .trim()
     .toLowerCase();
   return [league, home, away, date].filter(Boolean).join("-");
+}
+
+// Old cname shape with a trailing `-{HHMM}` kickoff time. Retained only so
+// `/api/cms/check-existing` can still detect fixtures published before the
+// format change. New publishes never emit this form.
+export function buildFixtureCreateCnameLegacy(fixture, homeTeam, awayTeam) {
+  const iso = String(fixture?.kickoff || fixture?.kickoffIso || "");
+  const date = iso.slice(0, 10);
+  const time = iso.slice(11, 16).replace(":", "");
+  const home = slugifyForCname(
+    homeTeam?.code ||
+      homeTeam?.alternateName ||
+      homeTeam?.name ||
+      fixture?.home ||
+      fixture?.homeTeamName ||
+      ""
+  );
+  const away = slugifyForCname(
+    awayTeam?.code ||
+      awayTeam?.alternateName ||
+      awayTeam?.name ||
+      fixture?.away ||
+      fixture?.awayTeamName ||
+      ""
+  );
+  const league = String(fixture?.leagueCode || "")
+    .trim()
+    .toLowerCase();
+  return [league, home, away, date, time].filter(Boolean).join("-");
 }
 
 // Translates an internal pipe-delimited publish key (e.g. "spreads|1.5|home")
@@ -211,6 +321,16 @@ export async function postCmsFixtureCreate(cmsConfig, body, log) {
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      const wrapped = new Error(
+        `fixtures/create timed out after ${cmsConfig.timeoutMs}ms (set CMS_PUBLISH_TIMEOUT_MS to override)`
+      );
+      wrapped.cmsCode = "timeout";
+      log.error({ url, timeoutMs: cmsConfig.timeoutMs }, "fixtures/create timed out");
+      throw wrapped;
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }
@@ -415,17 +535,26 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
     const awayName = fixture.away || fixture.awayTeamName || "";
     const eventName = [homeName, awayName].filter(Boolean).join(" vs ");
 
+    // Per-fixture publish keys (custom-line sports) override the run-level
+    // publishKeys array. Sports with a fixed catalog (soccer) inherit the
+    // global list.
+    const effectivePublishKeys =
+      Array.isArray(fixture.publishKeys) && fixture.publishKeys.length > 0
+        ? fixture.publishKeys
+        : publishKeys;
+
     log.info(
       {
         eventName,
         fixtureId: fixture.id,
         leagueCode: fixture.leagueCode,
         kickoff: fixture.kickoff,
+        publishKeyCount: effectivePublishKeys.length,
       },
       "processing fixture"
     );
 
-    // ── New combined fixtures/create endpoint for sportsdata / lsports ──
+    // ── New combined fixtures/create endpoint for sportsdata / lsports / polymarket ──
     const newSource = mapProviderToCmsSource(fixture.provider || fixture.source);
     if (newSource) {
       const gameId = String(
@@ -443,7 +572,9 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
         : null;
       const parentMarkets = [
         ...new Set(
-          publishKeys.map((k) => publishKeyToParentMarketKey(k, homeName, awayName)).filter(Boolean)
+          effectivePublishKeys
+            .map((k) => publishKeyToParentMarketKey(k, homeName, awayName))
+            .filter(Boolean)
         ),
       ];
       const cname = buildFixtureCreateCname(fixture, cnameHomeTeam, cnameAwayTeam);
@@ -456,7 +587,7 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
           event_name: eventName,
           status: "failed",
           reason: "Fixture has no game_id; cannot use fixtures/create.",
-          markets: publishKeys.map((k) => ({ publish_key: k, status: "failed" })),
+          markets: effectivePublishKeys.map((k) => ({ publish_key: k, status: "failed" })),
         });
         continue;
       }
@@ -482,7 +613,7 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
           fixture_key: fixture.id || eventName,
           event_name: eventName,
           status: "completed",
-          markets: publishKeys.map((k) => ({ publish_key: k, status: "published" })),
+          markets: effectivePublishKeys.map((k) => ({ publish_key: k, status: "published" })),
           payloads: {
             fixture_create: {
               game_id: gameId,
@@ -509,7 +640,7 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
             event_name: eventName,
             status: "existing",
             reason: "Already published in CMS (canonical_name conflict)",
-            markets: publishKeys.map((k) => ({ publish_key: k, status: "existing" })),
+            markets: effectivePublishKeys.map((k) => ({ publish_key: k, status: "existing" })),
             payloads: {
               fixture_create: {
                 game_id: gameId,
@@ -529,7 +660,7 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
           event_name: eventName,
           status: "failed",
           reason: String(err?.message || err),
-          markets: publishKeys.map((k) => ({ publish_key: k, status: "failed" })),
+          markets: effectivePublishKeys.map((k) => ({ publish_key: k, status: "failed" })),
         });
       }
       continue;
@@ -740,7 +871,7 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
       const marketResults = [];
       const savedParentPayloads = {};
 
-      for (const publishKey of publishKeys) {
+      for (const publishKey of effectivePublishKeys) {
         const [family, line, side] = publishKey.split("|");
         log.debug(
           { publishKey, family, line: line || "0", side: side || "-" },
@@ -863,7 +994,7 @@ export async function executeCmsBatchRun(runId, fixtures, publishKeys, activePro
         event_name: eventName,
         status: "failed",
         reason: String(err?.message || err),
-        markets: publishKeys.map((key) => ({ publish_key: key, status: "failed" })),
+        markets: effectivePublishKeys.map((key) => ({ publish_key: key, status: "failed" })),
       });
     }
   }

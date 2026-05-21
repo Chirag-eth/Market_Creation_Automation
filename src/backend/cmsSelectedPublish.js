@@ -1,12 +1,15 @@
 import { InvalidIntegrationPayloadError, redactSecrets } from "./publisherCore.js";
+import { getSportDefinition, getDefaultSportCode } from "../shared/sportRegistry.js";
 
 export const CMS_SELECTED_PUBLISHABLE_KEYS = Object.freeze([
   "moneyline|0",
   "btts|0",
+  "totals|0.5",
   "totals|1.5",
   "totals|2.5",
   "totals|3.5",
   "totals|4.5",
+  "totals|5.5",
   "spreads|1.5|home",
   "spreads|1.5|away",
   "spreads|2.5|home",
@@ -17,22 +20,46 @@ const CMS_SELECTED_PUBLISHABLE_KEY_SET = new Set(CMS_SELECTED_PUBLISHABLE_KEYS);
 const CMS_PARENT_MARKET_EXPECTED_COUNTS = Object.freeze({
   "moneyline|0": 3,
   "btts|0": 1,
+  "totals|0.5": 1,
   "totals|1.5": 1,
   "totals|2.5": 1,
   "totals|3.5": 1,
   "totals|4.5": 1,
+  "totals|5.5": 1,
   "spreads|1.5|home": 1,
   "spreads|1.5|away": 1,
   "spreads|2.5|home": 1,
   "spreads|2.5|away": 1,
 });
 
-export function isSupportedCmsPublishKey(value) {
-  return CMS_SELECTED_PUBLISHABLE_KEY_SET.has(
-    String(value || "")
+// Shape regex for sports with operator-picked lines (NBA/NFL). Matches
+// moneyline|0, totals|<num>, spreads|<num>|home, spreads|<num>|away.
+// Number may be an integer or decimal (e.g. 216, 11.5, 222.5).
+const CUSTOM_LINE_PUBLISH_KEY_RE =
+  /^(moneyline\|0|totals\|\d+(?:\.\d+)?|spreads\|\d+(?:\.\d+)?\|(?:home|away))$/;
+
+/**
+ * Validates a publish key. Soccer (and the legacy default) uses a strict
+ * whitelist of 10 keys. Custom-line sports (NBA/NFL) accept any (family, line,
+ * side?) tuple that matches the canonical shape.
+ *
+ * Backwards-compatible: callers that don't pass `sport` get the legacy
+ * whitelist check.
+ */
+export function isSupportedCmsPublishKey(value, { sport } = {}) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return false;
+  const sportCode =
+    String(sport || "")
       .trim()
-      .toLowerCase()
-  );
+      .toLowerCase() || getDefaultSportCode();
+  const sportDef = getSportDefinition(sportCode);
+  if (sportDef?.submarketCatalog?.customLines) {
+    return CUSTOM_LINE_PUBLISH_KEY_RE.test(normalized);
+  }
+  return CMS_SELECTED_PUBLISHABLE_KEY_SET.has(normalized);
 }
 
 export function normalizeCmsSelectedFixture(value = {}) {
@@ -78,9 +105,12 @@ export function normalizeCmsSelectedPublishEnvelope(payload = {}) {
     String(data.force_republish || "")
       .trim()
       .toLowerCase() === "true";
+  const sport = String(data.sport || selectedFixture.sport || "")
+    .trim()
+    .toLowerCase();
   const selectedPublishItems = normalizeSelectedPublishItems(
     data.selected_publish_items || data.selectedPublishItems,
-    { selectedFixture, fixturePayload }
+    { selectedFixture, fixturePayload, sport }
   );
 
   return {
@@ -91,12 +121,13 @@ export function normalizeCmsSelectedPublishEnvelope(payload = {}) {
     typeReferencePayload,
     selectedPublishItems,
     forceRepublish,
+    sport,
   };
 }
 
 export function normalizeSelectedPublishItems(
   value,
-  { selectedFixture = {}, fixturePayload = null } = {}
+  { selectedFixture = {}, fixturePayload = null, sport = "" } = {}
 ) {
   const items = Array.isArray(value) ? value : [];
   const out = [];
@@ -113,7 +144,7 @@ export function normalizeSelectedPublishItems(
         selectedFixture,
         fixturePayload,
       });
-    if (!publishKey || !isSupportedCmsPublishKey(publishKey) || !parentMarketPayload) {
+    if (!publishKey || !isSupportedCmsPublishKey(publishKey, { sport }) || !parentMarketPayload) {
       continue;
     }
     out.push({

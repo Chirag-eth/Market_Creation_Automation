@@ -13,6 +13,16 @@ import {
 } from "./src/backend/catalogSourceContract.js";
 import { normalizeLeagueStartWindows } from "./src/backend/catalogTimeWindows.js";
 import { getBackendFixtureSourceAdapter } from "./src/backend/fixtureSources/index.js";
+import { fetchPolymarketLeagueFutures } from "./src/backend/fixtureSources/polymarketFutures.js";
+import {
+  loadFuturesCatalog,
+  resolveLeagueFutureCatalog,
+  executeFuturesPublish,
+  evaluateFutureReadiness,
+  buildQuickPublishEnvelope,
+  renderFutureFromEnvelope,
+} from "./src/backend/cmsFuturesExecution.js";
+import { getFutureRuleTemplate } from "./src/backend/futureRuleTemplates.js";
 import {
   buildSportsDataRuntimeConfig,
   createSportsDataScheduleSupportMetadata,
@@ -30,6 +40,7 @@ import {
 import {
   createCmsBatchRunRecord,
   SUBMARKET_TO_PUBLISH_KEYS,
+  expandSelectedPublishKeys,
 } from "./src/backend/cmsBatchPublish.js";
 import { createDbPool, discoverSchema } from "./src/backend/dbClient.js";
 import { queryCatalogRowsFromDb } from "./src/backend/catalogDb.js";
@@ -41,7 +52,9 @@ import {
   resolveLeagueScheduleCode,
   getLeagueScheduleDefinition,
   getLeagueScheduleDefinitions,
+  getSportForLeagueCode,
 } from "./src/shared/leagueRegistry.js";
+import { getSportDefinition } from "./src/shared/sportRegistry.js";
 import {
   resolveBatchLeague,
   resolveBatchTeam,
@@ -69,9 +82,11 @@ import {
   classifyExistingBatchParentMarketRows,
   deriveBatchFixtureStatusFromMarkets,
   deriveBatchRunStatusFromFixtures,
+  validateBatchFixturesAgainstCatalog,
   mapProviderToCmsSource,
   publishKeyToParentMarketKey,
   buildFixtureCreateCname,
+  buildFixtureCreateCnameLegacy,
   postCmsFixtureCreate,
 } from "./src/backend/cmsBatchExecution.js";
 import { createVaultAutomationConfig } from "./src/backend/vaultAutomationConfig.js";
@@ -300,6 +315,7 @@ const SECURITY_HEADERS = {
 let catalogCache = null;
 const apiRateCounters = new Map();
 const batchRunStore = new Map();
+const futuresRunStore = new Map();
 let OPENAPI_SPEC = null;
 let OPENAPI_YAML = null;
 
@@ -544,6 +560,47 @@ const server = http.createServer(async (req, res) => {
 
     if (requestUrl.pathname === "/api/schedules/upcoming") {
       await handleUpcomingScheduleRequest(requestUrl, res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/futures/league") {
+      await handleLeagueFuturesRequest(requestUrl, res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/futures/prefetch") {
+      await handleLeagueFuturesPrefetchRequest(requestUrl, res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/futures/resolve") {
+      await handleFuturesResolveRequest(req, res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/futures/template") {
+      handleFutureTemplateRequest(requestUrl, res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/cms/publish-futures") {
+      await handleCmsPublishFuturesRequest(req, res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/cms/publish-future-quick") {
+      await handleCmsPublishFutureQuickRequest(req, res);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/cms/preview-future") {
+      await handleCmsPreviewFutureRequest(req, res);
+      return;
+    }
+
+    if (requestUrl.pathname.startsWith("/api/cms/futures-runs/")) {
+      const runId = requestUrl.pathname.slice("/api/cms/futures-runs/".length);
+      handleCmsFuturesRunRequest(runId, res);
       return;
     }
 
@@ -1335,6 +1392,13 @@ async function handleCmsBatchPublishRequest(req, res) {
 
   const fixtures = Array.isArray(payload?.fixtures) ? payload.fixtures : [];
   const submarkets = Array.isArray(payload?.submarkets) ? payload.submarkets : [];
+  const requestSport = String(payload?.sport || "")
+    .trim()
+    .toLowerCase();
+  const perFixtureLines =
+    payload?.per_fixture_lines && typeof payload.per_fixture_lines === "object"
+      ? payload.per_fixture_lines
+      : {};
 
   batchLog.info(
     {
@@ -1345,8 +1409,10 @@ async function handleCmsBatchPublishRequest(req, res) {
         home: f.home,
         away: f.away,
         league: f.leagueCode,
+        sport: f.sport || requestSport || null,
       })),
       submarkets,
+      sport: requestSport || null,
     },
     "publish request received"
   );
@@ -1362,10 +1428,35 @@ async function handleCmsBatchPublishRequest(req, res) {
     return;
   }
 
-  const publishKeys = [...new Set(submarkets.flatMap((s) => SUBMARKET_TO_PUBLISH_KEYS[s] || []))];
+  // Compute publishKeys per fixture, sport-aware. Soccer fixtures all get the
+  // same list (back-compat with the global flatMap of SUBMARKET_TO_PUBLISH_KEYS);
+  // custom-line sports (NBA/NFL) consult per_fixture_lines[fixtureKey].
+  const enrichedFixtures = fixtures.map((f) => {
+    const fixtureSport =
+      String(f?.sport || "")
+        .trim()
+        .toLowerCase() ||
+      requestSport ||
+      "soccer";
+    const fixtureKey = String(f?.id || f?.gameId || f?.game_id || "").trim();
+    const keys = expandSelectedPublishKeys({
+      sport: fixtureSport,
+      submarketIds: submarkets,
+      perFixtureLines,
+      fixtureKey,
+    });
+    return { ...f, sport: fixtureSport, publishKeys: keys };
+  });
+
+  // Union of all per-fixture publishKeys, for run-record logging and as the
+  // fallback global list executeCmsBatchRun consults when a fixture doesn't
+  // carry its own.
+  const publishKeys = [...new Set(enrichedFixtures.flatMap((f) => f.publishKeys || []))];
   if (!publishKeys.length) {
-    batchLog.warn({ submarkets }, "no publish keys mapped from submarkets");
-    sendJson(res, 400, { error: "None of the provided submarkets map to known CMS publish keys." });
+    batchLog.warn({ submarkets, sport: requestSport }, "no publish keys mapped from submarkets");
+    sendJson(res, 400, {
+      error: "None of the provided submarkets map to known CMS publish keys.",
+    });
     return;
   }
 
@@ -1373,6 +1464,42 @@ async function handleCmsBatchPublishRequest(req, res) {
   const activeProfile = requestedEnvCode
     ? getRuntimeEnvironmentProfile(requestedEnvCode)
     : getActiveRuntimeEnvironmentProfile();
+
+  const dbPool = getDbPoolForEnv(activeProfile.env);
+  if (dbPool) {
+    try {
+      const dbCatalog = await queryCatalogRowsFromDb(dbPool);
+      const catalogLeagues = normalizeLeagueRows(dbCatalog.leagues || []);
+      const catalogTeams = normalizeTeamRows(dbCatalog.teams || [], catalogLeagues);
+      const catalogIssues = validateBatchFixturesAgainstCatalog(fixtures, {
+        leagues: catalogLeagues,
+        teams: catalogTeams,
+      });
+      if (catalogIssues.length > 0) {
+        batchLog.warn(
+          {
+            env: { code: activeProfile.code, label: activeProfile.label },
+            issues: catalogIssues,
+          },
+          "publish rejected: fixtures unsupported in active environment catalog"
+        );
+        sendJson(res, 400, {
+          error: `One or more fixtures cannot be published in ${activeProfile.label} because the environment catalog is missing the required league or teams.`,
+          details: catalogIssues,
+        });
+        return;
+      }
+    } catch (err) {
+      batchLog.warn(
+        {
+          err: String(err?.message || err),
+          env: { code: activeProfile.code, label: activeProfile.label },
+        },
+        "batch preflight catalog validation failed; proceeding to executor"
+      );
+    }
+  }
+
   const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   batchLog.info(
@@ -1390,14 +1517,14 @@ async function handleCmsBatchPublishRequest(req, res) {
     runId,
     requestId: runId,
     environment: { code: activeProfile.code, label: activeProfile.label },
-    selectedFixtures: fixtures,
+    selectedFixtures: enrichedFixtures,
     selectedPublishKeys: publishKeys,
     operatorName: "operator",
   });
   batchRunStore.set(runId, runRecord);
 
   // Kick off async without blocking the response
-  executeCmsBatchRun(runId, fixtures, publishKeys, activeProfile, {
+  executeCmsBatchRun(runId, enrichedFixtures, publishKeys, activeProfile, {
     runStore: batchRunStore,
     getDbPoolForEnv,
     getCatalogPayloadCached,
@@ -1476,7 +1603,10 @@ async function handleCmsCheckExistingRequest(req, res) {
   }
   const teamAliasIdx = batchTeams ? buildTeamAliasIndex(batchTeams) : null;
 
-  const cnameToGameId = new Map();
+  // Map cname → { gameId, sport, expectedLines }. We index by both the
+  // current and legacy cname shape so fixtures published under either
+  // resolve to the same fixture context.
+  const cnameToFixture = new Map();
   for (const fx of inputFixtures) {
     const gameId = String(fx?.game_id || fx?.gameId || "").trim();
     if (!gameId) continue;
@@ -1486,6 +1616,14 @@ async function handleCmsCheckExistingRequest(req, res) {
       .trim()
       .toLowerCase();
     const kickoff = String(fx?.kickoff || fx?.kickoffIso || "").trim();
+    const sportCode =
+      String(fx?.sport || "")
+        .trim()
+        .toLowerCase() ||
+      getSportForLeagueCode(leagueCode) ||
+      "soccer";
+    const expectedLines =
+      fx?.expected_lines && typeof fx.expected_lines === "object" ? fx.expected_lines : null;
 
     let homeTeam = null;
     let awayTeam = null;
@@ -1496,16 +1634,19 @@ async function handleCmsCheckExistingRequest(req, res) {
         awayTeam = resolveBatchTeam(teamAliasIdx, awayName, lg.id);
       }
     }
-    const cname = buildFixtureCreateCname(
-      { kickoff, leagueCode, home: homeName, away: awayName },
-      homeTeam,
-      awayTeam
-    );
-    if (!cname) continue;
-    // First write wins — duplicate game_ids in input shouldn't happen but
-    // if they do we keep the first.
-    if (!cnameToGameId.has(cname)) cnameToGameId.set(cname, gameId);
+    const fixtureLike = { kickoff, leagueCode, home: homeName, away: awayName };
+    const cname = buildFixtureCreateCname(fixtureLike, homeTeam, awayTeam);
+    const legacyCname = buildFixtureCreateCnameLegacy(fixtureLike, homeTeam, awayTeam);
+    const ctx = { gameId, sport: sportCode, expectedLines };
+    if (cname && !cnameToFixture.has(cname)) cnameToFixture.set(cname, ctx);
+    if (legacyCname && legacyCname !== cname && !cnameToFixture.has(legacyCname)) {
+      cnameToFixture.set(legacyCname, ctx);
+    }
   }
+  // Legacy alias kept for downstream code that wants just gid lookup.
+  const cnameToGameId = new Map(
+    [...cnameToFixture.entries()].map(([cname, ctx]) => [cname, ctx.gameId])
+  );
 
   const cnames = Array.from(cnameToGameId.keys());
   if (cnames.length === 0) {
@@ -1566,12 +1707,13 @@ async function handleCmsCheckExistingRequest(req, res) {
     return;
   }
 
-  const existingGameIds = [];
+  const existingSet = new Set();
   const byGameId = {};
   for (const row of rows) {
     const cname = String(row?.canonical_name || "");
-    const gid = cnameToGameId.get(cname);
-    if (!gid) continue;
+    const ctx = cnameToFixture.get(cname);
+    if (!ctx) continue;
+    const gid = ctx.gameId;
     const counts = {
       market_count: Number(row.market_count || 0),
       moneyline: Number(row.ml_count || 0),
@@ -1583,6 +1725,21 @@ async function handleCmsCheckExistingRequest(req, res) {
       totals_4_5: Number(row.to45_count || 0),
       btts: Number(row.btts_count || 0),
     };
+    // Sport-aware "fully published" predicate. Soccer keeps the historical
+    // 10-PM gate. Custom-line sports (NBA/NFL) don't have a canonical set, so
+    // we treat any markets at all as "ever published" (minimum honest
+    // answer); operator-supplied expected_lines can refine this later.
+    const sport = String(ctx.sport || "soccer").toLowerCase();
+    const isCustomLineSport = sport === "nba" || sport === "nfl";
+    if (isCustomLineSport) {
+      if (counts.market_count > 0) {
+        existingSet.add(gid);
+        byGameId[gid] = { cname, counts };
+      } else if (!byGameId[gid]) {
+        byGameId[gid] = { cname, counts, partial: true };
+      }
+      continue;
+    }
     const isFullyPublished =
       counts.moneyline >= 1 &&
       counts.spreads_1_5 >= 2 &&
@@ -1592,16 +1749,17 @@ async function handleCmsCheckExistingRequest(req, res) {
       counts.totals_3_5 >= 1 &&
       counts.totals_4_5 >= 1 &&
       counts.btts >= 1;
-    if (isFullyPublished && !byGameId[gid]) {
-      existingGameIds.push(gid);
+    // A fixture can map to two cnames (new + legacy) since the cname format
+    // changed; a fully-published row under either shape must win over a
+    // partial row, regardless of which one the DB returns first.
+    if (isFullyPublished) {
+      existingSet.add(gid);
       byGameId[gid] = { cname, counts };
     } else if (!byGameId[gid]) {
-      // Record partial fixtures too — useful for diagnostics and could feed
-      // a future "Partial" UI affordance. Doesn't go into existing_game_ids
-      // so they remain selectable in the Builder.
       byGameId[gid] = { cname, counts, partial: true };
     }
   }
+  const existingGameIds = Array.from(existingSet);
 
   sendJson(res, 200, {
     ok: true,
@@ -2714,6 +2872,363 @@ function handleScheduleStatusRequest(res) {
   sendJson(res, 200, { leagues: getScheduleCacheSnapshot() });
 }
 
+async function handleLeagueFuturesRequest(requestUrl, res) {
+  const requestedLeague = String(requestUrl.searchParams.get("league") || "")
+    .trim()
+    .toLowerCase();
+  const leagueCode = normalizeScheduleLeagueCode(requestedLeague);
+  if (!leagueCode) {
+    sendJson(res, 400, {
+      error: "Unsupported league",
+      detail: "Pass ?league=<code> matching a supported league.",
+    });
+    return;
+  }
+
+  const withReadiness = requestUrl.searchParams.get("with_readiness") === "1";
+
+  try {
+    const envVars = getActiveRuntimeEnvVars();
+    const result = await fetchPolymarketLeagueFutures({
+      leagueCode,
+      env: envVars,
+      forceRefresh: requestUrl.searchParams.get("refresh") === "1",
+    });
+
+    let futures = result.futures;
+    if (withReadiness && Array.isArray(futures) && futures.length > 0) {
+      // Heavy step: load the env's catalog ONCE so per-future readiness
+      // checks are cheap. Don't fail the whole response if catalog load
+      // breaks — fall back to no-readiness so the UI can still render.
+      try {
+        const pool = getDbPoolForEnv(envVars);
+        const catalog = await loadFuturesCatalog(envVars, pool);
+        futures = futures.map((f) => ({
+          ...f,
+          readiness: evaluateFutureReadiness({ future: f, leagueCode, catalog }),
+        }));
+      } catch (err) {
+        cmsLog.warn(
+          { err: String(err?.message || err), league: leagueCode },
+          "readiness eval failed; serving futures without readiness"
+        );
+      }
+    }
+
+    sendJson(
+      res,
+      200,
+      {
+        ok: true,
+        league: leagueCode,
+        source: "polymarket",
+        futures,
+        cached: Boolean(result.cached),
+        ...(result.reason ? { reason: result.reason } : {}),
+      },
+      { "Cache-Control": "no-store" }
+    );
+  } catch (error) {
+    sendJson(res, 502, {
+      error: "Failed to load league futures",
+      detail: String(error?.message || error),
+      league: leagueCode,
+    });
+  }
+}
+
+function handleFutureTemplateRequest(requestUrl, res) {
+  const futureKey = String(requestUrl.searchParams.get("future_key") || "").trim();
+  const template = getFutureRuleTemplate(futureKey);
+  sendJson(res, 200, { ok: true, future_key: futureKey, template });
+}
+
+async function handleFuturesResolveRequest(req, res) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+    return;
+  }
+  let payload;
+  try {
+    payload = await readJsonRequestBody(req, { maxBytes: 256 * 1024 });
+  } catch (err) {
+    sendJson(res, 400, {
+      ok: false,
+      error: "Invalid JSON body",
+      detail: String(err?.message || err),
+    });
+    return;
+  }
+  const leagueCode = String(payload?.league_code || "")
+    .trim()
+    .toLowerCase();
+  const outcomeNames = Array.isArray(payload?.outcome_names) ? payload.outcome_names : [];
+  if (!leagueCode || outcomeNames.length === 0) {
+    sendJson(res, 400, {
+      ok: false,
+      error: "Missing fields",
+      extras: { issues: ["league_code", "outcome_names"] },
+    });
+    return;
+  }
+  const envCode = String(payload?.environment || "").trim();
+  const activeProfile = envCode
+    ? getRuntimeEnvironmentProfile(envCode)
+    : getActiveRuntimeEnvironmentProfile();
+  const pool = getDbPoolForEnv(activeProfile.env);
+  try {
+    const catalog = await loadFuturesCatalog(activeProfile.env, pool);
+    const result = resolveLeagueFutureCatalog({ leagueCode, outcomeNames, catalog });
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    sendJson(res, 502, {
+      ok: false,
+      error: "Resolve failed",
+      detail: String(err?.message || err),
+    });
+  }
+}
+
+async function handleCmsPublishFuturesRequest(req, res) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+    return;
+  }
+  let envelope;
+  try {
+    envelope = await readJsonRequestBody(req, { maxBytes: 1024 * 1024 });
+  } catch (err) {
+    sendJson(res, 400, {
+      ok: false,
+      error: "Invalid JSON body",
+      detail: String(err?.message || err),
+    });
+    return;
+  }
+
+  const issues = [];
+  if (!envelope?.environment) issues.push("environment");
+  if (!envelope?.league_code) issues.push("league_code");
+  if (!envelope?.future_key) issues.push("future_key");
+  if (!envelope?.title) issues.push("title");
+  if (!envelope?.parent_rules) issues.push("parent_rules");
+  if (!envelope?.market_code_template) issues.push("market_code_template");
+  if (!envelope?.market_rules_template) issues.push("market_rules_template");
+  if (!envelope?.markets_open_time) issues.push("markets_open_time");
+  if (!envelope?.season) issues.push("season");
+  if (!Array.isArray(envelope?.selected_outcomes) || envelope.selected_outcomes.length === 0) {
+    issues.push("selected_outcomes");
+  }
+  const mode = String(envelope?.mode || "").trim();
+  if (mode !== "single-winner" && mode !== "multi-winner") issues.push("mode");
+  if (issues.length > 0) {
+    sendJson(res, 400, { ok: false, error: "Invalid envelope", extras: { issues } });
+    return;
+  }
+
+  // Dev-only gate for v1. UAT/mainnet require explicit follow-up wiring; this
+  // protects the existing memory rule against mainnet writes.
+  if (String(envelope.environment).toLowerCase() !== "dev") {
+    sendJson(res, 400, {
+      ok: false,
+      error: "Futures publishing is gated to environment=dev for v1",
+    });
+    return;
+  }
+
+  const activeProfile = getRuntimeEnvironmentProfile("dev");
+  const pool = getDbPoolForEnv(activeProfile.env);
+  const runId = randomUUID();
+  const record = {
+    run_id: runId,
+    status: "queued",
+    environment: "dev",
+    league_code: envelope.league_code,
+    future_key: envelope.future_key,
+    polymarket_event_id: envelope.polymarket_event_id || null,
+    mode,
+    started_at: null,
+    completed_at: null,
+    markets: [],
+  };
+  futuresRunStore.set(runId, record);
+  sendJson(res, 202, { ok: true, run_id: runId, status: "queued" });
+
+  // Run async; mutate record in place. Failures captured into record.
+  executeFuturesPublish({
+    envelope: { ...envelope, mode },
+    record,
+    envVars: activeProfile.env,
+    dbPool: pool,
+  }).catch((err) => {
+    record.status = "failed";
+    record.detail = String(err?.message || err);
+    record.completed_at = new Date().toISOString();
+  });
+}
+
+function handleCmsFuturesRunRequest(runId, res) {
+  const record = futuresRunStore.get(runId);
+  if (!record) {
+    sendJson(res, 404, { ok: false, error: "Run not found", run_id: runId });
+    return;
+  }
+  sendJson(res, 200, { ok: true, run: record });
+}
+
+// Dry-run preview: returns the fully-rendered parent_market + markets that
+// /api/cms/publish-future-quick would POST, without doing any CMS calls or DB
+// writes. Lets the dashboard show operators exactly what they'd publish before
+// they click the button.
+async function handleCmsPreviewFutureRequest(req, res) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+    return;
+  }
+  let input;
+  try {
+    input = await readJsonRequestBody(req, { maxBytes: 512 * 1024 });
+  } catch (err) {
+    sendJson(res, 400, {
+      ok: false,
+      error: "Invalid JSON body",
+      detail: String(err?.message || err),
+    });
+    return;
+  }
+
+  const built = buildQuickPublishEnvelope({ input });
+  if (!built.ok) {
+    sendJson(res, 400, { ok: false, error: "Invalid envelope", extras: { issues: built.issues } });
+    return;
+  }
+
+  const envCode = String(input?.environment || "").trim() || "dev";
+  const activeProfile = getRuntimeEnvironmentProfile(envCode);
+  const pool = getDbPoolForEnv(activeProfile.env);
+  let catalog;
+  try {
+    catalog = await loadFuturesCatalog(activeProfile.env, pool);
+  } catch (err) {
+    sendJson(res, 502, {
+      ok: false,
+      error: "Catalog load failed",
+      detail: String(err?.message || err),
+    });
+    return;
+  }
+
+  const rendered = renderFutureFromEnvelope({ envelope: built.envelope, catalog });
+  if (!rendered.ok) {
+    sendJson(res, 400, { ok: false, error: "Render failed", extras: { issues: rendered.issues } });
+    return;
+  }
+  sendJson(res, 200, {
+    ok: true,
+    league: rendered.league,
+    canonical_name: rendered.canonical_name,
+    parent_market: rendered.parent_market,
+    markets: rendered.markets,
+    mode: rendered.mode,
+    post_count: rendered.post_count,
+    envelope: built.envelope,
+  });
+}
+
+async function handleCmsPublishFutureQuickRequest(req, res) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { ok: false, error: "Method not allowed" }, { Allow: "POST" });
+    return;
+  }
+  let input;
+  try {
+    input = await readJsonRequestBody(req, { maxBytes: 512 * 1024 });
+  } catch (err) {
+    sendJson(res, 400, {
+      ok: false,
+      error: "Invalid JSON body",
+      detail: String(err?.message || err),
+    });
+    return;
+  }
+
+  // Dev-only for v1, matching the Configure-path gate.
+  if (String(input?.environment || "").toLowerCase() !== "dev") {
+    sendJson(res, 400, {
+      ok: false,
+      error: "Futures publishing is gated to environment=dev for v1",
+    });
+    return;
+  }
+
+  const built = buildQuickPublishEnvelope({ input });
+  if (!built.ok) {
+    sendJson(res, 400, { ok: false, error: "Invalid envelope", extras: { issues: built.issues } });
+    return;
+  }
+
+  const activeProfile = getRuntimeEnvironmentProfile("dev");
+  const pool = getDbPoolForEnv(activeProfile.env);
+  const runId = randomUUID();
+  const record = {
+    run_id: runId,
+    status: "queued",
+    environment: "dev",
+    league_code: built.envelope.league_code,
+    future_key: built.envelope.future_key,
+    polymarket_event_id: built.envelope.polymarket_event_id || null,
+    mode: built.envelope.mode,
+    quick: true,
+    started_at: null,
+    completed_at: null,
+    markets: [],
+  };
+  futuresRunStore.set(runId, record);
+  sendJson(res, 202, { ok: true, run_id: runId, status: "queued" });
+
+  executeFuturesPublish({
+    envelope: built.envelope,
+    record,
+    envVars: activeProfile.env,
+    dbPool: pool,
+  }).catch((err) => {
+    record.status = "failed";
+    record.detail = String(err?.message || err);
+    record.completed_at = new Date().toISOString();
+  });
+}
+
+async function handleLeagueFuturesPrefetchRequest(requestUrl, res) {
+  const requestedLeague = String(requestUrl.searchParams.get("league") || "")
+    .trim()
+    .toLowerCase();
+  const leagueCode = normalizeScheduleLeagueCode(requestedLeague);
+  if (!leagueCode) {
+    sendJson(res, 400, {
+      error: "Unsupported league",
+      detail: "Pass ?league=<code> matching a supported league.",
+    });
+    return;
+  }
+  try {
+    const result = await fetchPolymarketLeagueFutures({
+      leagueCode,
+      env: getActiveRuntimeEnvVars(),
+    });
+    sendJson(res, 200, {
+      ok: true,
+      league: leagueCode,
+      prefetched: (result.futures || []).length,
+    });
+  } catch (error) {
+    sendJson(res, 502, {
+      error: "Failed to prefetch league futures",
+      detail: String(error?.message || error),
+      league: leagueCode,
+    });
+  }
+}
+
 async function handleAllSchedulesRequest(res) {
   const payload = await getAllSchedulesPayload(schedCtx);
   sendJson(res, 200, payload);
@@ -2838,11 +3353,18 @@ async function handleScheduleLeaguesRequest(res) {
   }
 
   const supportLeagueMap = new Map((support.leagues || []).map((l) => [l.code, l]));
-  const leagues = getLeagueScheduleDefinitions().map((def) => ({
-    code: def.code,
-    label: def.label,
-    source: supportLeagueMap.get(def.code)?.config_source || "gamma-polymarket",
-  }));
+  const leagues = getLeagueScheduleDefinitions().map((def) => {
+    const sportCode = def.sport || "";
+    const sportDef = sportCode ? getSportDefinition(sportCode) : null;
+    return {
+      code: def.code,
+      label: def.label,
+      sport: sportCode,
+      sportLabel: sportDef?.label || "",
+      sportIcon: sportDef?.icon || "",
+      source: supportLeagueMap.get(def.code)?.config_source || "gamma-polymarket",
+    };
+  });
 
   sendJson(res, 200, { leagues });
 }

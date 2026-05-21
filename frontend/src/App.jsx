@@ -23,6 +23,7 @@ import SelectionBar from "./components/SelectionBar.jsx";
 import ReviewOverlay from "./components/ReviewOverlay.jsx";
 import ScheduleQueue from "./components/ScheduleQueue.jsx";
 import JsonView from "./components/JsonView.jsx";
+import FuturesPage from "./components/FuturesPage.jsx";
 import LoginPage from "./components/LoginPage.jsx";
 
 export default function App() {
@@ -48,6 +49,11 @@ export default function App() {
   const [builderSelection, setBuilderSelection] = useState(new Map());
   const [builderPublishSuccess, setBuilderPublishSuccess] = useState(false);
   const [submarkets, setSubmarkets] = useState(new Set());
+  const [activeSport, setActiveSport] = useState("soccer");
+  // Map<fixtureId, { totals: "216.5,220.5", spreads: "11.5,7.5" }> — raw text
+  // the operator typed per fixture. Comma-separated lines. Empty unless the
+  // active sport uses customLines (NBA/NFL).
+  const [perFixtureLineDrafts, setPerFixtureLineDrafts] = useState({});
   const [selected, setSelected] = useState(new Set());
   const [filters, setFilters] = useState({ league: "", date: "", matchday: "", search: "" });
   const [sort, setSort] = useState({ field: "kickoff", dir: "asc" });
@@ -159,6 +165,48 @@ export default function App() {
     setBuilderSelection(new Map());
   }
 
+  function handleSportChange(nextSport) {
+    if (!nextSport || nextSport === activeSport) return;
+    setActiveSport(nextSport);
+    // Submarket IDs are sport-specific (e.g. ou_1_5 only exists for soccer),
+    // so clear the picker when switching sports to avoid stale selections.
+    setSubmarkets(new Set());
+    setPerFixtureLineDrafts({});
+  }
+
+  function handleFixtureLinesChange(fixtureId, family, rawValue) {
+    setPerFixtureLineDrafts((prev) => ({
+      ...prev,
+      [fixtureId]: { ...(prev[fixtureId] || {}), [family]: rawValue },
+    }));
+  }
+
+  // Parse "216.5, 220.5" → ["216.5", "220.5"]. Drops empties.
+  function parseLineList(raw) {
+    return String(raw || "")
+      .split(/[,\s]+/)
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+
+  // Build the per_fixture_lines envelope for the publishBatch call. Spreads
+  // expand each line into a {home, away} pair so both sides publish.
+  function buildPerFixtureLinesEnvelope() {
+    const out = {};
+    for (const [fixtureId, drafts] of Object.entries(perFixtureLineDrafts)) {
+      const totals = parseLineList(drafts.totals);
+      const spreadsRaw = parseLineList(drafts.spreads);
+      const spreads = spreadsRaw.flatMap((line) => [
+        { line, side: "home" },
+        { line, side: "away" },
+      ]);
+      if (totals.length || spreads.length) {
+        out[fixtureId] = { totals, spreads };
+      }
+    }
+    return out;
+  }
+
   async function handleBuilderPublish() {
     const fixturesArr = Array.from(builderSelection.values());
     if (!fixturesArr.length || !submarkets.size) return;
@@ -176,11 +224,15 @@ export default function App() {
           matchday: f.matchday,
           gameId: f.gameId,
           provider: f.provider,
+          sport: f.sport || activeSport,
         })),
         submarkets: selectedSubmarkets.map((m) => m.id),
+        sport: activeSport,
+        perFixtureLines: buildPerFixtureLinesEnvelope(),
       });
       if (result.run_id) await pollRun(result.run_id);
       setBuilderSelection(new Map());
+      setPerFixtureLineDrafts({});
       setBuilderPublishSuccess(true);
       setTimeout(() => setBuilderPublishSuccess(false), 3000);
     } catch (err) {
@@ -407,6 +459,10 @@ export default function App() {
             publishing={publishing}
             publishError={publishError}
             publishSuccess={builderPublishSuccess}
+            activeSport={activeSport}
+            onSportChange={handleSportChange}
+            perFixtureLineDrafts={perFixtureLineDrafts}
+            onFixtureLinesChange={handleFixtureLinesChange}
           />
         </>
       )}
@@ -482,6 +538,8 @@ export default function App() {
           )}
         </>
       )}
+
+      {tab === "futures" && <FuturesPage activeEnv={activeEnv} />}
 
       {tab === "json" && <JsonView />}
     </div>

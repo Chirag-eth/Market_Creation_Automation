@@ -5,6 +5,7 @@ import {
   findExistingFixtureUuid,
   postCmsFixtureCreate,
   publishKeyToParentMarketKey,
+  validateBatchFixturesAgainstCatalog,
 } from "../src/backend/cmsBatchExecution.js";
 
 function silentLogger() {
@@ -64,6 +65,37 @@ test("findExistingFixtureUuid returns the exact same-day fixture when present", 
 
   assert.equal(result.fixtureUuid, "fixture-exact-same-day");
   assert.equal(result.match, "exact+date");
+});
+
+test("validateBatchFixturesAgainstCatalog reports missing leagues before a batch run starts", () => {
+  const issues = validateBatchFixturesAgainstCatalog(
+    [
+      {
+        id: "462880",
+        home: "SC Freiburg",
+        away: "Aston Villa FC",
+        leagueCode: "europa",
+      },
+    ],
+    {
+      leagues: [
+        {
+          id: "epl-1",
+          key: "english-premier-league",
+          name: "English Premier League",
+          slug: "english-premier-league",
+          alternateName: "EPL",
+          aliases: ["English Premier League", "EPL"],
+        },
+      ],
+      teams: [],
+    }
+  );
+
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].issue, "league_missing");
+  assert.equal(issues[0].fixture_key, "462880");
+  assert.match(issues[0].message, /League not found in catalog for code "europa"/);
 });
 
 test("publishKeyToParentMarketKey: spreads emit teama/teamb (not <side>_<team-slug>)", () => {

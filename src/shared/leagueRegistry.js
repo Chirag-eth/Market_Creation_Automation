@@ -4,6 +4,9 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "epl",
     label: "EPL",
+    sport: "soccer",
+    resolutionSourceDomain: "premierleague.com",
+    ruleLeagueLabel: "Premier League",
     icon: "⚽",
     activeIconUrl:
       "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/EPL_Active_48x48.png",
@@ -19,6 +22,9 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "ucl",
     label: "UCL",
+    sport: "soccer",
+    resolutionSourceDomain: "uefa.com",
+    ruleLeagueLabel: "UEFA Champions League",
     icon: "✦",
     activeIconUrl:
       "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/UCL_Active_128x128.png",
@@ -34,6 +40,9 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "laliga",
     label: "La Liga",
+    sport: "soccer",
+    resolutionSourceDomain: "laliga.com",
+    ruleLeagueLabel: "La Liga",
     icon: "◢",
     activeIconUrl:
       "https://public-assets.pred.app/market-assets/League_Logos/League_Logos_3X/LaLiga_Active_128x128.png",
@@ -50,6 +59,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "seriea",
     label: "Serie A",
+    sport: "soccer",
     icon: "◣",
     aliases: ["serie a", "seriea", "italian serie a", "italy serie a", "lega serie a"],
     defaultCompetitionId: null,
@@ -62,6 +72,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "bundesliga",
     label: "Bundesliga",
+    sport: "soccer",
     icon: "◇",
     aliases: [
       "bundesliga",
@@ -80,6 +91,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "ligue1",
     label: "Ligue 1",
+    sport: "soccer",
     icon: "△",
     aliases: ["ligue 1", "ligue1", "french ligue 1", "france ligue 1", "ligue-1"],
     defaultCompetitionId: null,
@@ -92,6 +104,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "europa",
     label: "Europa League",
+    sport: "soccer",
     icon: "⬢",
     aliases: ["europa", "uel", "europa league", "uefa europa league", "uefa europa"],
     defaultCompetitionId: null,
@@ -104,6 +117,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "uecl",
     label: "Conference League",
+    sport: "soccer",
     icon: "⬡",
     aliases: [
       "uecl",
@@ -124,6 +138,9 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "fifa-worldcup",
     label: "FIFA WC",
+    sport: "soccer",
+    ruleLeagueLabel: "FIFA World Cup",
+    resolutionSourceDomain: "fifa.com",
     icon: "◎",
     aliases: [
       "fifa world cup",
@@ -143,6 +160,7 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "mls",
     label: "MLS",
+    sport: "soccer",
     icon: "◈",
     aliases: ["mls", "major league soccer", "major-league-soccer"],
     defaultCompetitionId: null,
@@ -155,6 +173,9 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
   {
     code: "fifa-friendlies",
     label: "FIFA Friendlies",
+    sport: "soccer",
+    ruleLeagueLabel: "FIFA Friendlies",
+    resolutionSourceDomain: "fifa.com",
     icon: "◌",
     activeIconUrl:
       "https://public-assets.pred.app/market-assets/FIFA/FIFA-League/Fifa%20Active%202_128x128.png",
@@ -173,6 +194,32 @@ const LEAGUE_SCHEDULE_REGISTRY = Object.freeze([
     fixturePathEnvName: "SPORTSDATA_FIFA_FRIENDLIES_SCHEDULE_FIXTURE_PATH",
     polymarketLeagueSlugEnvName: "POLYMARKET_FIFA_FRIENDLIES_LEAGUE_SLUG",
     gammaTagSlugs: [],
+  },
+  {
+    code: "nba",
+    label: "NBA",
+    sport: "nba",
+    ruleLeagueLabel: "NBA",
+    icon: "🏀",
+    aliases: ["nba", "national basketball association"],
+    defaultCompetitionId: null,
+    competitionIdEnvName: "SPORTSDATA_NBA_COMPETITION_ID",
+    fixturePathEnvName: "SPORTSDATA_NBA_SCHEDULE_FIXTURE_PATH",
+    polymarketLeagueSlugEnvName: "POLYMARKET_NBA_LEAGUE_SLUG",
+    gammaTagSlugs: ["nba"],
+  },
+  {
+    code: "nfl",
+    label: "NFL",
+    sport: "nfl",
+    ruleLeagueLabel: "NFL",
+    icon: "🏈",
+    aliases: ["nfl", "national football league"],
+    defaultCompetitionId: null,
+    competitionIdEnvName: "SPORTSDATA_NFL_COMPETITION_ID",
+    fixturePathEnvName: "SPORTSDATA_NFL_SCHEDULE_FIXTURE_PATH",
+    polymarketLeagueSlugEnvName: "POLYMARKET_NFL_LEAGUE_SLUG",
+    gammaTagSlugs: ["nfl"],
   },
 ]);
 
@@ -199,6 +246,11 @@ export function resolveLeagueScheduleCode(value) {
     return "";
   }
   return LEAGUE_SCHEDULE_ALIAS_MAP.get(normalized) || "";
+}
+
+export function getSportForLeagueCode(leagueCode) {
+  const def = getLeagueScheduleDefinition(leagueCode);
+  return def?.sport || "";
 }
 
 function buildLeagueScheduleAliasMap(entries) {

@@ -5,6 +5,7 @@ import {
   isSupportedCmsPublishKey,
   normalizeCmsSelectedFixture,
 } from "./cmsSelectedPublish.js";
+import { getSportDefinition, getDefaultSportCode } from "../shared/sportRegistry.js";
 
 export const CMS_BATCH_ALLOWED_ENVIRONMENTS = Object.freeze(["dev", "uat", "testnet", "mainnet"]);
 export const CMS_BATCH_FRONTEND_MAX_FIXTURES = 15;
@@ -13,20 +14,107 @@ export const CMS_BATCH_BACKEND_MAX_FIXTURES = 30;
 // Maps frontend submarket IDs → internal CMS publish keys (pipe-delimited).
 // Used by /api/cms/batch-publish to expand a compact submarket selection
 // into the per-family/line/side keys consumed by executeCmsBatchRun.
+//
+// The map is soccer-shaped: each id maps to a fixed (family, line, side?)
+// tuple. Sports with operator-picked lines (NBA/NFL) bypass this map and
+// expand via `expandSelectedPublishKeys` with `perFixtureLines`.
 export const SUBMARKET_TO_PUBLISH_KEYS = Object.freeze({
   moneyline: ["moneyline|0"],
   btts: ["btts|0"],
+  ou_0_5: ["totals|0.5"],
   ou_1_5: ["totals|1.5"],
   ou_2_5: ["totals|2.5"],
   ou_3_5: ["totals|3.5"],
   ou_4_5: ["totals|4.5"],
+  ou_5_5: ["totals|5.5"],
   home_1_5: ["spreads|1.5|home"],
   away_1_5: ["spreads|1.5|away"],
   home_2_5: ["spreads|2.5|home"],
   away_2_5: ["spreads|2.5|away"],
   spreads: ["spreads|1.5|home", "spreads|1.5|away", "spreads|2.5|home", "spreads|2.5|away"],
+  // The `totals` group-aggregate stays as the standard 1.5–4.5 set so it
+  // doesn't accidentally ship 0.5/5.5 on every league publish. Operators
+  // who want the edge lines pick `ou_0_5` / `ou_5_5` individually.
   totals: ["totals|1.5", "totals|2.5", "totals|3.5", "totals|4.5"],
 });
+
+/**
+ * Expands a frontend submarket selection into a list of internal CMS publish
+ * keys, sport-aware.
+ *
+ * Soccer: uses the static SUBMARKET_TO_PUBLISH_KEYS map (byte-identical to
+ * legacy behavior).
+ *
+ * NBA/NFL (`sport.submarketCatalog.customLines === true`): the frontend
+ * selection is family-level (`moneyline`, `totals`, `spreads`). The operator
+ * picks lines per fixture which arrive in `perFixtureLines[fixtureKey]`:
+ *
+ *   { totals: ["216.5", "220.5"], spreads: [{ line: "11.5", side: "home" }, ...] }
+ *
+ * Returns a deduped, lower-case publish-key array. Returns [] for unknown
+ * sport codes.
+ */
+export function expandSelectedPublishKeys({
+  sport = getDefaultSportCode(),
+  submarketIds = [],
+  perFixtureLines = {},
+  fixtureKey = "",
+} = {}) {
+  const sportDef = getSportDefinition(sport) || getSportDefinition(getDefaultSportCode());
+  const ids = Array.isArray(submarketIds)
+    ? submarketIds
+        .map((v) =>
+          String(v || "")
+            .trim()
+            .toLowerCase()
+        )
+        .filter(Boolean)
+    : [];
+  const seen = new Set();
+  const out = [];
+
+  function pushKey(value) {
+    const k = String(value || "")
+      .trim()
+      .toLowerCase();
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    out.push(k);
+  }
+
+  if (!sportDef?.submarketCatalog?.customLines) {
+    for (const id of ids) {
+      const mapped = SUBMARKET_TO_PUBLISH_KEYS[id] || [];
+      for (const k of mapped) pushKey(k);
+    }
+    return out;
+  }
+
+  // Custom-line sport. We only honor family-level ids; line-specific ids from
+  // the soccer map (ou_1_5, home_2_5, …) are ignored because the line set is
+  // operator-driven per fixture.
+  const families = new Set(ids);
+  const lines =
+    perFixtureLines && typeof perFixtureLines === "object" ? perFixtureLines[fixtureKey] || {} : {};
+  if (families.has("moneyline")) pushKey("moneyline|0");
+  if (families.has("totals") && Array.isArray(lines.totals)) {
+    for (const line of lines.totals) {
+      const normalized = String(line || "").trim();
+      if (normalized) pushKey(`totals|${normalized}`);
+    }
+  }
+  if (families.has("spreads") && Array.isArray(lines.spreads)) {
+    for (const entry of lines.spreads) {
+      const line = String(entry?.line || "").trim();
+      const side = String(entry?.side || "")
+        .trim()
+        .toLowerCase();
+      if (!line || (side !== "home" && side !== "away")) continue;
+      pushKey(`spreads|${line}|${side}`);
+    }
+  }
+  return out;
+}
 
 export function ensureCmsBatchEnvironmentAllowed(
   environment = {},
@@ -71,17 +159,30 @@ export function getCmsBatchFixtureKey(value = {}) {
 
 export function normalizeCmsBatchEnvelope(payload = {}) {
   const source = payload && typeof payload === "object" ? payload : {};
+  const sport = String(source.sport || "")
+    .trim()
+    .toLowerCase();
   const selectedFixtures = dedupeBatchFixtures(source.selected_fixtures || source.selectedFixtures);
   const selectedPublishKeys = dedupePublishKeys(
-    source.selected_publish_keys || source.selectedPublishKeys
+    source.selected_publish_keys || source.selectedPublishKeys,
+    { sport }
   );
+  const perFixtureLines =
+    source.per_fixture_lines && typeof source.per_fixture_lines === "object"
+      ? source.per_fixture_lines
+      : source.perFixtureLines && typeof source.perFixtureLines === "object"
+        ? source.perFixtureLines
+        : {};
   const perFixtureExclusions = normalizePerFixtureExclusions(
-    source.per_fixture_exclusions || source.perFixtureExclusions
+    source.per_fixture_exclusions || source.perFixtureExclusions,
+    { sport }
   );
   const confirmation = normalizeBatchConfirmation(source.confirmation);
   return {
+    sport,
     selectedFixtures,
     selectedPublishKeys,
+    perFixtureLines,
     perFixtureExclusions,
     retryFailedOnly:
       source.retry_failed_only === true ||
@@ -405,7 +506,7 @@ function dedupeBatchFixtures(value) {
   return out;
 }
 
-function dedupePublishKeys(value) {
+function dedupePublishKeys(value, { sport } = {}) {
   const items = Array.isArray(value) ? value : [];
   const out = [];
   const seen = new Set();
@@ -413,7 +514,7 @@ function dedupePublishKeys(value) {
     const normalized = String(item || "")
       .trim()
       .toLowerCase();
-    if (!normalized || seen.has(normalized) || !isSupportedCmsPublishKey(normalized)) {
+    if (!normalized || seen.has(normalized) || !isSupportedCmsPublishKey(normalized, { sport })) {
       continue;
     }
     seen.add(normalized);
@@ -422,7 +523,7 @@ function dedupePublishKeys(value) {
   return out;
 }
 
-function normalizePerFixtureExclusions(value) {
+function normalizePerFixtureExclusions(value, { sport } = {}) {
   const source = value && typeof value === "object" ? value : {};
   const out = {};
 
@@ -433,7 +534,8 @@ function normalizePerFixtureExclusions(value) {
       out[fixtureKey] = {
         excluded_fixture: Boolean(item?.excluded_fixture || item?.excludedFixture),
         excluded_publish_keys: dedupePublishKeys(
-          item?.excluded_publish_keys || item?.excludedPublishKeys
+          item?.excluded_publish_keys || item?.excludedPublishKeys,
+          { sport }
         ),
       };
     }
@@ -447,7 +549,8 @@ function normalizePerFixtureExclusions(value) {
     out[fixtureKey] = {
       excluded_fixture: Boolean(valueObject.excluded_fixture || valueObject.excludedFixture),
       excluded_publish_keys: dedupePublishKeys(
-        valueObject.excluded_publish_keys || valueObject.excludedPublishKeys
+        valueObject.excluded_publish_keys || valueObject.excludedPublishKeys,
+        { sport }
       ),
     };
   }

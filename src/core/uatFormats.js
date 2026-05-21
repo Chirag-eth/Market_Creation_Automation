@@ -1,5 +1,11 @@
 import { DEFAULT_FIXTURE_THEME, FIXTURE_LOGO_URL } from "../shared/constants.js";
 import { normalizeForSearch } from "../shared/util.js";
+import {
+  getSportDefinition,
+  getDefaultSportDefinition,
+  getDefaultSportCode,
+} from "../shared/sportRegistry.js";
+import { getLeagueScheduleDefinition, getSportForLeagueCode } from "../shared/leagueRegistry.js";
 
 const OUTPUT_PROFILE_UAT = "uat";
 const UAT_TOTAL_LINES = Object.freeze([
@@ -104,8 +110,9 @@ export function buildUatParentPayloads({
       .toLowerCase() === "away"
       ? homeTeam
       : awayTeam;
-  const ruleLeagueLabel = getUatRuleLeagueLabel(league);
-  const resolutionSourceDomain = getUatResolutionSourceDomain(league);
+  const sport = resolveSportForLeague(league);
+  const ruleLeagueLabel = getUatRuleLeagueLabel(league, sport);
+  const resolutionSourceDomain = getUatResolutionSourceDomain(league, sport);
   const fixtureScheduleEt = formatUatFixtureKickoffForEtRules(fixtureDateIso, kickoffTimeUtc);
 
   return {
@@ -123,6 +130,7 @@ export function buildUatParentPayloads({
           fixtureDateIso,
           kickoffTimeUtc,
           creationDate,
+          sport,
         }),
         is_cross_matching_enabled: true,
         order_delay_enabled: true,
@@ -140,6 +148,7 @@ export function buildUatParentPayloads({
             fixtureDateIso,
             teamName: homeTeam.name,
             creationDate,
+            sport,
           }),
           team_id: homeTeam.id,
         },
@@ -154,28 +163,34 @@ export function buildUatParentPayloads({
             fixtureDateIso,
             teamName: awayTeam.name,
             creationDate,
+            sport,
           }),
           team_id: awayTeam.id,
         },
-        {
-          name: "Draw",
-          tick_size: "0.01",
-          market_code: "DRAW",
-          rules: buildUatMoneylineDrawRule({
-            leagueLabel: ruleLeagueLabel,
-            homeTeamName: homeTeam.name,
-            awayTeamName: awayTeam.name,
-            fixtureDateIso,
-            creationDate,
-          }),
-        },
+        ...(sport.submarketCatalog.drawSupported
+          ? [
+              {
+                name: "Draw",
+                tick_size: "0.01",
+                market_code: "DRAW",
+                rules: buildUatMoneylineDrawRule({
+                  leagueLabel: ruleLeagueLabel,
+                  homeTeamName: homeTeam.name,
+                  awayTeamName: awayTeam.name,
+                  fixtureDateIso,
+                  creationDate,
+                  sport,
+                }),
+              },
+            ]
+          : []),
       ],
     },
     spreads: {
       parent_market: {
         league_id: league.id,
         type_reference_id: String(typeReferenceId || "").trim() || null,
-        title: `${spreadTeam.name} Over ${selectedSpreadLine.line} Goals`,
+        title: `${spreadTeam.name} Over ${selectedSpreadLine.line} ${sport.titleScoringWord}`,
         parent_market_family: "spreads",
         market_line: `-${selectedSpreadLine.line}`,
         rules: buildUatLegacyParentRules({
@@ -183,13 +198,14 @@ export function buildUatParentPayloads({
           fixtureDateIso,
           kickoffTimeUtc,
           creationDate,
+          sport,
         }),
         order_delay_enabled: true,
         markets_open_time: marketsOpenTime,
       },
       markets: [
         {
-          name: `${spreadTeam.name} Over ${selectedSpreadLine.line} Goals`,
+          name: `${spreadTeam.name} Over ${selectedSpreadLine.line} ${sport.titleScoringWord}`,
           tick_size: "0.01",
           market_code: `Over ${selectedSpreadLine.line}`,
           rules: buildUatSpreadsMarketRule({
@@ -200,6 +216,7 @@ export function buildUatParentPayloads({
             threshold: selectedSpreadLine.threshold,
             sourceDomain: resolutionSourceDomain,
             creationDate,
+            sport,
           }),
           team_id: spreadTeam.id,
         },
@@ -217,41 +234,46 @@ export function buildUatParentPayloads({
       marketsOpenTime,
       creationDate,
       line: selectedTotalsLine,
+      sport,
     }),
-    btts: {
-      parent_market: {
-        league_id: league.id,
-        type_reference_id: String(typeReferenceId || "").trim() || null,
-        title: "Both Teams To Score",
-        parent_market_family: "btts",
-        market_line: "0",
-        rules: buildUatParentRules({
-          familyLabel: "BTTS",
-          marketLine: "0",
-          fixtureName,
-          fixtureDateIso,
-          kickoffTimeUtc,
-          creationDate,
-        }),
-        order_delay_enabled: true,
-        markets_open_time: marketsOpenTime,
-      },
-      markets: [
-        {
-          name: "Both Teams To Score",
-          tick_size: "0.01",
-          market_code: "Both Teams To Score",
-          rules: buildUatBttsMarketRule({
-            leagueLabel: ruleLeagueLabel,
-            fixtureScheduleEt,
-            homeTeamName: homeTeam.name,
-            awayTeamName: awayTeam.name,
-            sourceDomain: resolutionSourceDomain,
-            creationDate,
-          }),
-        },
-      ],
-    },
+    btts: sport.submarketCatalog.bttsSupported
+      ? {
+          parent_market: {
+            league_id: league.id,
+            type_reference_id: String(typeReferenceId || "").trim() || null,
+            title: "Both Teams To Score",
+            parent_market_family: "btts",
+            market_line: "0",
+            rules: buildUatParentRules({
+              familyLabel: "BTTS",
+              marketLine: "0",
+              fixtureName,
+              fixtureDateIso,
+              kickoffTimeUtc,
+              creationDate,
+              sport,
+            }),
+            order_delay_enabled: true,
+            markets_open_time: marketsOpenTime,
+          },
+          markets: [
+            {
+              name: "Both Teams To Score",
+              tick_size: "0.01",
+              market_code: "Both Teams To Score",
+              rules: buildUatBttsMarketRule({
+                leagueLabel: ruleLeagueLabel,
+                fixtureScheduleEt,
+                homeTeamName: homeTeam.name,
+                awayTeamName: awayTeam.name,
+                sourceDomain: resolutionSourceDomain,
+                creationDate,
+                sport,
+              }),
+            },
+          ],
+        }
+      : null,
   };
 }
 
@@ -338,6 +360,7 @@ function buildUatParentRules({
   fixtureDateIso,
   kickoffTimeUtc,
   creationDate,
+  sport = getDefaultSportDefinition(),
 }) {
   const fixtureMoment = formatUatFixtureKickoffForRules(fixtureDateIso, kickoffTimeUtc);
   const normalizedLine = String(marketLine ?? "").trim();
@@ -349,12 +372,24 @@ function buildUatParentRules({
       : normalizedLine
         ? `${familyLabel} (${normalizedLine})`
         : `${familyLabel}`;
-  return `This ${familySegment} market resolves based on the official result of ${fixtureName} scheduled on ${fixtureMoment} after 90 minutes of regular play plus stoppage time. It either resolves to "Long" ($1) or "Short" ($0). If the match is postponed, the market remains open until the match has been completed. If the match is canceled entirely with no make-up game, Draw in moneyline resolves to "Long" ($1) and all the other markets resolve to "Short" ($0). ${buildCreationSentence(creationDate)}`;
+  const drawClause = sport.submarketCatalog.drawSupported
+    ? `Draw in moneyline resolves to "Long" ($1) and all the other markets resolve to "Short" ($0)`
+    : `all markets resolve to "Short" ($0)`;
+  return `This ${familySegment} market resolves based on the official result of ${fixtureName} scheduled on ${fixtureMoment} after ${sport.regulationPhrase}. It either resolves to "Long" ($1) or "Short" ($0). If the match is postponed, the market remains open until the match has been completed. If the match is canceled entirely with no make-up game, ${drawClause}. ${buildCreationSentence(creationDate)}`;
 }
 
-function buildUatLegacyParentRules({ fixtureName, fixtureDateIso, kickoffTimeUtc, creationDate }) {
+function buildUatLegacyParentRules({
+  fixtureName,
+  fixtureDateIso,
+  kickoffTimeUtc,
+  creationDate,
+  sport = getDefaultSportDefinition(),
+}) {
   const fixtureMoment = formatUatFixtureKickoffForRules(fixtureDateIso, kickoffTimeUtc);
-  return `This market resolves based on the official result of ${fixtureName} scheduled on ${fixtureMoment} after 90 minutes of regular play plus stoppage time. It either resolves to "Long" ($1) or "Short" ($0). If the match is postponed, the market remains open until the match has been completed. If the match is canceled entirely with no make-up game, Draw resolves to "Long" ($1) and both teams resolve to "Short" ($0). Whichever market wins takes it all. ${buildCreationSentence(creationDate)}`;
+  const drawClause = sport.submarketCatalog.drawSupported
+    ? `Draw resolves to "Long" ($1) and both teams resolve to "Short" ($0). Whichever market wins takes it all.`
+    : `this market resolves 50-50.`;
+  return `This market resolves based on the official result of ${fixtureName} scheduled on ${fixtureMoment} after ${sport.regulationPhrase}. It either resolves to "Long" ($1) or "Short" ($0). If the match is postponed, the market remains open until the match has been completed. If the match is canceled entirely with no make-up game, ${drawClause} ${buildCreationSentence(creationDate)}`;
 }
 
 function buildUatTotalsPayload({
@@ -369,6 +404,7 @@ function buildUatTotalsPayload({
   marketsOpenTime = "",
   creationDate = "",
   line = null,
+  sport = getDefaultSportDefinition(),
 } = {}) {
   const normalizedTypeReferenceId = String(typeReferenceId || "").trim() || null;
   const fixtureName = formatUatFixtureName(`${homeTeamName} vs ${awayTeamName}`);
@@ -379,6 +415,7 @@ function buildUatTotalsPayload({
     fixtureDateIso,
     kickoffTimeUtc,
     creationDate,
+    sport,
   });
   const selectedLine = getUatLineDefinition(line?.line || line);
 
@@ -386,7 +423,7 @@ function buildUatTotalsPayload({
     parent_market: {
       league_id: leagueId,
       type_reference_id: normalizedTypeReferenceId,
-      title: `Total Over ${selectedLine.line} Goals`,
+      title: `Total Over ${selectedLine.line} ${sport.titleScoringWord}`,
       parent_market_family: "totals",
       market_line: selectedLine.line,
       rules: parentRules,
@@ -395,7 +432,7 @@ function buildUatTotalsPayload({
     },
     markets: [
       {
-        name: `Over ${selectedLine.line} Goals`,
+        name: `Over ${selectedLine.line} ${sport.titleScoringWord}`,
         tick_size: "0.01",
         market_code: `Over ${selectedLine.line}`,
         rules: buildUatTotalsMarketRule({
@@ -406,22 +443,39 @@ function buildUatTotalsPayload({
           threshold: selectedLine.threshold,
           sourceDomain,
           creationDate,
+          sport,
         }),
       },
     ],
   };
 }
 
+function deriveLineDefinition(rawLine) {
+  const normalized = String(rawLine || "").trim();
+  if (!normalized) return null;
+  const numeric = parseFloat(normalized);
+  if (!Number.isFinite(numeric)) return null;
+  return {
+    key: `over_${normalized.replace(/\./g, "_")}`,
+    line: normalized,
+    threshold: Math.ceil(numeric),
+  };
+}
+
 function getUatLineDefinition(value) {
   const normalized = String(value || "").trim();
-  return UAT_TOTAL_LINES.find((entry) => entry.line === normalized) || UAT_TOTAL_LINES[0];
+  const known = UAT_TOTAL_LINES.find((entry) => entry.line === normalized);
+  if (known) return known;
+  // Sports with operator-picked lines (NBA/NFL) hand in arbitrary values like
+  // "216.5" or "48.5". Derive a definition on the fly; threshold = ceil(line).
+  return deriveLineDefinition(normalized) || UAT_TOTAL_LINES[0];
 }
 
 function getUatSpreadLineDefinition(value) {
   const normalized = String(value || "").trim();
-  return (
-    UAT_TOTAL_LINES.slice(0, 2).find((entry) => entry.line === normalized) || UAT_TOTAL_LINES[0]
-  );
+  const known = UAT_TOTAL_LINES.slice(0, 2).find((entry) => entry.line === normalized);
+  if (known) return known;
+  return deriveLineDefinition(normalized) || UAT_TOTAL_LINES[0];
 }
 
 function buildUatMoneylineTeamRule({
@@ -431,10 +485,11 @@ function buildUatMoneylineTeamRule({
   fixtureDateIso,
   teamName,
   creationDate,
+  sport = getDefaultSportDefinition(),
 }) {
   const formattedDate = formatUatLongDate(fixtureDateIso);
   const name = String(teamName || "").trim();
-  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${formattedDate}, if ${name} wins, this market will resolve to "Long" ($1 for ${name}). Otherwise, this market will resolve to "Short" ($0 for ${name}). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Short" ($0 for ${name}). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. ${buildCreationSentence(creationDate)}`;
+  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${formattedDate}, if ${name} wins, this market will resolve to "Long" ($1 for ${name}). Otherwise, this market will resolve to "Short" ($0 for ${name}). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Short" ($0 for ${name}). This market refers only to the outcome within the first ${sport.regulationPhrase}. ${buildCreationSentence(creationDate)}`;
 }
 
 function buildUatMoneylineDrawRule({
@@ -443,9 +498,10 @@ function buildUatMoneylineDrawRule({
   awayTeamName,
   fixtureDateIso,
   creationDate,
+  sport = getDefaultSportDefinition(),
 }) {
   const formattedDate = formatUatLongDate(fixtureDateIso);
-  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${formattedDate}, if the game ends in a draw, this market will resolve to "Long" ($1 for Draw). Otherwise, this market will resolve to "Short" ($0 for Draw). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Long" ($1 for Draw). This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. ${buildCreationSentence(creationDate)}`;
+  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${formattedDate}, if the game ends in a draw, this market will resolve to "Long" ($1 for Draw). Otherwise, this market will resolve to "Short" ($0 for Draw). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve to "Long" ($1 for Draw). This market refers only to the outcome within the first ${sport.regulationPhrase}. ${buildCreationSentence(creationDate)}`;
 }
 
 function buildUatSpreadsMarketRule({
@@ -456,8 +512,9 @@ function buildUatSpreadsMarketRule({
   threshold = 2,
   sourceDomain = "",
   creationDate = "",
+  sport = getDefaultSportDefinition(),
 }) {
-  return `In the upcoming ${leagueLabel} game, scheduled for ${fixtureScheduleEt}: This market will resolve to "Long" if ${selectedTeamName} win the game by ${threshold} or more goals. Otherwise, this market will resolve to "Short". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. This market will resolve according to the official final score published on ${sourceDomain}. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. ${buildCreationSentence(creationDate)}`;
+  return `In the upcoming ${leagueLabel} game, scheduled for ${fixtureScheduleEt}: This market will resolve to "Long" if ${selectedTeamName} win the game by ${threshold} or more ${sport.scoringNoun}. Otherwise, this market will resolve to "Short". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. This market will resolve according to the official final score published on ${sourceDomain}. This market refers only to the outcome within the first ${sport.regulationPhrase}. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. ${buildCreationSentence(creationDate)}`;
 }
 
 function buildUatTotalsMarketRule({
@@ -468,8 +525,9 @@ function buildUatTotalsMarketRule({
   threshold = 2,
   sourceDomain = "",
   creationDate = "",
+  sport = getDefaultSportDefinition(),
 }) {
-  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${fixtureScheduleEt}: This market will resolve to "Long" if ${homeTeamName} and ${awayTeamName} combine to score ${threshold} or more goals in this game. If the combined total is less than ${threshold}, this market will resolve to "Short". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on ${sourceDomain}. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. ${buildCreationSentence(creationDate)}`;
+  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${fixtureScheduleEt}: This market will resolve to "Long" if ${homeTeamName} and ${awayTeamName} combine to score ${threshold} or more ${sport.scoringNoun} in this game. If the combined total is less than ${threshold}, this market will resolve to "Short". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on ${sourceDomain}. This market refers only to the outcome within the first ${sport.regulationPhrase}. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. ${buildCreationSentence(creationDate)}`;
 }
 
 function buildUatBttsMarketRule({
@@ -479,15 +537,32 @@ function buildUatBttsMarketRule({
   awayTeamName = "",
   sourceDomain = "",
   creationDate = "",
+  sport = getDefaultSportDefinition(),
 }) {
-  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${fixtureScheduleEt}: This market will resolve to "Long" if both ${homeTeamName} and ${awayTeamName} each score at least one goal during the game. This market will resolve to "Short" if either team fails to score (i.e., if one or both teams finish with zero goals). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on ${sourceDomain}. This market refers only to the outcome within the first 90 minutes of regular play plus stoppage time. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. ${buildCreationSentence(creationDate)}`;
+  return `In the upcoming ${leagueLabel} game between ${homeTeamName} and ${awayTeamName}, scheduled for ${fixtureScheduleEt}: This market will resolve to "Long" if both ${homeTeamName} and ${awayTeamName} each score at least one ${sport.scoringNoun.replace(/s$/, "")} during the game. This market will resolve to "Short" if either team fails to score (i.e., if one or both teams finish with zero ${sport.scoringNoun}). If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. If the game is started but not completed, this market will resolve according to the official final score published on ${sourceDomain}. This market refers only to the outcome within the first ${sport.regulationPhrase}. The primary resolution source for this market is the official statistics of the event as recognized by the governing body or event organizers. ${buildCreationSentence(creationDate)}`;
 }
 
 function buildCreationSentence(creationDate) {
   return `This market was created on ${creationDate}.`;
 }
 
-function getUatRuleLeagueLabel(league) {
+function resolveSportForLeague(league) {
+  const explicit = String(league?.sport || "")
+    .trim()
+    .toLowerCase();
+  if (explicit) {
+    const def = getSportDefinition(explicit);
+    if (def) return def;
+  }
+  const fromCode = getSportForLeagueCode(league?.key);
+  if (fromCode) {
+    const def = getSportDefinition(fromCode);
+    if (def) return def;
+  }
+  return getSportDefinition(getDefaultSportCode());
+}
+
+function getUatRuleLeagueLabel(league, sport = resolveSportForLeague(league)) {
   const key = String(league?.key || "")
     .trim()
     .toLowerCase();
@@ -502,12 +577,19 @@ function getUatRuleLeagueLabel(league) {
       return "FIFA Friendlies";
     case "fifa-worldcup":
       return "FIFA World Cup";
-    default:
+    default: {
+      // For non-soccer sports we prefer the league registry's explicit label or
+      // the sport's display label rather than the CSV alternateName fallback.
+      if (sport.code !== "soccer") {
+        const def = getLeagueScheduleDefinition(key);
+        return def?.ruleLeagueLabel || sport.label;
+      }
       return String(league?.alternateName || league?.name || "soccer").trim();
+    }
   }
 }
 
-function getUatResolutionSourceDomain(league) {
+function getUatResolutionSourceDomain(league, sport = resolveSportForLeague(league)) {
   const key = String(league?.key || "")
     .trim()
     .toLowerCase();
@@ -521,8 +603,13 @@ function getUatResolutionSourceDomain(league) {
     case "fifa-friendlies":
     case "fifa-worldcup":
       return "fifa.com";
-    default:
+    default: {
+      if (sport.code !== "soccer") {
+        const def = getLeagueScheduleDefinition(key);
+        return def?.resolutionSourceDomain || sport.defaultResolutionSourceDomain;
+      }
       return "official league site";
+    }
   }
 }
 
