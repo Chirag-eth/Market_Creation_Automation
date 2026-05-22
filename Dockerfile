@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
-# Stage 1: build the Vite frontend
+# Stage 1: install all deps + build the Vite frontend, then prune devDeps.
+# This is the only stage that runs `npm ci`. The runtime stage just copies
+# the already-pruned node_modules over — saving ~50MB of duplicated download
+# IO and one full install pass per build.
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
@@ -9,12 +12,17 @@ COPY frontend ./frontend
 # Vite reads frontend/index.html as the template (see frontend/vite.config.js)
 # and writes its own public/index.html — no need to seed one here.
 RUN npm run build:frontend
+# Strip devDeps in place so the runtime stage can copy a lean tree. We keep
+# the cache mount around in case `prune` decides to re-resolve anything.
+RUN --mount=type=cache,target=/root/.npm npm prune --omit=dev
 
-# Stage 2: production server (no devDeps, pre-built assets)
+# Stage 2: production server. No `npm ci` here — we copy the pruned tree
+# from the builder. Layers ordered so source changes don't bust the heavy
+# node_modules layer.
 FROM node:22-alpine
 WORKDIR /app
-COPY package*.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --ignore-scripts
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/package*.json ./
 COPY --chown=node:node server.js ./
 COPY --chown=node:node src ./src
 COPY --chown=node:node catalog ./catalog
