@@ -256,3 +256,63 @@ test("buildUatParentPayloads: soccer remains byte-identical (Draw market + BTTS 
   assert.match(payloads.totals.markets[0].rules, /goals/);
   assert.equal(payloads.totals.parent_market.title, "Total Over 2.5 Goals");
 });
+
+test("isSupportedCmsPublishKey: soccer accepts the new totals|0.5 and totals|5.5 entries", () => {
+  // Anti-regression for the May 2026 whitelist extension. These two lines
+  // weren't part of the original 10-key set but were added once the underlying
+  // rule generator was confirmed to handle arbitrary numeric lines.
+  assert.equal(isSupportedCmsPublishKey("totals|0.5"), true);
+  assert.equal(isSupportedCmsPublishKey("totals|5.5"), true);
+  // Lines outside the whitelist still rejected for the default soccer path.
+  assert.equal(isSupportedCmsPublishKey("totals|6.5"), false, "6.5 not whitelisted");
+  assert.equal(isSupportedCmsPublishKey("totals|0"), false, "integer line not whitelisted");
+});
+
+test("buildUatParentPayloads: soccer totals 0.5 produces threshold=1 + 'Total Over 0.5 Goals' title", () => {
+  const payloads = buildUatParentPayloads({
+    fixtureJson: { name: "Arsenal vs Chelsea" },
+    league: { id: "epl-league", key: "epl", sport: "soccer", alternateName: "EPL", name: "EPL" },
+    homeTeam: { id: "h", name: "Arsenal", code: "ARS" },
+    awayTeam: { id: "a", name: "Chelsea", code: "CHE" },
+    fixtureDateIso: "2026-05-20",
+    kickoffTimeUtc: "15:00",
+    openIso: "2026-05-19T08:00:00Z",
+    createdAtIso: "2026-05-19T07:00:00Z",
+    typeReferenceId: "tr-4",
+    outputProfile: "uat",
+    marketLine: "0.5",
+  });
+  assert.equal(payloads.totals.parent_market.title, "Total Over 0.5 Goals");
+  assert.equal(payloads.totals.parent_market.market_line, "0.5");
+  // threshold = ceil(0.5) = 1 — Over 0.5 resolves Long iff at least one goal scored.
+  assert.match(
+    payloads.totals.markets[0].rules,
+    /combine to score 1 or more goals/i,
+    "0.5 totals rule must reference a threshold of 1 goal"
+  );
+  assert.equal(payloads.totals.markets[0].market_code, "Over 0.5");
+});
+
+test("buildUatParentPayloads: soccer totals 5.5 produces threshold=6 + 'Total Over 5.5 Goals' title", () => {
+  const payloads = buildUatParentPayloads({
+    fixtureJson: { name: "Arsenal vs Chelsea" },
+    league: { id: "epl-league", key: "epl", sport: "soccer", alternateName: "EPL", name: "EPL" },
+    homeTeam: { id: "h", name: "Arsenal", code: "ARS" },
+    awayTeam: { id: "a", name: "Chelsea", code: "CHE" },
+    fixtureDateIso: "2026-05-20",
+    kickoffTimeUtc: "15:00",
+    openIso: "2026-05-19T08:00:00Z",
+    createdAtIso: "2026-05-19T07:00:00Z",
+    typeReferenceId: "tr-5",
+    outputProfile: "uat",
+    marketLine: "5.5",
+  });
+  assert.equal(payloads.totals.parent_market.title, "Total Over 5.5 Goals");
+  assert.equal(payloads.totals.parent_market.market_line, "5.5");
+  assert.match(
+    payloads.totals.markets[0].rules,
+    /combine to score 6 or more goals/i,
+    "5.5 totals rule must reference a threshold of 6 goals"
+  );
+  assert.equal(payloads.totals.markets[0].market_code, "Over 5.5");
+});

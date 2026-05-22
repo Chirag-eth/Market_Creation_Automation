@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { publishFutureQuick, fetchFuturesRun, previewFuture } from "../api.js";
 
 function fmtProbability(p) {
@@ -45,6 +45,18 @@ export default function FutureCard({ future, leagueCode, environment, onConfigur
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState(null);
 
+  // Tracks whether the card is still mounted so the recursive pollRun setTimeout
+  // chain can short-circuit after unmount. Without this, a publish that takes
+  // ~60s keeps firing setRun/setBusy on a dead component if the operator
+  // switches env or league mid-flight.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const selectedOutcomes = useMemo(
     () => outcomes.filter((o) => selectedIds.has(o.polymarket_market_id)),
     [outcomes, selectedIds]
@@ -73,6 +85,7 @@ export default function FutureCard({ future, leagueCode, environment, onConfigur
   }
 
   function pollRun(runId, attempt = 0) {
+    if (!mountedRef.current) return;
     if (attempt > 60) {
       setError("Run timed out — check /api/cms/futures-runs");
       setBusy(false);
@@ -80,6 +93,7 @@ export default function FutureCard({ future, leagueCode, environment, onConfigur
     }
     fetchFuturesRun(runId)
       .then((data) => {
+        if (!mountedRef.current) return;
         const r = data?.run;
         setRun(r || null);
         if (!r) return setBusy(false);
@@ -90,6 +104,7 @@ export default function FutureCard({ future, leagueCode, environment, onConfigur
         }
       })
       .catch((e) => {
+        if (!mountedRef.current) return;
         setError(e.message);
         setBusy(false);
       });

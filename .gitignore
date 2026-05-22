@@ -6,6 +6,7 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+logs/
 dist/
 coverage/
 
@@ -15,8 +16,13 @@ public/assets/
 # Local-only Claude/Codex settings
 .claude/settings.local.json
 
-# Throwaway operator scripts (one-off DB ops, probes, mainnet dumps)
+# Throwaway operator scripts (one-off DB ops, probes, mainnet dumps).
+# Pattern intentionally matches both `scripts/` (canonical home) and the
+# repo root, where ad-hoc probes sometimes land before being moved or
+# deleted. A bare `git add .` would otherwise stage them.
 scripts/tmp_*.mjs
+tmp_*.mjs
+tmp_*.json
 
 # iCloud / Finder duplicate pattern: "name 2.ext"
 **/* 2.*

@@ -11,3 +11,11 @@ README.md
 .env.*
 !.env.example
 public/assets
+tmp_*
+*.log
+logs
+bugs.md
+archive
+docs
+sql
+*.md

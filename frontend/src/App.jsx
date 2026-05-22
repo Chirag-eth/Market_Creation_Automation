@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { submarketGroups, ALL_SUBMARKET_IDS } from "./data.js";
+import { submarketGroups, ALL_SUBMARKET_IDS, getSubmarketGroupsForSport } from "./data.js";
 import { useFixtures } from "./hooks/useFixtures.js";
 import { useAuth } from "./hooks/useAuth.js";
 import {
@@ -246,7 +246,11 @@ export default function App() {
   const totalMarkets = selected.size * submarkets.size;
   const pendingJobCount = scheduledJobs.filter((j) => j.status === "pending").length;
   const selectedFixtures = fixtures.filter((f) => selected.has(f.id));
-  const selectedSubmarkets = submarketGroups
+  // Sport-aware: NBA/NFL ids (moneyline | totals | spreads) don't live in the
+  // soccer-default `submarketGroups` export. Using the wrong sport's catalog
+  // here silently drops `totals`/`spreads` from the publish payload, leaving
+  // operators thinking they published lines that were actually never sent.
+  const selectedSubmarkets = getSubmarketGroupsForSport(activeSport)
     .flatMap((g) => g.markets)
     .filter((m) => submarkets.has(m.id));
 

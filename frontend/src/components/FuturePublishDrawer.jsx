@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   fetchFutureTemplate,
   resolveFuturesCatalog,
@@ -40,6 +40,17 @@ export default function FuturePublishDrawer({
   const [runState, setRunState] = useState(null);
   const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState(null);
+
+  // See FutureCard for the same guard — recursive pollRun setTimeout chain
+  // must short-circuit after unmount so a 60s publish doesn't fire setState
+  // on a closed drawer.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [loadingTemplate, setLoadingTemplate] = useState(false);
 
   // Drawer owns its own selection state. Defaults to every active outcome on
@@ -158,6 +169,7 @@ export default function FuturePublishDrawer({
   }
 
   function pollRun(runId, attempt = 0) {
+    if (!mountedRef.current) return;
     if (attempt > 60) {
       setError("Run timed out — check /api/cms/futures-runs for status");
       setPublishing(false);
@@ -165,6 +177,7 @@ export default function FuturePublishDrawer({
     }
     fetchFuturesRun(runId)
       .then((data) => {
+        if (!mountedRef.current) return;
         const r = data?.run;
         setRunState(r);
         if (!r) {
@@ -180,6 +193,7 @@ export default function FuturePublishDrawer({
         }
       })
       .catch((e) => {
+        if (!mountedRef.current) return;
         setError(e.message);
         setPublishing(false);
       });

@@ -16,38 +16,64 @@ export default function FuturesPage({ activeEnv }) {
 
   const envCode = activeEnv?.code ?? null;
 
+  // Each fetch effect uses a local `cancelled` flag (matches the pattern in
+  // SchedulePanel) so late-landing responses from a prior env or league
+  // switch don't clobber the UI with stale data.
   useEffect(() => {
+    let cancelled = false;
     setLoadingLeagues(true);
     setLeagues([]);
     setActiveLeague(null);
     fetchLeagues()
       .then((list) => {
+        if (cancelled) return;
         setLeagues(list);
         if (list.length) setActiveLeague(list[0].code);
       })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoadingLeagues(false));
+      .catch((e) => {
+        if (!cancelled) setError(e.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingLeagues(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [envCode]);
 
   useEffect(() => {
     if (!activeLeague) return;
+    let cancelled = false;
     setLoadingFutures(true);
     setFutures([]);
     setError(null);
     // Always request readiness so each card can decide Publish vs Configure-only.
     fetchLeagueFutures(activeLeague, { withReadiness: true })
-      .then((payload) => setFutures(Array.isArray(payload.futures) ? payload.futures : []))
-      .catch((e) => setError(e.message))
-      .finally(() => setLoadingFutures(false));
+      .then((payload) => {
+        if (cancelled) return;
+        setFutures(Array.isArray(payload.futures) ? payload.futures : []);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingFutures(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [activeLeague]);
 
   // Cheap prefetch of OTHER leagues (no readiness) so tab switches feel snappy.
+  // Side-effect-only — prefetched payloads land in the API layer's cache, so
+  // the in-flight requests can safely complete after unmount; we just drop
+  // any per-fetch error reporting so a failing league doesn't surface here.
   useEffect(() => {
     if (!leagues.length || !activeLeague) return;
     const others = leagues.filter((l) => l.code !== activeLeague);
-    others.forEach((l) => {
+    for (const l of others) {
       prefetchLeagueFutures(l.code).catch(() => {});
-    });
+    }
   }, [leagues, activeLeague]);
 
   return (

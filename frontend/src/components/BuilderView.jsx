@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import MarketComposer from "./MarketComposer.jsx";
 import SchedulePanel from "./SchedulePanel.jsx";
 import SportRail from "./SportRail.jsx";
@@ -36,27 +36,44 @@ export default function BuilderView({
 
   const envCode = activeEnv?.code ?? null;
 
-  // Fetch leagues on env change; seed activeSport/activeLeague off the first
-  // entry so the rail mounts with something selected.
+  // Track the latest activeSport without re-running the env-switch effect when
+  // the user changes sport between env switches. Reading state through a ref
+  // keeps the effect's dependency list tight while avoiding stale closures.
+  const activeSportRef = useRef(activeSport);
   useEffect(() => {
+    activeSportRef.current = activeSport;
+  }, [activeSport]);
+
+  // Fetch leagues on env change; seed activeSport/activeLeague off the first
+  // entry so the rail mounts with something selected. A `cancelled` flag drops
+  // late-landing responses from prior env switches so the UI can't be set
+  // from a stale league list.
+  useEffect(() => {
+    let cancelled = false;
     setLoadingLeagues(true);
     setLeagues([]);
     setActiveLeague(null);
     fetchLeagues()
       .then((list) => {
+        if (cancelled) return;
         setLeagues(list);
         if (list.length) {
           const firstSport = list[0].sport || "soccer";
           setExpandedSports(new Set([firstSport]));
-          // Only fire onSportChange if the parent's activeSport doesn't already
-          // match — avoids clobbering a user-selected sport across env switches.
-          if (activeSport !== firstSport) onSportChange?.(firstSport);
+          // Read the current activeSport via ref to avoid the original
+          // closure freezing the value at first mount.
+          if (activeSportRef.current !== firstSport) onSportChange?.(firstSport);
           const firstLeague = list.find((l) => (l.sport || "soccer") === firstSport) || list[0];
           setActiveLeague(firstLeague.code);
         }
       })
       .catch(() => {})
-      .finally(() => setLoadingLeagues(false));
+      .finally(() => {
+        if (!cancelled) setLoadingLeagues(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [envCode]);
 
   // Sport metadata derived from the league list. Each entry carries the
