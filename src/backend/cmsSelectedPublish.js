@@ -221,9 +221,21 @@ export function inferSpreadSideFromParentPayload(
   if (marketTeamId && awayTeamId && marketTeamId === awayTeamId) {
     return "away";
   }
-  const marketName = normalizeForCompare(String(spreadMarket?.name || ""));
+
   const eventName = String(selectedFixture.event_name || fixturePayload?.name || "").trim();
   const [homeName, awayName] = splitEventName(eventName);
+
+  const marketTitle = String(spreadMarket?.name || "").trim();
+  const extractedTeamName = extractTeamNameFromSpreadTitle(marketTitle);
+
+  if (extractedTeamName && homeName && matchesTeamName(extractedTeamName, homeName)) {
+    return "home";
+  }
+  if (extractedTeamName && awayName && matchesTeamName(extractedTeamName, awayName)) {
+    return "away";
+  }
+
+  const marketName = normalizeForCompare(marketTitle);
   if (marketName && homeName && marketName.includes(normalizeForCompare(homeName))) {
     return "home";
   }
@@ -265,6 +277,19 @@ export function buildExistingPublishKeyFromRows(
     const teamId = String(groupRows.find((row) => row?.team_id)?.team_id || "").trim();
     if (teamId && homeTeamId && teamId === homeTeamId) return `spreads|${line}|home`;
     if (teamId && awayTeamId && teamId === awayTeamId) return `spreads|${line}|away`;
+
+    const marketName = String(head.market_name || "").trim();
+    const extractedTeamName = extractTeamNameFromSpreadTitle(marketName);
+    const [homeName, awayName] = splitEventName(
+      selectedFixture.event_name || fixtureRecord?.event_name || ""
+    );
+
+    if (extractedTeamName && homeName && matchesTeamName(extractedTeamName, homeName)) {
+      return `spreads|${line}|home`;
+    }
+    if (extractedTeamName && awayName && matchesTeamName(extractedTeamName, awayName)) {
+      return `spreads|${line}|away`;
+    }
   }
   return "";
 }
@@ -855,6 +880,26 @@ function groupRowsByParentMarketId(rows = []) {
     grouped.get(parentMarketId).push(row);
   }
   return grouped;
+}
+
+function extractTeamNameFromSpreadTitle(marketTitle) {
+  const title = String(marketTitle || "").trim();
+  if (!title) return "";
+  const match = title.match(/^(.+?)\s+[+-]\d+(?:\.\d+)?(?:\s|$)/);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+  return "";
+}
+
+function matchesTeamName(extractedName, fullTeamName) {
+  if (!extractedName || !fullTeamName) return false;
+  const normalizedExtracted = normalizeForCompare(extractedName);
+  const normalizedFull = normalizeForCompare(fullTeamName);
+  if (normalizedExtracted === normalizedFull) return true;
+  if (normalizedFull.includes(normalizedExtracted)) return true;
+  if (normalizedExtracted.includes(normalizedFull)) return true;
+  return false;
 }
 
 function normalizeObject(value) {
